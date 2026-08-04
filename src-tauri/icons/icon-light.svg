@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff6b6b"/>
+      <stop offset="50%" stop-color="#ff8e53"/>
+      <stop offset="100%" stop-color="#ffbe0b"/>
+    </linearGradient>
+    <linearGradient id="paw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#fff3e0"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  <!-- 圆角方形背景 -->
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg)" filter="url(#shadow)"/>
+  <!-- 主肉垫 -->
+  <ellipse cx="256" cy="340" rx="65" ry="50" fill="url(#paw)" opacity="0.95"/>
+  <!-- 左前趾 -->
+  <ellipse cx="190" cy="225" rx="30" ry="38" fill="url(#paw)" opacity="0.9" transform="rotate(-12 190 225)"/>
+  <!-- 左中趾 -->
+  <ellipse cx="242" cy="198" rx="28" ry="42" fill="url(#paw)" opacity="0.9" transform="rotate(-4 242 198)"/>
+  <!-- 右中趾 -->
+  <ellipse cx="295" cy="200" rx="28" ry="41" fill="url(#paw)" opacity="0.9" transform="rotate(4 295 200)"/>
+  <!-- 右前趾 -->
+  <ellipse cx="345" cy="230" rx="30" ry="37" fill="url(#paw)" opacity="0.9" transform="rotate(12 345 230)"/>
+  <!-- 高光 -->
+  <ellipse cx="235" cy="325" rx="20" ry="10" fill="#ff6b6b" opacity="0.2"/>
+</svg>

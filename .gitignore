@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust / Tauri 构建产物
+src-tauri/target/
+src-tauri/gen/schemas/
+# 编译调试日志
+src-tauri/*.txt
+template-info.md
+
+# 旧微信 Node 桥接（已弃用，方案改为纯 Rust iLink）
+wechat-bridge/
+
+# 开发/调试脚本（不发布）
+*.py
+*.bat
+scripts/
+cdp_clawdesk.py
+test_clawdesk.py
+*.ipynb
+
+# 本地数据与密钥
+*.db
+*.db-wal
+*.db-shm
+wechat_ilink.json
+.env
+.env.*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+

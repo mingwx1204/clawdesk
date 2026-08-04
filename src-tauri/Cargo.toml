@@ -1,0 +1,55 @@
+[package]
+name = "clawdesk"
+version = "0.2.2"
+description = "ClawDesk - AI 桌面秘书（永久记忆 / 智能体 / 微信 Bot）"
+authors = ["ClawDesk Team"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "clawdesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+parking_lot = "0.12"
+notify = "7"
+walkdir = "2"
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.8"
+base64 = "0.22"
+screenshots = "0.8"
+image = "0.24"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+axum = "0.8"
+qrcode = "0.14"
+windows = { version = "0.61", features = [
+  "Win32_Media_Speech",
+  "Win32_System_Com",
+  "Win32_System_Threading",
+  "Win32_Foundation",
+  "Win32_System_Com_StructuredStorage",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3

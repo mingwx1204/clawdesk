@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ClawDesk</string>
+    <string name="title_activity_main">ClawDesk</string>
+    <string name="package_name">com.clawdesk.app</string>
+    <string name="custom_url_scheme">com.clawdesk.app</string>
+</resources>

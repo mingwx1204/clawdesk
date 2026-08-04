@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="paw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e94560"/>
+      <stop offset="100%" stop-color="#ff6b6b"/>
+    </linearGradient>
+  </defs>
+  <!-- 背景圆 -->
+  <circle cx="256" cy="256" r="240" fill="url(#bg)" stroke="#e94560" stroke-width="4"/>
+  <!-- 主肉垫 -->
+  <ellipse cx="256" cy="320" rx="70" ry="55" fill="url(#paw)" opacity="0.95"/>
+  <!-- 左前趾 -->
+  <ellipse cx="195" cy="220" rx="33" ry="42" fill="url(#paw)" opacity="0.9" transform="rotate(-15 195 220)"/>
+  <!-- 左中趾 -->
+  <ellipse cx="245" cy="195" rx="30" ry="45" fill="url(#paw)" opacity="0.9" transform="rotate(-5 245 195)"/>
+  <!-- 右中趾 -->
+  <ellipse cx="295" cy="200" rx="30" ry="44" fill="url(#paw)" opacity="0.9" transform="rotate(5 295 200)"/>
+  <!-- 右前趾 -->
+  <ellipse cx="340" cy="230" rx="33" ry="40" fill="url(#paw)" opacity="0.9" transform="rotate(15 340 230)"/>
+  <!-- 高光 -->
+  <ellipse cx="240" cy="310" rx="25" ry="15" fill="white" opacity="0.15"/>
+  <ellipse cx="220" cy="210" rx="8" ry="12" fill="white" opacity="0.12"/>
+  <ellipse cx="275" cy="195" rx="7" ry="10" fill="white" opacity="0.12"/>
+  <ellipse cx="320" cy="215" rx="8" ry="11" fill="white" opacity="0.12"/>
+</svg>
