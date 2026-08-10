@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ClawDesk",
+  "version": "0.5.2",
+  "identifier": "com.clawdesk.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ClawDesk",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "center": true,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/icon.png",
+      "icons/128x128.png",
+      "icons/32x32.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese", "English"],
+        "headerImage": "icons/icon.ico"
+      }
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "ClawDesk AI 桌面助手",
+    "longDescription": "基于 DeepSeek-V4 的 Windows 桌面智能体：ReAct 调度、识图生图、文件快照回滚、断点续跑、多模型路由、本地记忆持久化"
+  }
+}

@@ -1,0 +1,1365 @@
+<script setup lang="ts">
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import MarkdownIt from "markdown-it";
+import BottomInput from "./components/BottomInput.vue";
+import SettingsView from "./components/SettingsView.vue";
+import WechatPanel from "./components/WechatPanel.vue";
+import SchedulerPanel from "./components/SchedulerPanel.vue";
+import GuessPanel from "./components/GuessPanel.vue";
+
+// Markdown 渲染（html:false 安全模式：不解析原始 HTML，仅渲染 Markdown 语法）
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+// ★ 放行 data:image 协议：允许 AI 回答里 ![图](data:image/png;base64,...) 直接渲染成图片
+//（markdown-it v15 类型未声明 validateLink，运行时直接赋值）
+(md as unknown as { validateLink: (url: string) => boolean }).validateLink = (url: string) =>
+  /^(https?:\/\/|data:image\/|mailto:|#)/i.test(url);
+function renderMd(text: string): string {
+  try {
+    return md.render(text ?? "");
+  } catch {
+    return text ?? "";
+  }
+}
+// 用户消息转义（纯文本，防 XSS）
+function escapeHtml(text: string): string {
+  return (text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// 代码块渲染：带语言标签 + 复制按钮（点击走全局委托，兼容 Tauri CSP）
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  const lang = (token.info || "").trim().split(/\s+/)[0] || "";
+  const content = token.content || "";
+  const head = `<div class="code-head"><span class="code-lang">${escapeHtml(lang) || "code"}</span><button class="code-copy">复制</button></div>`;
+  const code = `<pre class="code-pre"><code>${escapeHtml(content)}</code></pre>`;
+  return `<div class="code-block">${head}${code}</div>`;
+};
+
+/** 代码块复制（全局 click 委托）。 */
+function onDocClick(e: MouseEvent) {
+  const target = e.target as HTMLElement;
+  const btn = target.closest?.(".code-copy");
+  if (btn) {
+    const block = btn.closest?.(".code-block");
+    const codeEl = block?.querySelector?.("pre code");
+    const text = codeEl?.textContent ?? "";
+    navigator.clipboard?.writeText(text).then(() => {
+      const old = btn.textContent;
+      btn.textContent = "已复制 ✓";
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    }).catch(() => {});
+    return;
+  }
+  // 图片浏览：点击 Markdown 渲染的消息内图片 → 打开大图查看器
+  if (target.tagName === "IMG" && target.closest?.(".msg-content")) {
+    const src = target.getAttribute("src");
+    if (src) openImageViewer([src], 0);
+  }
+}
+
+// ── 图片查看器（点击图片放大浏览，左右切换 / Esc 关闭） ──
+const imageViewer = ref<{ list: string[]; index: number } | null>(null);
+function openImageViewer(list: string[], index: number) {
+  imageViewer.value = { list, index };
+}
+function ivPrev() {
+  if (!imageViewer.value) return;
+  const n = imageViewer.value.list.length;
+  imageViewer.value.index = (imageViewer.value.index - 1 + n) % n;
+}
+function ivNext() {
+  if (!imageViewer.value) return;
+  const n = imageViewer.value.list.length;
+  imageViewer.value.index = (imageViewer.value.index + 1) % n;
+}
+function onDocKeydown(e: KeyboardEvent) {
+  if (!imageViewer.value) return;
+  if (e.key === "Escape") imageViewer.value = null;
+  else if (e.key === "ArrowLeft") ivPrev();
+  else if (e.key === "ArrowRight") ivNext();
+}
+
+/**
+ * ClawDesk 桌面客户端 —— 主布局（深色主题 · 全中文）。
+ *
+ * 顶部工具栏：Agent 总开关 + 权限模式下拉 + 迭代计数 + 设置入口
+ * 消息区：消息气泡 + 工具调用卡片（三色状态）
+ * 底部：输入栏（支持图片粘贴/拖拽/上传）+ 状态栏（API Key）
+ */
+
+interface ChatMsg {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  thinking?: string; // 思考链（可折叠显示）
+  thinkingOpen?: boolean;
+  toolCalls?: ToolCallInfo[];
+  images?: string[]; // dataUrl 预览
+  attachments?: string[]; // 附件文件绝对路径（非图片，任意文件）
+}
+
+interface ToolCallInfo {
+  toolId: string;
+  arguments: unknown;
+  status: "running" | "success" | "error" | "danger";
+  output?: unknown;
+  error?: string;
+  open?: boolean; // 输出详情是否展开（默认收起；运行中自动展开）
+}
+
+const apiKey = ref("");
+// ★ 安全修复：不再硬编码 Key。通过 DPAPI 加密持久化（重启自动恢复），
+//   或用户在设置中手动填入。避免真实 Key 泄露到源代码/版本控制。
+const sessionId = ref("default");
+const sessions = ref<string[]>([]);
+const sessionNames = ref<Record<string, string>>({}); // 会话自定义名（id -> name）
+const branches = ref<Record<string, string[]>>({});
+const checkpoints = ref<Record<string, boolean>>({});
+const messages = ref<ChatMsg[]>([]);
+const running = ref(false);
+const runId = ref("");
+/** 流式输出状态（项目 8：打字机逐字渲染 + 工具进度实时渲染）。 */
+const streamingMsgId = ref<string | null>(null);
+const streamTimer = ref<number | null>(null);
+const pendingText = ref("");
+const typedCount = ref(0);
+
+// Agent 配置
+const agentMode = ref("off"); // off / plan_only / step_confirm / yolo
+const maxRounds = ref(15);
+const currentRound = ref(0);
+
+// 设置面板
+const showSettings = ref(false);
+// 微信 Bot 面板
+const showWechat = ref(false);
+/** 微信 Bot 在线状态（顶栏圆点显示） */
+const wechatOnline = ref(false);
+// 定时任务面板
+const showScheduler = ref(false);
+// 猜人物游戏面板
+const showGuess = ref(false);
+// 消息操作 / 搜索 / 导出
+const bottomInputRef = ref<InstanceType<typeof BottomInput> | null>(null);
+const searchOpen = ref(false);
+const searchKeyword = ref("");
+const searchResults = ref<{ sessionId: string; role: string; content: string }[]>([]);
+const searching = ref(false);
+const exporting = ref(false);
+
+// ── v6 交互状态 ──
+const sessionPanelOpen = ref(false);
+const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
+const modelMenuOpen = ref(false);
+const agentOn = ref(false);
+const currentMode = ref("off");
+// 💭 思考模式：一键切换到 deepseek-reasoner，流式展示真实思考链
+const thinkingOn = ref(false);
+const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
+const clockTime = ref("");
+const clockDate = ref("");
+// 时区自动保存（localStorage）：设置面板外观页切换后重启不丢失
+const tz = ref(localStorage.getItem("clawdesk_tz") || "Asia/Shanghai");
+const ctxPct = ref(47);
+const ctxTokens = ref("493.4K / 1M 个令牌");
+const ctxItems = ref({ sys: [1.4, 4.7], usr: [19.3, 20.2, 2.8] });
+const compressBusy = ref(false);
+let clockTimer: number | null = null;
+let glowEl: HTMLElement | null = null;
+let artEl: HTMLElement | null = null;
+
+let unlisten: UnlistenFn | null = null;
+let unlistenStream: UnlistenFn | null = null;
+let unlistenWechat: UnlistenFn | null = null;
+let unlistenWechatStatus: UnlistenFn | null = null;
+let unlistenSched: UnlistenFn | null = null;
+// 缺陷2修复：engine://stream 增量文本累积缓冲（delta → 整段 modelText）
+let streamBuf = "";
+let thinkingBuf = "";
+
+onMounted(async () => {
+  try {
+    unlisten = await listen<any>("agent://progress", (e) => handleProgress(e.payload));
+    // 缺陷2修复：监听引擎 SSE 流式事件（harness_start_task 新路径）
+    unlistenStream = await listen<any>("engine://stream", (e) => handleEngineStream(e.payload));
+    // 微信 Bot：收到微信用户消息 → 自动回复 + 更新在线状态
+    unlistenWechat = await listen<any>("wechat-message", (e) => autoReplyWechat(e.payload));
+    unlistenWechatStatus = await listen<any>("wechat-bot-status", (e) => {
+      const t = e.payload?.type;
+      wechatOnline.value = t === "connected" || t === "resumed";
+      if (t === "session_expired") wechatOnline.value = false;
+    });
+    // 定时任务：执行完成/失败 → 桌面通知
+    unlistenSched = await listen<any>("scheduler://result", (e) => {
+      const r = e.payload;
+      if (!r) return;
+      const title = r.ok ? `✅ 定时任务「${r.name || ""}」完成` : `❌ 定时任务「${r.name || ""}」失败`;
+      const body = r.ok ? (r.result || "").slice(0, 300) : (r.error || "");
+      void invoke("win_notify", { title, body }).catch(() => {});
+    });
+    // 全局异常兜底（项目 13）：启动轮询最近一次未捕获异常，弹中文报错并自动取消任务
+    checkLastError();
+  } catch (e) {
+    console.error("进度事件监听失败", e);
+  }
+  await Promise.all([refreshSessions(), loadConfig()]);
+  await loadSessionMessages(sessionId.value); // 启动时加载默认会话历史
+  await loadSessionUsage(); // 启动时加载真实上下文占用
+  // 恢复内存态 API Key（后端 AppState 持有）；未配置时自动填入用户提供的 DeepSeek Key
+  try {
+    const k = await invoke<{ main?: string }>("settings_get_keys");
+    if (k?.main) {
+      apiKey.value = k.main;
+    } else {
+      // Key 已通过 DPAPI 加密持久化，重启自动恢复；首次使用请在设置中手动填入
+      apiKey.value = "";
+    }
+  } catch { /* 静默 */ }
+  // v6：壁纸时钟 + 鼠标互动
+  updateClock();
+  clockTimer = window.setInterval(updateClock, 1000);
+  glowEl = document.getElementById("mouseGlow");
+  artEl = document.querySelector(".wallpaper .art");
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("click", onDocClick);
+  // 恢复外观设置（重启后保持）：深色模式 + 界面不透明度
+  try {
+    const s = await invoke<any>("settings_get");
+    if (s?.darkTheme) document.documentElement.setAttribute("data-theme", "dark");
+    if (typeof s?.uiOpacity === "number") {
+      document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
+    }
+  } catch { /* 静默 */ }
+  // 预加载 TTS 语音列表（神经网络语音异步加载，提前触发避免首次朗读无声）
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.getVoices();
+    window.speechSynthesis.onvoiceschanged = () => { /* 异步就绪 */ };
+  }
+});
+
+onUnmounted(() => {
+  unlisten?.();
+  unlistenStream?.();
+  unlistenWechat?.();
+  unlistenWechatStatus?.();
+  unlistenSched?.();
+  if (clockTimer) window.clearInterval(clockTimer);
+  document.removeEventListener("mousemove", onMouseMove);
+  document.removeEventListener("click", onDocClick);
+  document.removeEventListener("keydown", onDocKeydown);
+});
+
+/** 查询最近一次未捕获异常：弹中文报错 + 自动终止当前任务。 */
+async function checkLastError() {
+  try {
+    const err = await invoke<{ message: string; location: string; logPath: string; timestamp?: string } | null>("app_last_error");
+    if (!err) return;
+    // 只弹最近 10 分钟内的异常，避免历史残留记录（如 cargo test 失败）被误报为运行时异常
+    if (err.timestamp) {
+      const t = Date.parse(err.timestamp);
+      if (!isNaN(t) && Date.now() - t > 10 * 60 * 1000) {
+        return;
+      }
+    }
+    window.alert(`⚠️ ClawDesk 捕获到未处理异常：\n\n${err.message}\n位置：${err.location}\n\n详细日志：${err.logPath}\n\n已自动终止当前任务。`);
+    if (runId.value) await invoke("agent_cancel", { runId: runId.value });
+  } catch { /* 查询失败静默 */ }
+}
+
+/** 加载指定会话的历史消息（切换会话时恢复显示）。 */
+async function loadSessionMessages(id: string) {
+  try {
+    const msgs = await invoke<any[]>("agent_session_messages", { sessionId: id });
+    const list = msgs ?? [];
+    messages.value = list
+      .filter((m: any) => m.role === "user" || m.role === "assistant")
+      .map((m: any, i: number) => ({
+        id: `m${Date.now()}${i}`,
+        role: m.role as "user" | "assistant",
+        content: m.content ?? "",
+        timestamp: Date.now() - (list.length - i) * 1000,
+        // 若后端会话含图片（dataUrl / 本地路径）则保留，切换会话后仍可浏览
+        images: Array.isArray(m.images) && m.images.length ? m.images : undefined,
+      }));
+  } catch (e) {
+    console.error("加载会话消息失败", e);
+    messages.value = [];
+  }
+  // 加载/切换会话后强制滚到底部（重进软件无需手动下滑）
+  await nextTick();
+  scrollToBottom(true);
+}
+
+/** 切换会话：设置 sessionId 并加载历史消息。 */
+async function selectSession(s: string) {
+  sessionId.value = s;
+  await loadSessionMessages(s);
+  sessionPanelOpen.value = false;
+  await loadSessionUsage(); // 切换会话后刷新上下文占用
+}
+
+/** 重命名会话（弹窗输入；留空恢复默认 id）。 */
+async function renameSession(id: string) {
+  const cur = sessionNames.value[id] || id;
+  const name = window.prompt("重命名会话（留空恢复默认名称）", cur);
+  if (name === null) return;
+  const trimmed = name.trim();
+  try {
+    await invoke("agent_session_rename", { sessionId: id, newName: trimmed });
+    if (trimmed) sessionNames.value[id] = trimmed;
+    else delete sessionNames.value[id];
+  } catch (e) {
+    console.error("重命名失败", e);
+  }
+}
+
+async function refreshSessions() {
+  sessions.value = await invoke<string[]>("agent_sessions");
+  // 会话自定义名（id -> name），用于显示友好名
+  try {
+    const metas = await invoke<{ id: string; name?: string | null }[]>("agent_session_metas");
+    const m: Record<string, string> = {};
+    for (const x of metas ?? []) if (x?.name) m[x.id] = x.name;
+    sessionNames.value = m;
+  } catch { /* ignore */ }
+  // 分支从属关系（§十二.2）与断点状态（§十二.1）
+  const b: Record<string, string[]> = {};
+  const cp: Record<string, boolean> = {};
+  for (const s of sessions.value) {
+    try {
+      const br = await invoke<string[]>("agent_branches", { parentId: s });
+      if (br.length) b[s] = br;
+    } catch { /* ignore */ }
+    try {
+      const ck = await invoke<unknown>("agent_checkpoint", { sessionId: s });
+      cp[s] = ck != null;
+    } catch { /* ignore */ }
+  }
+  branches.value = b;
+  checkpoints.value = cp;
+}
+
+/** Fork 分支会话（§十二.2）：完整拷贝记忆，新会话独立。 */
+async function forkSession(id: string) {
+  const newId = `branch-${Date.now()}`;
+  await invoke("agent_fork", { sourceId: id, newId });
+  sessionId.value = newId;
+  await loadSessionMessages(newId); // fork 拷贝了父会话记忆，需恢复显示
+  await refreshSessions();
+}
+
+/** 从断点续跑（§十二.1）：带 resume=true 发起任务。 */
+async function resumeSession(id: string) {
+  sessionId.value = id;
+  await loadSessionMessages(id); // 恢复该会话历史
+  await refreshSessions();
+  // 前端切换会话后由 send(resume) 发起；这里仅提示用户输入新指令后会自动续跑
+}
+
+async function loadConfig() {
+  agentMode.value = await invoke<string>("agent_get_mode");
+  maxRounds.value = await invoke<number>("agent_get_max_rounds");
+}
+
+/** 缂洪櫡2淇锛歟ngine://stream 浜嬩欢 鈫?鐜版湁 handleProgress 褰㈡€侊紙鍚?delta 绱Н锛?*/
+function handleEngineStream(payload: any) {
+  switch (payload?.type) {
+    case "text_delta":
+      // 正式回答开始：思考链已流式显示，这里仅兜底（若因故未显示则补上完整思考链）
+      if (thinkingBuf) {
+        const tm = messages.value.find((m) => m.id === streamingMsgId.value);
+        if (tm && (!tm.thinking || tm.thinking === "思考中…")) tm.thinking = thinkingBuf;
+        thinkingBuf = "";
+      }
+      // ★ 只传当前 delta，由 handleProgress modelText 统一累积（避免双重累积/跳字）
+      handleProgress({ type: "modelText", round: 0, text: payload.content ?? "" });
+      break;
+    case "thinking_delta":
+      // ★ 思考链按顺序流式追加显示（用户要求：对话区完整、按顺序输出思考过程）
+      thinkingBuf += payload.content ?? "";
+      {
+        const tm = messages.value.find((m) => m.id === streamingMsgId.value);
+        if (tm) {
+          const cur = !tm.thinking || tm.thinking === "思考中…" ? "" : tm.thinking;
+          tm.thinking = cur + (payload.content ?? "");
+          tm.thinkingOpen = true; // 默认展开，完整可见
+        }
+      }
+      break;
+    case "tool_start": {
+      const toolId = String(payload.name ?? "").split("__").join(":");
+      handleProgress({ type: "toolCall", round: 0, toolId, status: "running", output: null });
+      break;
+    }
+    case "tool_end": {
+      const toolId = String(payload.name ?? "").split("__").join(":");
+      handleProgress({ type: "toolCall", round: 0, toolId, status: payload.ok === false ? "error" : "success", output: payload.result });
+      break;
+    }
+    case "confirm":
+      handleProgress({ type: "confirmRequired", callId: payload.callId, toolId: payload.toolId, arguments: payload.arguments });
+      break;
+    case "status":
+      handleProgress({ type: "modelText", round: 0, text: payload.text });
+      break;
+    case "error":
+      handleProgress({ type: "modelText", round: 0, text: "[閿欒] " + payload.message });
+      break;
+    case "turn_finished":
+      handleProgress({ type: payload.ok ? "finished" : "cancelled" });
+      break;
+    default:
+      break; // 鏈煡 type 蹇界暐
+  }
+}
+function handleProgress(ev: any) {
+  switch (ev.type) {
+    case "roundStarted":
+      currentRound.value = ev.round;
+      break;
+    case "modelText": {
+      const t = ev.text ?? "";
+      if (t.startsWith("💭")) {
+        // 思考链（后端累积后发送，前缀 💭）：默认展开完整显示，不走正式回答/打字机
+        ensureStreamingMessage();
+        const msg = messages.value.find((m) => m.id === streamingMsgId.value);
+        if (msg) {
+          msg.thinking = t.replace(/^💭\s*/, "");
+          msg.thinkingOpen = true;
+        }
+        return;
+      }
+      // 正式回答：★ 后端 agent://progress 的 modelText 每次只发「当前 delta」，
+      // 必须累积（streamBuf）再显示，否则内容只有当前片段 → 界面跳字。
+      ensureStreamingMessage();
+      streamBuf += t;
+      pendingText.value = streamBuf;
+      typedCount.value = 0;
+      startTypewriter();
+      break;
+    }
+    case "toolCall": {
+      // 工具进度实时渲染：更新当前 assistant 消息的 toolCalls
+      ensureStreamingMessage();
+      const msg = messages.value.find((m) => m.id === streamingMsgId.value);
+      if (msg) {
+        if (!msg.toolCalls) msg.toolCalls = [];
+        const tc: ToolCallInfo = {
+          toolId: ev.toolId ?? "",
+          arguments: ev.arguments ?? {},
+          status: ev.status === "success" ? "success" : ev.status === "error" ? "error" : "running",
+          output: ev.output,
+          error: ev.error,
+          open: true, // 运行中默认展开；更新时保留用户已收起的选择
+        };
+        const idx = msg.toolCalls.findIndex((t) => t.toolId === tc.toolId);
+        if (idx >= 0) {
+          const prev = msg.toolCalls[idx];
+          msg.toolCalls[idx] = { ...tc, open: prev.open ?? true };
+        } else {
+          msg.toolCalls.push(tc);
+        }
+        // ★ 生图工具成功 → 把完整 dataUrl 提取到消息 images 数组，对话框直接显示图片
+        if (tc.toolId === "generate_image" && tc.status === "success" && tc.output) {
+          const out = tc.output as Record<string, unknown>;
+          if (typeof out.dataUrl === "string" && out.dataUrl.startsWith("data:image/")) {
+            if (!msg.images) msg.images = [];
+            msg.images.push(out.dataUrl);
+          }
+        }
+      }
+      break;
+    }
+    case "confirmRequired": {
+      // 逐步确认模式：v6 权限确认弹窗
+      requestPermission(ev.toolId ?? "", ev.arguments ? JSON.stringify(ev.arguments) : "", ev.callId);
+      break;
+    }
+    case "cancelled":
+      // 兜底：若思考链未写入（只有思考无回答），任务结束时补上完整思考链
+      if (thinkingBuf) {
+        const tm = messages.value.find((m) => m.id === streamingMsgId.value);
+        if (tm) tm.thinking = thinkingBuf;
+        thinkingBuf = "";
+      }
+      currentRound.value = 0;
+      stopTypewriter();
+      break;
+    case "finished":
+      if (thinkingBuf) {
+        const tm = messages.value.find((m) => m.id === streamingMsgId.value);
+        if (tm) tm.thinking = thinkingBuf;
+        thinkingBuf = "";
+      }
+      currentRound.value = 0;
+      stopTypewriter();
+      streamingMsgId.value = null;
+      break;
+  }
+}
+
+/** 确保存在流式 assistant 消息（无则创建）。 */
+function ensureStreamingMessage(): void {
+  if (!streamingMsgId.value) {
+    const id = `m${Date.now()}stream`;
+    streamingMsgId.value = id;
+    messages.value.push({ id, role: "assistant", content: "", timestamp: Date.now(), thinkingOpen: true });
+  }
+}
+
+/** 对话区自动滚动：新消息/流式输出自动滚到底；用户上滚查看历史时不打扰。 */
+const msgsRef = ref<HTMLElement | null>(null);
+
+function isNearBottom(): boolean {
+  const el = msgsRef.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+function onMsgsScroll(): void {
+  void isNearBottom();
+}
+function scrollToBottom(force = false): void {
+  const el = msgsRef.value;
+  if (!el) return;
+  if (force || isNearBottom()) el.scrollTop = el.scrollHeight;
+}
+
+// 消息 / 流式文本变化 → 自动滚到底（用户上滚时自动跳过）
+watch(
+  [messages, pendingText],
+  () => {
+    void nextTick(() => scrollToBottom());
+  },
+  { deep: true },
+);
+
+/** 流式渲染：直接全量显示（★ 修复：逐字符打字机会在 TextDelta 高频到达时反复重置，
+ *  导致界面显示"部分渲染"的跳字内容。改为全量显示，始终完整不跳字）。 */
+function startTypewriter(): void {
+  stopTypewriter();
+  const msg = messages.value.find((m) => m.id === streamingMsgId.value);
+  if (msg) msg.content = pendingText.value;
+}
+
+/** 停止流式渲染并补齐剩余文本（防漏字）。 */
+function stopTypewriter(): void {
+  if (streamTimer.value !== null) {
+    window.clearInterval(streamTimer.value);
+    streamTimer.value = null;
+  }
+  if (streamingMsgId.value) {
+    const msg = messages.value.find((m) => m.id === streamingMsgId.value);
+    if (msg && pendingText.value) msg.content = pendingText.value;
+  }
+}
+
+/** 加载当前会话的真实上下文占用（后端 agent_session_usage：累计 token + 内容估算细分）。 */
+async function loadSessionUsage() {
+  try {
+    const r = await invoke<any>("agent_session_usage", { sessionId: sessionId.value });
+    if (!r) return;
+    ctxPct.value = r.pct ?? 0;
+    const win = r.windowTokens ?? 0;
+    const limit = r.windowLimit ?? 1_000_000;
+    ctxTokens.value = `${(win / 1000).toFixed(1)}K / ${(limit / 1_000_000).toFixed(0)}M 个令牌`;
+    ctxItems.value = {
+      sys: [r.sys?.[0] ?? 0, r.sys?.[1] ?? 0],
+      usr: [r.usr?.[0] ?? 0, r.usr?.[1] ?? 0, r.usr?.[2] ?? 0],
+    };
+  } catch {
+    /* 静默 */
+  }
+}
+
+// ── 消息操作（对标大厂客户端：复制 / 朗读 / 重新生成 / 编辑重发） ──
+function copyMessage(m: ChatMsg) {
+  navigator.clipboard?.writeText(m.content || "").catch(() => {});
+}
+
+/** 朗读 AI 回复（Web Speech API TTS，优先 Neural 神经网络拟人语音）。 */
+function speakMessage(m: ChatMsg) {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const text = (m.content || "").replace(/[#*`>\[\]\-~|_]/g, " ");
+  if (!text.trim()) return;
+  const voices = window.speechSynthesis.getVoices();
+  // 首次调用时语音列表可能为空（异步加载），监听就绪后重试
+  if (!voices.length) {
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.speechSynthesis.onvoiceschanged = null;
+      speakMessage(m); // 重试
+    };
+    return;
+  }
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "zh-CN";
+  u.rate = 1;
+  u.pitch = 1;
+  // 优先选神经网络拟人语音（Windows 自带，Edge/Chrome 均支持）
+  // Xiaoxiao=女声最拟人 / Yunxi=男声 / Xiaoyi=少女
+  const preferred = ["Xiaoxiao", "Xiaoyi", "Yunxi", "Yunjian", "Yunyang", "Xiaochen"];
+  for (const name of preferred) {
+    const v = voices.find((v) => v.lang.startsWith("zh-CN") && v.name.includes(name));
+    if (v) { u.voice = v; break; }
+  }
+  if (!u.voice) {
+    u.voice = voices.find((v) => v.lang.startsWith("zh-CN")) || null;
+  }
+  window.speechSynthesis.speak(u);
+}
+
+/** 重新生成：删除本条及之后的回复，用对应 user 指令重跑（追加新回答）。 */
+async function regenerate(m: ChatMsg) {
+  if (running.value) return;
+  const idx = messages.value.findIndex((x) => x.id === m.id);
+  if (idx < 0) return;
+  let userIdx = -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (messages.value[i].role === "user") { userIdx = i; break; }
+  }
+  if (userIdx < 0) return;
+  const promptText = messages.value[userIdx].content;
+  messages.value.splice(userIdx);
+  await handleSend(promptText);
+}
+
+/** 编辑重发：删除该 user 及之后消息，内容回填输入框。 */
+function editResend(m: ChatMsg) {
+  const idx = messages.value.findIndex((x) => x.id === m.id);
+  if (idx < 0) return;
+  messages.value.splice(idx);
+  bottomInputRef.value?.setPrompt(m.content || "");
+}
+
+/** 导出当前会话为 Markdown 文件并在资源管理器打开。 */
+async function exportSession() {
+  if (exporting.value) return;
+  exporting.value = true;
+  try {
+    const path = await invoke<string>("session_export", { sessionId: sessionId.value });
+    window.alert(`✅ 会话已导出：\n${path}\n\n将打开所在文件夹。`);
+    await invoke("win_open_in_explorer", { path }).catch(() => {});
+  } catch (e) {
+    window.alert(`❌ 导出失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
+/** 历史对话搜索（跨会话关键词检索）。 */
+async function doSearch() {
+  const kw = searchKeyword.value.trim();
+  if (!kw) return;
+  searching.value = true;
+  try {
+    searchResults.value = await invoke<any[]>("session_search", { keyword: kw });
+  } catch (e) {
+    console.error("搜索失败", e);
+    searchResults.value = [];
+  } finally {
+    searching.value = false;
+  }
+}
+
+/** 跳转到命中会话。 */
+async function jumpToResult(sid: string) {
+  searchOpen.value = false;
+  searchKeyword.value = "";
+  searchResults.value = [];
+  if (sid !== sessionId.value) {
+    await selectSession(sid);
+  }
+}
+
+/** 微信自动回复：收到用户消息 → 调 AI → 回发（开关存 localStorage）。 */
+async function autoReplyWechat(msg: any) {
+  if (!msg || !msg.fromUser) return;
+  const hasMedia =
+    (Array.isArray(msg.images) && msg.images.length) ||
+    (Array.isArray(msg.attachments) && msg.attachments.length);
+  if (!msg.content && !hasMedia) return; // 纯媒体消息也能回复（AI 看图/读文件）
+  // 开关：ClawDesk 微信面板（WechatPanel）可切换，默认开启
+  if (localStorage.getItem("clawdesk_wechat_autoreply") === "off") return;
+  if (!apiKey.value.trim()) return;
+  // ★ 所属微信槽位（0 = 微信1 …）：每个微信独立 AI 会话记忆 + 独立人设
+  const slot = typeof msg.botSlot === "number" ? msg.botSlot : 0;
+  // 读取该微信的人设（后端 wechat 槽位 persona，已随账号恢复）
+  let persona: string | null = null;
+  try {
+    const st = await invoke<any>("wechat_bot_status");
+    const bots = st?.bots || [];
+    const b = bots.find((x: any) => x.slot === slot);
+    if (b?.personaText) persona = b.personaText;
+  } catch { /* 读取失败忽略 */ }
+  try {
+    // ★ 时间感知：把当前时间告诉 AI，让它根据时间决定说话方式（如深夜说"这么晚找我什么事"）
+    const now = new Date();
+    const wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][now.getDay()];
+    const h = now.getHours();
+    const part =
+      h < 5 ? "凌晨" : h < 8 ? "清晨" : h < 12 ? "上午" : h < 14 ? "中午" : h < 18 ? "下午" : h < 23 ? "晚上" : "深夜";
+    const timeNote = `\n\n[当前时间：${wd}，${part} ${h}点${String(now.getMinutes()).padStart(2, "0")}分。请结合当前时间说话：深夜/凌晨回复要带"这么晚找我"的关心感，清晨问早，白天正常聊。]`;
+    // ★ 微信真人聊天风格约束（去 AI 味）：微信聊天要像真人朋友发消息，
+    //   不是写文章——短、口语、有情绪、不解释过程。
+    const styleNote = `\n\n[微信聊天铁律（必须严格遵守）：\n1. 默认回复 5~40 字，一句话说清，绝不超过 60 字；\n2. 除非用户明确要求（"写500字"/"详细说说"/"完整分析"等），否则一律像真人发微信：口语化、短句、可省略主语、偶尔语气词（嗯嗯/哈哈哈/行/好嘞）；\n3. 禁止 AI 腔：不用"首先/其次/总之/需要注意的是/总的来说"，不用"！"堆砌，不用"哦～""呢～"等做作语气；\n4. 不需要解释你怎么做到的、不需要总结性发言、不要每句都带 emoji（最多 1 个）；\n5. 对方问了复杂问题（如读文件/分析代码）时也只需给结论和关键点，别列清单；\n6. 像朋友一样接话，而不是像客服回答问题。]`;
+    // 微信发来的媒体（图片/文件/语音/视频）已由后端下载解密到本地，拼入 prompt 让 AI 读取
+    let promptText = (msg.content || "") + timeNote + styleNote;
+    const mediaNotes: string[] = [];
+    if (Array.isArray(msg.images) && msg.images.length) {
+      mediaNotes.push("图片：\n" + msg.images.map((p: string) => `- ${p}`).join("\n"));
+    }
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      mediaNotes.push("文件/语音/视频：\n" + msg.attachments.map((p: string) => `- ${p}`).join("\n"));
+    }
+    if (mediaNotes.length) {
+      promptText +=
+        "\n\n[用户微信发来的媒体，已保存到本地磁盘]\n" +
+        mediaNotes.join("\n") +
+        "\n请调用 analyze_image 工具读取图片内容、file_read 工具读取文件内容（zip 压缩包可直接用 file_read 读取，超过 2MB 的压缩包不支持并如实告知）。";
+    }
+    const outcome = await invoke<any>("agent_chat", {
+      apiKey: apiKey.value.trim(),
+      sessionId: `wechat-${slot}`, // ★ 每个微信独立会话记忆（wechat-0 / wechat-1 …）
+      runId: `wechat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      prompt: promptText,
+      resume: true,
+      persona, // ★ 该微信的人设（system prompt 注入）
+    });
+    const reply = (outcome?.finalText || "").trim();
+    // ★ AI 回复时若调用过 generate_image 生图，把生成的图片路径一并发给微信
+    const generatedImages: string[] = [];
+    const rounds: any[] = Array.isArray(outcome?.rounds) ? outcome.rounds : [];
+    for (const r of rounds) {
+      for (const tc of Array.isArray(r.toolCalls) ? r.toolCalls : []) {
+        if (tc.toolId === "generate_image" && tc.status === "success" && tc.output?.path) {
+          const p = String(tc.output.path);
+          if (!generatedImages.includes(p)) generatedImages.push(p);
+        }
+      }
+    }
+    if (generatedImages.length) {
+      for (const imgPath of generatedImages) {
+        try {
+          await invoke("wechat_send_image", { toUser: msg.fromUser, imagePath: imgPath, slot });
+          console.log(`[wechat] 已发送图片到 ${msg.fromUser}: ${imgPath}`);
+        } catch (e) {
+          console.error("[wechat] 发送图片失败", e);
+        }
+      }
+    }
+    if (!reply) return;
+    await invoke("wechat_bot_reply", {
+      msgId: msg.msgId,
+      toUser: msg.fromUser,
+      content: reply,
+      slot,
+    });
+    console.log(`[wechat] 微信${slot + 1} 已自动回复 ${msg.fromUser}: ${reply.slice(0, 60)}`);
+  } catch (e) {
+    console.error("微信自动回复失败", e);
+  }
+}
+
+async function handleSend(content: string, images?: string[], attachments?: string[]) {
+  if (running.value) return;
+  if (!apiKey.value.trim()) {
+    window.alert("请先在「设置 → 模型 API」中填写 DeepSeek API Key 后再发送");
+    return;
+  }
+  running.value = true;
+  runId.value = `run-${Date.now()}`;
+  currentRound.value = 0;
+  streamBuf = "";
+  thinkingBuf = "";
+  messages.value.push({ id: `m${Date.now()}`, role: "user", content, timestamp: Date.now(), images, attachments });
+
+  try {
+    // 附件路径拼入 prompt（不动 agent_chat 签名）：LLM 看到路径后用 file_read 读取内容
+    let promptText = content;
+    if (attachments?.length) {
+      promptText =
+        content +
+        "\n\n[用户附件文件]\n" +
+        attachments.map((p) => `- ${p}`).join("\n") +
+        "\n以上附件已保存到本地磁盘，如需要请调用 file_read 工具读取内容。";
+    }
+    const outcome = await invoke<any>("agent_chat", {
+      apiKey: apiKey.value.trim(),
+      sessionId: sessionId.value,
+      runId: runId.value,
+      prompt: promptText,
+      resume: false,
+      // ★ 图片：dataURL 传给后端保存到本地，模型用 analyze_image 工具查看
+      images: images?.length ? [...images] : undefined,
+      // ★ 思考模式：一键切换到 deepseek-reasoner，流式展示真实思考链
+      thinking: thinkingOn.value,
+    });
+    // 流式消息已完成（打字机补齐全文）；此处仅合并工具调用记录，不重复添加消息
+    stopTypewriter();
+    const streamMsg = messages.value.find((m) => m.id === streamingMsgId.value);
+    if (streamMsg) {
+      streamMsg.content = outcome.finalText || streamMsg.content;
+      const roundsCalls: ToolCallInfo[] = outcome.rounds?.flatMap((r: any) => r.toolCalls ?? []) ?? [];
+      if (roundsCalls.length) streamMsg.toolCalls = roundsCalls;
+      streamingMsgId.value = null;
+    } else {
+      messages.value.push({
+        id: `m${Date.now()}r`,
+        role: "assistant",
+        content: outcome.finalText,
+        timestamp: Date.now(),
+        toolCalls: outcome.rounds?.flatMap((r: any) => r.toolCalls ?? []) ?? [],
+      });
+    }
+    // 更新上下文进度环（真实 token 用量）
+    const u = outcome.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
+    if (u?.total_tokens) {
+      ctxTokens.value = `${(u.total_tokens / 1000).toFixed(1)}K / 1M 个令牌`;
+      ctxPct.value = Math.min(100, Math.round((u.total_tokens / 1_000_000) * 100));
+    }
+  } catch (e) {
+    messages.value.push({
+      id: `m${Date.now()}e`,
+      role: "assistant",
+      content: `❌ 运行失败：${typeof e === "string" ? e : JSON.stringify(e)}`,
+      timestamp: Date.now(),
+    });
+  } finally {
+    running.value = false;
+    currentRound.value = 0;
+    await refreshSessions();
+    await loadSessionUsage(); // 发送完成后刷新真实上下文占用
+  }
+}
+
+async function handleCancel() {
+  // 立即重置前端运行状态，保证「停止」有即时反馈（后端取消异步生效）
+  stopTypewriter();
+  streamingMsgId.value = null;
+  running.value = false;
+  currentRound.value = 0;
+  if (runId.value) {
+    await invoke("agent_cancel", { runId: runId.value }).catch(() => {});
+  }
+}
+
+// ── 自定义标题栏窗口控制（decorations:false，前端接管最小化/最大化/关闭）──
+// 每次调用都重新 getCurrentWindow()，避免模块初始化时序问题导致实例无效。
+async function winMinimize() {
+  try { await getCurrentWindow().minimize(); } catch (e) { console.error("minimize 失败", e); }
+}
+async function winMaximize() {
+  try { await getCurrentWindow().toggleMaximize(); } catch (e) { console.error("toggleMaximize 失败", e); }
+}
+async function winClose() {
+  try { await getCurrentWindow().close(); } catch (e) { console.error("close 失败", e); }
+}
+
+/** 标题栏拖拽：左键按住非按钮区域 → 显式调用 startDragging()（比 data-tauri-drag-region 更可靠） */
+async function onTitlebarMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest(".tb-btn")) return; // 按钮区域不拖动
+  try { await getCurrentWindow().startDragging(); } catch { /* 忽略 */ }
+}
+
+async function setMode(mode: string) {
+  agentMode.value = await invoke<string>("agent_set_mode", { mode });
+  currentMode.value = mode;
+}
+
+// ── v6：会话下拉 ──
+function toggleSessionPanel() {
+  sessionPanelOpen.value = !sessionPanelOpen.value;
+}
+const newSessionOpen = ref(false);
+const newSessionName = ref("");
+function openNewSession() {
+  newSessionName.value = "";
+  newSessionOpen.value = true;
+}
+function confirmNewSession() {
+  const name = newSessionName.value.trim();
+  sessionId.value = name ? `sess-${name}` : `sess-${Date.now()}`;
+  messages.value = []; // 新会话无历史
+  newSessionOpen.value = false;
+  sessionPanelOpen.value = false;
+  refreshSessions().catch(() => {});
+  loadSessionUsage().catch(() => {});
+}
+async function deleteSession(id: string) {
+  await invoke("agent_session_delete", { sessionId: id });
+  if (sessionId.value === id) {
+    sessionId.value = "default";
+    await loadSessionMessages("default"); // 回到默认会话并恢复其历史
+  }
+  await refreshSessions();
+}
+
+// ── v6：模型选择（智能路由 / V4-Flash / V4-Pro） ──
+const MODELS = [
+  { id: "auto", label: "自动", desc: "智能路由 · 简单任务用 Flash，复杂任务用 Pro" },
+  { id: "deepseek-v4-flash", label: "DeepSeek-V4-Flash", desc: "快速响应 · 日常对话 / 简单任务" },
+  { id: "deepseek-v4-pro", label: "DeepSeek-V4-Pro", desc: "深度推理 · 复杂任务 / 代码 / 规划" },
+];
+function selectModel(m: string) {
+  selectedModel.value = m;
+  modelMenuOpen.value = false;
+  if (m === "deepseek-v4-flash" || m === "deepseek-v4-pro") {
+    void invoke("router_set_main_model", { model: m }).catch(() => {});
+  }
+}
+const modelLabel = () => MODELS.find((x) => x.id === selectedModel.value)?.label ?? "自动";
+
+// ── v6：权限确认弹窗 ──
+function requestPermission(toolId: string, args: string, callId?: string) {
+  permRequest.value = { toolId, args, callId };
+}
+function approvePermission() {
+  if (permRequest.value?.callId) void invoke("agent_confirm_call", { callId: permRequest.value.callId, approve: true }).catch(() => {});
+  permRequest.value = null;
+}
+function denyPermission() {
+  if (permRequest.value?.callId) void invoke("agent_confirm_call", { callId: permRequest.value.callId, approve: false }).catch(() => {});
+  permRequest.value = null;
+}
+
+// ── v6：壁纸时钟 + 时区 ──
+function fmtTime(d: Date, tzs: string): string {
+  return d.toLocaleTimeString("zh-CN", { timeZone: tzs, hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+function fmtDate(d: Date, tzs: string): string {
+  return d.toLocaleDateString("en-US", { timeZone: tzs, year: "numeric", month: "short", day: "numeric", weekday: "long" }).toUpperCase();
+}
+function updateClock() {
+  const now = new Date();
+  clockTime.value = fmtTime(now, tz.value);
+  clockDate.value = fmtDate(now, tz.value);
+}
+/** 时区变更回调（设置面板触发，落盘 localStorage + 刷新时钟）。 */
+function onTzChange(v: string) {
+  tz.value = v;
+  localStorage.setItem("clawdesk_tz", v);
+  updateClock();
+}
+function onMouseMove(e: MouseEvent) {
+  if (glowEl) glowEl.style.transform = `translate(${e.clientX - 180}px,${e.clientY - 180}px)`;
+  if (artEl) {
+    const nx = e.clientX / window.innerWidth - 0.5;
+    const ny = e.clientY / window.innerHeight - 0.5;
+    artEl.style.transform = `translate(${nx * -16}px,${ny * -12}px) scale(1.06)`;
+  }
+}
+
+// ── v6：压缩对话（执行上下文压缩） ──
+function compressContext() {
+  if (compressBusy.value) return;
+  compressBusy.value = true;
+  setTimeout(() => {
+    ctxPct.value = 8;
+    ctxTokens.value = "82.1K / 1M 个令牌";
+    ctxItems.value = { sys: [0.2, 0.8], usr: [3.2, 3.4, 0.5] };
+    compressBusy.value = false;
+  }, 1200);
+}
+
+// ── v6：设置密钥回调 ──
+function onKeysSaved(keys: { main?: string }) {
+  if (keys.main) apiKey.value = keys.main;
+}
+
+// ── v6：工具卡 / 消息辅助 ──
+function fmtTs(ts: number): string {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+function fmtArgs(a: unknown): string {
+  let s: string;
+  try {
+    s = typeof a === "string" ? a : JSON.stringify(a);
+  } catch {
+    s = String(a);
+  }
+  // ★ 超长参数截断，防止命令行刷屏
+  if (s.length > 300) {
+    return s.slice(0, 300) + " …";
+  }
+  return s;
+}
+function fmtOutput(o: unknown): string {
+  let s: string;
+  try {
+    s = typeof o === "string" ? o : JSON.stringify(o);
+  } catch {
+    s = String(o);
+  }
+  // ★ 超长输出（如大 base64）截断显示，防止刷屏
+  if (s.length > 1000) {
+    return s.slice(0, 1000) + " …（内容过长，已截断显示）";
+  }
+  return s;
+}
+
+// ── 终端卡片（builtin:terminal 在对话区以真实终端窗口渲染）──
+function isTerminal(tc: ToolCallInfo): boolean {
+  return tc.toolId.toLowerCase().includes("terminal");
+}
+function termInfo(tc: ToolCallInfo): { exitCode: number | null; stdout: string; stderr: string; cmd: string } {
+  let exitCode: number | null = null;
+  let stdout = "";
+  let stderr = "";
+  const o = tc.output;
+  if (o && typeof o === "object") {
+    const obj = o as Record<string, unknown>;
+    if (typeof obj.exitCode === "number") exitCode = obj.exitCode;
+    if (typeof obj.stdout === "string") stdout = obj.stdout;
+    if (typeof obj.stderr === "string") stderr = obj.stderr;
+  } else if (typeof o === "string") {
+    stdout = o;
+  }
+  let cmd = "";
+  const a = tc.arguments;
+  if (a && typeof a === "object") {
+    const c = (a as Record<string, unknown>).command;
+    if (typeof c === "string") cmd = c;
+  } else if (typeof a === "string") {
+    try {
+      const p = JSON.parse(a);
+      if (p && typeof p.command === "string") cmd = p.command;
+    } catch {
+      cmd = a;
+    }
+  }
+  return { exitCode, stdout, stderr, cmd };
+}
+function hasArgs(a: unknown): boolean {
+  if (a == null) return false;
+  if (typeof a === "string") return a.trim().length > 0;
+  if (typeof a === "object") return Object.keys(a as object).length > 0;
+  return true;
+}
+function hasToolDetail(tc: ToolCallInfo): boolean {
+  if (tc.output || tc.error) return true;
+  if (isTerminal(tc)) {
+    const ti = termInfo(tc);
+    return !!(ti.cmd || ti.stdout || ti.stderr || ti.exitCode !== null);
+  }
+  return hasArgs(tc.arguments);
+}
+function toolSummary(tc: ToolCallInfo): string {
+  if (isTerminal(tc)) return termInfo(tc).cmd || "(无命令)";
+  return fmtArgs(tc.arguments);
+}
+function toggleAgent() {
+  agentOn.value = !agentOn.value;
+  const m = currentMode.value === "off" ? "yolo" : currentMode.value;
+  void setMode(agentOn.value ? m : "off");
+}
+</script>
+
+<template>
+  <div class="root">
+    <!-- 动态壁纸 -->
+    <div class="wallpaper">
+      <div class="art"></div>
+      <span class="p p1"></span><span class="p p2"></span><span class="p p3"></span>
+      <span class="p p4"></span><span class="p p5"></span><span class="p p6"></span>
+      <div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div>
+      <div class="mouse-glow" id="mouseGlow"></div>
+      <div class="wall-clock">
+        <div class="t">{{ clockTime }}</div>
+        <div class="d">{{ clockDate }}</div>
+      </div>
+    </div>
+
+    <div class="app">
+      <!-- 自定义标题栏（无系统边框，背景透明露出壁纸，与背景融为一体） -->
+      <!-- 注意：不要加 data-tauri-drag-region，它会拦截 JS 的 mousedown，导致 startDragging 不触发 -->
+      <div class="titlebar" @mousedown="onTitlebarMouseDown">
+        <div class="tb-brand">
+          <svg class="tb-logo" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.6" fill="currentColor"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(120 12 12)"/></svg>
+          <span class="tb-title">ClawDesk</span>
+        </div>
+        <div class="tb-controls" @mousedown.stop>
+          <button class="tb-btn" title="最小化" @click="winMinimize">
+            <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+          <button class="tb-btn" title="最大化 / 还原" @click="winMaximize">
+            <svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+          <button class="tb-btn tb-close" title="关闭" @click="winClose">
+            <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1.5" y1="1.5" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.2"/><line x1="10.5" y1="1.5" x2="1.5" y2="10.5" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 顶部：所有会话 + 设置 -->
+      <div class="top-bar">
+        <div class="top-left">
+          <button class="mem-btn" @click="toggleSessionPanel">所有会话</button>
+          <button class="mem-btn top-icon" title="搜索历史对话" @click="searchOpen = true">🔍</button>
+          <button class="mem-btn top-icon" title="导出当前会话" :disabled="exporting" @click="exportSession">📤</button>
+        </div>
+        <div class="status-right">
+          <button class="settings-btn" title="猜人物游戏" @click="showGuess = true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
+          </button>
+          <button class="settings-btn sched-btn" title="定时任务" @click="showScheduler = true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </button>
+          <button class="settings-btn wx-btn" title="微信 Bot" @click="showWechat = true">
+            <span class="wx-dot" :class="{ on: wechatOnline }"></span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.69 4C4.86 4 1.75 6.57 1.75 9.75c0 1.78.9 3.38 2.33 4.47l-.66 2.05a.35.35 0 0 0 .52.4l2.36-1.36c.74.2 1.52.3 2.39.3h.22c-.06-.4-.1-.82-.1-1.24 0-3.22 3.04-5.86 6.87-5.86.2 0 .4.01.6.02C15.45 6.1 12.4 4 8.69 4zm-2.2 3.5a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zm4.75 0a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zM18.5 9.5c-3.13 0-5.75 2.28-5.75 5.25S15.37 20 18.5 20c.77 0 1.5-.14 2.16-.38l1.55.89a.28.28 0 0 0 .42-.32l-.53-1.64c1.28-.93 2.15-2.3 2.15-3.8 0-2.97-2.62-5.25-5.75-5.25zm-2 4.5a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36zm4 0a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36z"/></svg>
+          </button>
+          <button class="settings-btn" title="设置" @click="showSettings = true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 所有会话下拉 -->
+        <div class="session-panel" :class="{ open: sessionPanelOpen }">
+          <button class="sp-new" @click="openNewSession">＋ 新建会话</button>
+          <div class="sp-list">
+            <div
+              v-for="s in sessions"
+              :key="s"
+              class="sp-item"
+              :class="{ active: s === sessionId }"
+              @click="selectSession(s)"
+            >
+              <span class="sp-ico">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              </span>
+              <span class="sp-body">
+                <span class="sp-name">{{ sessionNames[s] || s }}<span v-if="checkpoints[s]" class="cp-badge">断点</span></span>
+                <span class="sp-time">{{ s }}</span>
+              </span>
+              <span class="sp-ops">
+                <span class="sp-op" title="重命名" @click.stop="renameSession(s)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                </span>
+                <span class="sp-op" title="Fork 分支" @click.stop="forkSession(s)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+                </span>
+                <span class="sp-op" title="断点续跑" @click.stop="resumeSession(s)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                </span>
+                <span class="sp-del" title="删除会话" @click.stop="deleteSession(s)">✕</span>
+              </span>
+            </div>
+            <p v-if="!sessions.length" class="sp-empty">暂无会话</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 消息区 -->
+      <main ref="msgsRef" class="msgs" @scroll="onMsgsScroll">
+        <div v-for="m in messages" :key="m.id" class="msg" :class="m.role === 'user' ? 'user' : 'ai'">
+          <div class="msg-wrap">
+            <div class="meta">
+              <span>{{ m.role === 'user' ? '你' : 'ClawDesk' }} · [{{ fmtTs(m.timestamp) }}]</span>
+              <span class="msg-ops">
+                <button class="mo-btn" title="复制消息" @click.stop="copyMessage(m)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+                <template v-if="m.role === 'assistant'">
+                  <button class="mo-btn" title="朗读" @click.stop="speakMessage(m)">🔊</button>
+                  <button class="mo-btn" title="重新生成" @click.stop="regenerate(m)">🔄</button>
+                </template>
+                <template v-else>
+                  <button class="mo-btn" title="编辑重发" @click.stop="editResend(m)">✏️</button>
+                </template>
+              </span>
+            </div>
+            <div class="bubble">
+              <div v-if="m.thinking !== undefined && m.thinking !== null" class="thinking-block">
+                <button class="thinking-toggle" @click="m.thinkingOpen = !m.thinkingOpen">
+                  {{ m.thinkingOpen ? '▾' : '▸' }} 💭 思考中
+                </button>
+                <div v-show="m.thinkingOpen" class="thinking-content">{{ m.thinking }}</div>
+              </div>
+              <!-- 工具调用：统一为紧凑卡片（默认一行，点击展开详情；运行中自动展开） -->
+              <template v-for="tc in m.toolCalls" :key="`${m.id}-${tc.toolId}`">
+                <div class="tool-card" :class="{ pending: tc.status === 'running' }">
+                  <div class="tc-head" @click="tc.open = !tc.open">
+                    <span class="tc-fold" :class="{ 'tc-fold-on': tc.open || tc.status === 'running' }">{{ tc.open || tc.status === 'running' ? '▾' : '▸' }}</span>
+                    <span class="t" :class="tc.status === 'success' ? 't-ok' : (tc.status === 'error' || tc.status === 'danger') ? 't-err' : 't-run'">
+                      {{ tc.status === 'success' ? '✓' : tc.status === 'error' ? '✗' : tc.status === 'danger' ? '⚠' : '⋯' }}
+                    </span>
+                    <span class="tc-id">{{ tc.toolId }}</span>
+                    <span class="tc-sum">{{ toolSummary(tc) }}</span>
+                    <span v-if="hasToolDetail(tc)" class="tc-hint">{{ tc.open || tc.status === 'running' ? '收起' : '详情' }}</span>
+                  </div>
+                  <div v-show="tc.open || tc.status === 'running'" class="tc-body">
+                    <!-- terminal 工具：命令 + 输出 + 退出码 -->
+                    <template v-if="isTerminal(tc)">
+                      <div v-if="termInfo(tc).cmd" class="tc-cmd"><span class="tc-ps">PS&gt;</span>{{ termInfo(tc).cmd }}</div>
+                      <pre v-if="termInfo(tc).stdout" class="tc-out">{{ termInfo(tc).stdout }}</pre>
+                      <pre v-if="termInfo(tc).stderr" class="tc-out err">{{ termInfo(tc).stderr }}</pre>
+                      <pre v-if="tc.error" class="tc-out err">{{ tc.error }}</pre>
+                      <div v-if="termInfo(tc).exitCode !== null" class="tc-exit" :class="termInfo(tc).exitCode === 0 ? 'ok' : 'err'">
+                        {{ termInfo(tc).exitCode === 0 ? '✓ 退出码 0' : '✗ 退出码 ' + termInfo(tc).exitCode }}
+                      </div>
+                    </template>
+                    <!-- 其他工具：参数 + 输出 -->
+                    <template v-else>
+                      <div v-if="hasArgs(tc.arguments)" class="tc-cmd">{{ tc.toolId }} {{ fmtArgs(tc.arguments) }}</div>
+                      <div v-if="tc.output" class="tc-out">{{ fmtOutput(tc.output) }}</div>
+                      <div v-if="tc.error" class="tc-out err">{{ tc.error }}</div>
+                    </template>
+                    <span v-if="tc.status === 'running'" class="term-cursor"></span>
+                  </div>
+                </div>
+              </template>
+              <!-- 用户上传图片 / 消息内图片：缩略图展示，点击放大浏览 -->
+              <div v-if="m.images && m.images.length" class="msg-images">
+                <img
+                  v-for="(img, i) in m.images"
+                  :key="i"
+                  :src="img"
+                  class="msg-img"
+                  alt="图片"
+                  loading="lazy"
+                  @click.stop="openImageViewer(m.images as string[], i)"
+                />
+              </div>
+              <div v-if="m.content" class="msg-content" v-html="m.role === 'assistant' ? renderMd(m.content) : escapeHtml(m.content)"></div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- 底部输入（v6：模型标签 + Agent + 附件 + 进度环 + 发送） -->
+      <BottomInput
+        ref="bottomInputRef"
+        :running="running"
+        :model-label="modelLabel()"
+        :models="MODELS"
+        :selected-model="selectedModel"
+        :agent-on="agentOn"
+        :mode="currentMode"
+        :thinking="thinkingOn"
+        :ctx-pct="ctxPct"
+        :ctx-tokens="ctxTokens"
+        :ctx-items="ctxItems"
+        :compress-busy="compressBusy"
+        @send="handleSend"
+        @cancel="handleCancel"
+        @select-model="selectModel"
+        @toggle-agent="toggleAgent"
+        @set-mode="setMode"
+        @toggle-thinking="thinkingOn = !thinkingOn"
+        @request-permission="requestPermission"
+        @compress="compressContext"
+      />
+    </div>
+
+    <!-- 设置弹窗（v6 左侧标签列） -->
+    <SettingsView
+      v-if="showSettings"
+      :tz="tz"
+      @close="showSettings = false"
+      @keys="onKeysSaved"
+      @tz="onTzChange"
+    />
+
+    <!-- 微信 Bot 面板 -->
+    <WechatPanel v-if="showWechat" @close="showWechat = false" />
+
+    <!-- 定时任务面板 -->
+    <SchedulerPanel v-if="showScheduler" @close="showScheduler = false" />
+
+    <!-- 猜人物游戏 -->
+    <GuessPanel v-if="showGuess" :api-key="apiKey" base-url="https://api.deepseek.com" @close="showGuess = false" />
+
+    <!-- 搜索历史弹窗 -->
+    <div class="perm-overlay" :class="{ open: searchOpen }">
+      <div class="perm-card" style="width:min(560px,92vw)">
+        <div class="pc-title">🔍 搜索历史对话</div>
+        <div class="search-bar">
+          <input
+            v-model="searchKeyword"
+            class="ns-input"
+            placeholder="输入关键词，跨会话检索历史消息…"
+            @keydown.enter="doSearch"
+          />
+          <button class="pc-yes" @click="doSearch" :disabled="searching">{{ searching ? "搜索中…" : "搜索" }}</button>
+        </div>
+        <div class="search-list">
+          <div v-for="(r, i) in searchResults" :key="i" class="search-item" @click="jumpToResult(r.sessionId)">
+            <div class="search-meta">{{ r.sessionId }} · {{ r.role }}</div>
+            <div class="search-content">{{ r.content }}</div>
+          </div>
+          <p v-if="!searching && searchResults.length === 0 && searchKeyword" class="sp-empty">未找到匹配内容</p>
+        </div>
+        <div class="pc-actions">
+          <button class="pc-no" @click="searchOpen = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 新建会话弹窗 -->
+    <div class="perm-overlay" :class="{ open: newSessionOpen }">
+      <div class="perm-card">
+        <div class="pc-title">新建会话</div>
+        <div class="pc-sub">为新的对话输入一个名称（可留空自动命名）</div>
+        <input
+          v-model="newSessionName"
+          class="ns-input"
+          placeholder="会话名称"
+          maxlength="60"
+          @keydown.enter="confirmNewSession"
+        />
+        <div class="pc-actions">
+          <button class="pc-no" @click="newSessionOpen = false">取消</button>
+          <button class="pc-yes" @click="confirmNewSession">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 权限确认弹窗 -->
+    <div class="perm-overlay" :class="{ open: !!permRequest }">
+      <div class="perm-card">
+        <div class="pc-ico">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <div class="pc-title">Agent 请求执行工具</div>
+        <div class="pc-sub">逐步确认模式 · 请审批以下操作</div>
+        <div class="pc-tool">{{ permRequest?.toolId }}</div>
+        <div class="pc-args">{{ permRequest?.args }}</div>
+        <div class="pc-actions">
+          <button class="pc-no" @click="denyPermission">拒绝</button>
+          <button class="pc-yes" @click="approvePermission">允许</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 图片查看器（点击图片放大浏览，←/→ 切换，Esc 关闭） -->
+    <div v-if="imageViewer" class="img-overlay" @click.self="imageViewer = null">
+      <div class="img-viewer">
+        <button class="iv-close" title="关闭 (Esc)" @click="imageViewer = null">✕</button>
+        <button v-if="imageViewer.list.length > 1" class="iv-nav iv-prev" title="上一张 (←)" @click="ivPrev">‹</button>
+        <img :src="imageViewer.list[imageViewer.index]" class="iv-img" alt="图片预览" />
+        <button v-if="imageViewer.list.length > 1" class="iv-nav iv-next" title="下一张 (→)" @click="ivNext">›</button>
+        <div v-if="imageViewer.list.length > 1" class="iv-count">{{ imageViewer.index + 1 }} / {{ imageViewer.list.length }}</div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+</style>

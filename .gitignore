@@ -1,0 +1,32 @@
+﻿# ── Node 前端 ──────────────────────────────
+node_modules/
+dist/
+*.local
+
+# ── Rust / Tauri 后端 ──────────────────────
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+
+# ── IDE / 系统 ─────────────────────────────
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── 日志 ───────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── 测试残留 / 临时文件 ────────────────────
+tmp_ocr.*
+*.bak
+*.enc
+
+# ── Windows ────────────────────────────────
+Thumbs.db
+Desktop.ini

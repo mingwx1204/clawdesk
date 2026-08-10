@@ -1,0 +1,86 @@
+[package]
+name = "clawdesk"
+version = "0.5.2"
+description = "ClawDesk - Tauri 2.x desktop application"
+authors = ["ClawDesk Team"]
+edition = "2021"
+
+[lib]
+name = "clawdesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ── 既有依赖（全部保留）────────────────────────────────────
+tauri = { version = "2", features = ["tray-icon"] }   # tray-icon：系统托盘（关闭到托盘常驻）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }   # 追加 serde：harness protocol/workroom 需 DateTime serde
+image = "0.25"
+base64 = "0.22"
+ureq = "2"                        # 保留：Off/PlanOnly 直通路径 + planner/self_check 仍用
+screenshots = "0.8"
+tokio = { version = "1", features = [
+    "macros", "rt", "rt-multi-thread", "time", "sync",
+    # ↓ 追加（引擎/SSE/进程需要）
+    "fs", "io-util", "process", "net", "signal",
+] }
+rusqlite = { version = "0.31", features = ["bundled"] }   # 保持 0.31；harness/state 已适配
+
+# ── 方案B新增（harness 引擎）───────────────────────────────
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",              # JSON 请求体
+    "rustls-no-provider",# 与 ureq 共用 rustls 生态，无 OpenSSL 依赖
+    "stream",            # bytes_stream() SSE 流式
+    "gzip",
+    # 刻意不含 "http2"：engine/client.rs 强制 http1_only() 修复流断开
+] }
+# rustls-no-provider 需手动安装加密 provider（main.rs 启动时 install_default），否则构建 reqwest Client 会 panic
+rustls = { version = "0.23", features = ["ring"] }
+anyhow = "1"                       # 引擎错误传播
+thiserror = "2"                    # hooks/engine 错误枚举
+uuid = { version = "1", features = ["v4"] }   # 会话/任务/权限请求 ID
+dirs = "6.0.0"                     # harness/paths（CodeWhale paths crate 依赖）
+fd-lock = "4.0.4"                  # harness/state 文件锁
+async-trait = "0.1"                # ToolExecutor trait
+futures-util = "0.3"               # SSE StreamExt
+bytes = "1"                        # stream.rs BytesMut 拼接（SSE 残缺分片容错）
+tracing = "0.1"                    # 引擎日志
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }   # 日志输出初始化
+tokio-util = "0.7"               # CancellationToken（心跳 abort，默认 feature 已含 sync 模块）
+tempfile = "3"                     # 测试/临时路径
+# ── 压缩包支持（微信文件自动解压查看）────────────────────────
+zip = { version = "2", default-features = false, features = ["deflate"] }  # 读取 .zip（纯 Rust 解压）
+# ── 微信 iLink Bot 接入（从旧版 clawdesk 移植）────────────────
+parking_lot = "0.12"               # wechat.rs 状态锁
+windows = { version = "0.61", features = [
+  "Win32_Foundation",             # LocalFree / HLOCAL
+  "Win32_Security_Cryptography",  # DPAPI CryptProtectData / CryptUnprotectData
+  "Win32_Storage_FileSystem",     # GetFileAttributesW / SetFileAttributesW（清除只读）
+] }
+qrcode = "0.14"                    # 微信登录二维码 SVG 生成（mobile_qr_svg）
+# 微信 CDN 媒体解密（图片/文件/语音/视频：AES-128-ECB PKCS7）
+aes = "0.8"
+cipher = "0.4"
+# 微信发图：CDN 上传需要明文 MD5（getUploadUrl 参数）
+md-5 = "0.10"
+# ── 新增：大厂 Agent 工具链 ────────────────────────────────
+# ① 浏览器自动化（headless Chrome）＋ HTML 解析
+headless_chrome = "1"
+scraper = "0.22"
+# ② 图表生成（Mermaid → SVG，调用本地 mermaid-cli 或前端渲染）
+# 前端渲染用 mermaid.js，后端只输出语法文本（无需额外 crate）
+# ③ Python 沙箱（subprocess + 安全约束）
+# 直接使用 std::process，无需额外 crate
+# ④ 知识库 RAG（文本分块 + 向量检索，纯 Rust）
+text-splitter = "0.18"
+# ⑤ 邮件发送（SMTP）
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[profile.release]
+strip = true
+lto = true
