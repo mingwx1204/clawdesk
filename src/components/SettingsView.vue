@@ -139,12 +139,18 @@ const TABS = [
   { id: "selfEvolve", label: "自进化" },
 ] as const;
 
-onMounted(() => {
-  load();
-  loadKeys();
+onMounted(async () => {
+  await load();
+  await loadKeys();
   loadSkills();
   loadSandbox();
   loadMcp();
+  // ★ 重启后自进化设置仍为开启 → 自动重新初始化后端引擎
+  //   （后端引擎是内存单例，重启即空；不重新初始化会导致手动进化报"未初始化"）
+  if (settings.value?.selfEvolveEnabled) {
+    await startEvolve();
+    await loadEvolveStatus();
+  }
   requestAnimationFrame(() => moveIndicator());
 });
 
@@ -570,13 +576,26 @@ const evolveRunning = ref(false);
 const evolveTip = ref("");
 const evolveStatus = ref<EvolveStatus | null>(null);
 
-/** 启用自进化（调用后端初始化引擎）。 */
+/** 启用自进化（调用后端初始化引擎）。
+ *  ★ 用真实 API Key（settings_get_keys 内存态），不再用 sk-placeholder 占位 */
 async function startEvolve() {
   try {
     const s = settings.value;
     if (!s) return;
+    // 优先用后端内存态 Key（settings.json 不落盘）；输入框填了则用输入框的
+    let apiKey = mainKey.value.trim();
+    if (!apiKey) {
+      try {
+        const k = await invoke<{ main?: string }>("settings_get_keys");
+        apiKey = k?.main?.trim() ?? "";
+      } catch { /* 静默 */ }
+    }
+    if (!apiKey) {
+      evolveTip.value = "❌ 未找到 API Key：请先在「模型 API」页填写主模型 Key";
+      return;
+    }
     await invoke("self_evolve_enable", {
-      apiKey: mainKey.value.trim() || "sk-placeholder",
+      apiKey,
       baseUrl: s.modelEndpoint || "https://api.deepseek.com",
       model: s.selfEvolveModel || "deepseek-chat",
       enabled: true,

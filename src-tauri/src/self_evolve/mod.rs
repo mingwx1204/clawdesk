@@ -55,6 +55,35 @@ impl SelfEvolveEngine {
         ENGINE.get()
     }
 
+/// ★ 从持久化设置自动恢复引擎（重启后设置里已开启、但内存引擎为空的场景）：
+///   读取 AppState 的 settings（selfEvolveEnabled / selfEvolveModel / 端点）
+///   与 keys（真实 API Key，不再用占位符）初始化引擎，并同步 enabled 状态。
+///   引擎已初始化时仅同步 enabled（幂等，不重复创建）。
+pub fn ensure_engine_from_settings(
+    state: &crate::commands::AppState,
+) -> Result<&'static Self, String> {
+    let s = state.settings.get();
+    let keys = state.settings.keys();
+    // 用真实主 Key（无 Key 则无法生成技能）
+    let api_key = if keys.main.is_empty() {
+        return Err("未配置 API Key，无法启用自进化（请在「设置 → 模型 API」填写）".to_string());
+    } else {
+        keys.main.clone()
+    };
+    let base_url = crate::commands::endpoint_base_url(&s.model_endpoint);
+    let model = if s.self_evolve_model.is_empty() {
+        s.model.clone()
+    } else {
+        s.self_evolve_model.clone()
+    };
+    let tracker_path = crate::llm::settings::clawdesk_dir().join("self_evolve_tracker.json");
+    let engine = SelfEvolveEngine::init(api_key, base_url, model, tracker_path);
+    engine
+        .enabled
+        .store(s.self_evolve_enabled, std::sync::atomic::Ordering::Relaxed);
+    Ok(engine)
+}
+
     /// 启动自进化循环。
     pub async fn evolve(&self, registry: &ToolRegistry) -> Result<generator::EvolveReport, String> {
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -106,15 +135,28 @@ pub fn self_evolve_enable(api_key: String, base_url: String, model: String, enab
 pub async fn self_evolve_run(
     state: tauri::State<'_, crate::commands::AppState>,
 ) -> Result<serde_json::Value, String> {
-    let engine = SelfEvolveEngine::get().ok_or("自进化引擎未初始化，请先在设置中启用")?;
+    // ★ 引擎未初始化时先从持久化设置自动恢复（重启后无需重新开关一次）
+    let engine = match SelfEvolveEngine::get() {
+        Some(e) => e,
+        None => SelfEvolveEngine::ensure_engine_from_settings(&state)?,
+    };
+    if !engine.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("自进化未启用（设置中未开启）".into());
+    }
     let report = engine.evolve(&state.registry).await?;
     Ok(serde_json::to_value(&report).map_err(|e| format!("序列化报告失败: {e}"))?)
 }
 
 /// 查询自进化状态（工具排名 + 最近进化的技能）。
 #[tauri::command]
-pub fn self_evolve_status() -> Result<serde_json::Value, String> {
-    let engine = SelfEvolveEngine::get().ok_or("自进化引擎未初始化")?;
+pub fn self_evolve_status(
+    state: tauri::State<'_, crate::commands::AppState>,
+) -> Result<serde_json::Value, String> {
+    // ★ 引擎未初始化时自动恢复（状态查询也支持重启后直接可用）
+    let engine = match SelfEvolveEngine::get() {
+        Some(e) => e,
+        None => SelfEvolveEngine::ensure_engine_from_settings(&state)?,
+    };
     let ranking = engine.tracker.get_ranking();
     let generated: Vec<String> = engine.generated_ids.lock().unwrap().iter().cloned().collect();
     Ok(serde_json::json!({
@@ -134,8 +176,13 @@ pub fn self_evolve_status() -> Result<serde_json::Value, String> {
 
 /// 获取加权工具排名（供 system prompt 注入）。
 #[tauri::command]
-pub fn self_evolve_ranking() -> Result<serde_json::Value, String> {
-    let engine = SelfEvolveEngine::get().ok_or("自进化引擎未初始化")?;
+pub fn self_evolve_ranking(
+    state: tauri::State<'_, crate::commands::AppState>,
+) -> Result<serde_json::Value, String> {
+    let engine = match SelfEvolveEngine::get() {
+        Some(e) => e,
+        None => SelfEvolveEngine::ensure_engine_from_settings(&state)?,
+    };
     let sel = selector::WeightedSelector::new(engine.tracker.clone(), selector::SelectorConfig::default());
     let top = sel.top_tools(15);
     Ok(serde_json::json!({
