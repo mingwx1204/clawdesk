@@ -19,6 +19,8 @@ use crate::core::tool::result::ToolResult;
 const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1MB
 const MAX_RESULTS: usize = 500;
 const MAX_DEPTH: u32 = 20;
+/// ★ 2026-08-12：文件扫描总数上限（防超大目录遍历失控）。
+const MAX_FILES_SCANNED: u32 = 5000;
 
 pub fn register(registry: &ToolRegistry) -> Result<(), ToolError> {
     let def = UnifiedToolDef::new(
@@ -132,12 +134,24 @@ fn search_in_dir(
         &mut files_scanned,
     )?;
 
+    // ★ 扫描总数超限说明（模型据此判断结果可能不完整）
+    let truncated = files_scanned >= MAX_FILES_SCANNED;
+    let mut note = None;
+    if truncated {
+        note = Some(format!(
+            "文件扫描数达到上限 {} 个，已停止扫描，结果可能不完整",
+            MAX_FILES_SCANNED
+        ));
+    }
+
     Ok(json!({
         "path": root,
         "pattern": pattern,
         "caseSensitive": case_sensitive,
         "matchCount": results.len(),
         "filesScanned": files_scanned,
+        "truncated": truncated,
+        "note": note,
         "matches": results,
     }))
 }
@@ -154,6 +168,10 @@ fn walk_dir(
     files_scanned: &mut u32,
 ) -> Result<(), String> {
     if depth > MAX_DEPTH {
+        return Ok(());
+    }
+    // ★ 扫描总数上限（2026-08-12）
+    if *files_scanned >= MAX_FILES_SCANNED {
         return Ok(());
     }
     if results.len() >= MAX_RESULTS {

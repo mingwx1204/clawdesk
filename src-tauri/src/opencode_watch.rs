@@ -33,7 +33,8 @@ pub fn spawn(app: tauri::AppHandle, settings: Arc<SettingsStore>) {
 
             let s2 = settings.get();
             let endpoint = s2.opencode_watch_endpoint.clone();
-            let key = s2.opencode_watch_api_key.clone();
+            // ★ Key 走加密存储（ApiKeys.opencode_watch，DPAPI）
+            let key = settings.keys().opencode_watch.clone();
             if endpoint.trim().is_empty() || key.trim().is_empty() {
                 continue;
             }
@@ -116,7 +117,7 @@ async fn check_endpoint(endpoint: &str, api_key: &str) -> Result<bool, String> {
 fn do_switch(app: &tauri::AppHandle, settings: &Arc<SettingsStore>) -> bool {
     let s = settings.get();
     let endpoint = s.opencode_watch_endpoint.trim().to_string();
-    let key = s.opencode_watch_api_key.trim().to_string();
+    let key = settings.keys().opencode_watch.trim().to_string();
     if endpoint.is_empty() || key.is_empty() {
         eprintln!("[OPCODE-WATCH] 回切失败：端点或 Key 为空");
         return false;
@@ -144,6 +145,7 @@ fn do_switch(app: &tauri::AppHandle, settings: &Arc<SettingsStore>) -> bool {
         main: key.clone(),
         vision: key.clone(),
         image: cur.image.clone(),
+        opencode_watch: cur.opencode_watch.clone(),
     });
 
     // 4. 自动关闭开关（避免反复写盘；用户可再次开启）

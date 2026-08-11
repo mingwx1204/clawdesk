@@ -70,9 +70,15 @@ impl LlmClient {
         // 确保 rustls crypto provider 已安装（reqwest 的 rustls-no-provider 特性要求，
         // 否则构建 Client 会 panic：`No rustls crypto provider is configured`）。
         // 这里在每次构建 reqwest 前安装，作为 main.rs 的双保险。
+        // ★ 2026-08-12：安装状态只打印一次（原实现每次 new 都打两行日志 → 噪音）。
+        static RUSTLS_PRINTED: std::sync::Once = std::sync::Once::new();
         match rustls::crypto::ring::default_provider().install_default() {
-            Ok(_) => eprintln!("[RUSTLS] ring crypto provider installed"),
-            Err(e) => eprintln!("[RUSTLS] provider install skipped/failed: {e:?}"),
+            Ok(_) => RUSTLS_PRINTED.call_once(|| {
+                eprintln!("[RUSTLS] ring crypto provider installed");
+            }),
+            Err(e) => RUSTLS_PRINTED.call_once(|| {
+                eprintln!("[RUSTLS] provider install skipped/failed: {e:?}");
+            }),
         }
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

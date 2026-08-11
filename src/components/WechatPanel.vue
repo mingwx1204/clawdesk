@@ -33,6 +33,12 @@ interface BotStatus {
   proactiveIntervalMax?: number;
   proactiveLastAt?: number;
   proactiveTarget?: string;
+  allowedUsers?: string[];
+  voiceId?: string;
+  voiceEngine?: string;
+  cosyvoiceApiKey?: string;
+  indexttsUrl?: string;
+  indexttsVoicePath?: string;
 }
 
 const emit = defineEmits<{ close: [] }>();
@@ -50,9 +56,13 @@ const qrState = ref<"idle" | "loading" | "wait" | "scaned" | "need_verifycode" |
 const verifyCode = ref("");
 const pollTimer = ref<number | null>(null);
 const statusTimer = ref<number | null>(null);
+/** 内置聊天界面：聊天记录轮询同步 */
+const chatTimer = ref<number | null>(null);
 const messages = ref<WechatMsg[]>([]);
 const autoReply = ref(localStorage.getItem("clawdesk_wechat_autoreply") !== "off");
 const log = ref<string[]>([]);
+/** AI 生活状态（世界线：此刻在做什么，时间与真实时钟同步） */
+const livingState = ref("");
 
 // ── 人设编辑 ──
 const personaText = ref("");
@@ -70,6 +80,133 @@ const proactiveIntervalMax = ref(180);
 const proactiveTarget = ref("");
 const proactiveLastAt = ref(0);
 
+// ── 内置微信聊天界面（中栏：会话列表 + 聊天窗 + 输入框）──
+/** 原始聊天记录缓存（wechat_history 返回） */
+const chatCache = ref<any[]>([]);
+/** 会话列表（按联系人分组，按最后消息时间倒序） */
+const chats = ref<{ dir: string; last: string; lastTime: number; lastType: string }[]>([]);
+/** 当前打开的会话联系人 */
+const activeChat = ref("");
+/** 当前会话消息（按时间正序） */
+const chatMsgs = ref<{ fromBot: boolean; content: string; msgType: string; timestamp: number }[]>([]);
+const chatInput = ref("");
+const chatSending = ref(false);
+const chatTip = ref("");
+
+/** 从后端加载当前槽位聊天记录，重建会话列表 + 当前会话消息。 */
+async function reloadChats(): Promise<void> {
+  try {
+    const r = await invoke<{ records: any[] }>("wechat_history", { slot: curSlot.value });
+    const records: any[] = r?.records ?? [];
+    chatCache.value = records;
+    // 按联系人 dir 分组（dir = 对方用户 ID；AI 发出的消息 toUser 同为 dir）
+    const map = new Map<string, { last: string; lastTime: number; lastType: string }>();
+    for (const rec of records) {
+      const dir = rec.dir ?? rec.fromUser ?? "";
+      if (!dir) continue;
+      const t = Number(rec.timestamp ?? 0);
+      const cur = map.get(dir);
+      if (!cur || t >= cur.lastTime) {
+        map.set(dir, {
+          last: rec.content ?? "",
+          lastTime: t,
+          lastType: rec.msgType ?? "text",
+        });
+      }
+    }
+    chats.value = Array.from(map.entries())
+      .map(([dir, v]) => ({ dir, ...v }))
+      .sort((a, b) => b.lastTime - a.lastTime);
+    // 当前会话若已被删除则清空
+    if (activeChat.value && !chats.value.some((c) => c.dir === activeChat.value)) {
+      activeChat.value = "";
+    }
+    if (activeChat.value) rebuildChatMsgs();
+    chatTip.value = `共 ${chats.value.length} 个会话 · ${records.length} 条消息`;
+  } catch { /* 静默 */ }
+}
+
+/** 重建当前会话的消息气泡（时间正序，AI 发送=右侧/me，对方=左侧/them）。 */
+function rebuildChatMsgs(): void {
+  chatMsgs.value = chatCache.value
+    .filter((rec) => (rec.dir ?? rec.fromUser ?? "") === activeChat.value)
+    .sort((a, b) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0))
+    .map((rec) => ({
+      fromBot: !!rec.fromBot,
+      content: rec.content ?? "",
+      msgType: rec.msgType ?? "text",
+      timestamp: Number(rec.timestamp ?? 0),
+    }));
+}
+
+/** 打开一个会话。 */
+function openChat(dir: string): void {
+  activeChat.value = dir;
+  rebuildChatMsgs();
+}
+
+/** 以该微信身份发送消息（走 iLink 官方协议，与 Bot 共用会话）。 */
+async function sendChat(): Promise<void> {
+  const text = chatInput.value.trim();
+  if (!text || chatSending.value) return;
+  if (!activeChat.value) return;
+  chatSending.value = true;
+  try {
+    await invoke("wechat_send_message", {
+      toUser: activeChat.value,
+      content: text,
+      slot: curSlot.value,
+    });
+    chatInput.value = "";
+    // 本地立即追加（后端 append_history 已落盘，reloadChats 会再同步一次）
+    chatMsgs.value.push({ fromBot: true, content: text, msgType: "text", timestamp: Date.now() });
+    pushLog(`📤 已发送到 ${activeChat.value}：${text.slice(0, 40)}`);
+    void reloadChats();
+  } catch (e) {
+    pushLog(`发送失败: ${e}`);
+  } finally {
+    chatSending.value = false;
+  }
+}
+
+// ── 使用规则（白名单 / 语音音色）──
+const allowedUsers = ref("");
+const voiceId = ref("zh-CN-XiaoxiaoNeural");
+const voiceEngine = ref("edge");
+const cosyvoiceKey = ref("");
+const indexttsUrl = ref("http://127.0.0.1:8000");
+const indexttsVoicePath = ref("");
+/** 规则编辑中标记：用户一旦手动修改（@change），5 秒轮询就不再回填后端旧值，
+ *  防止「下拉选了又被弹回」→ 保存后才恢复同步 */
+const voiceDirty = ref(false);
+const voiceReply = ref(localStorage.getItem("clawdesk_wechat_voicereply") === "on");
+/** CosyVoice 2 真人级音色（硅基流动预置） */
+const cosyvoiceOptions = [
+  { id: "anna", name: "Anna · 女声 温暖自然（推荐）" },
+  { id: "bella", name: "Bella · 女声 甜美" },
+  { id: "lily", name: "Lily · 女声 清新" },
+  { id: "maria", name: "Maria · 女声 优雅" },
+  { id: "sarah", name: "Sarah · 女声 亲切" },
+  { id: "alex", name: "Alex · 男声 沉稳磁性" },
+  { id: "eric", name: "Eric · 男声 阳光" },
+  { id: "jason", name: "Jason · 男声 成熟" },
+  { id: "roger", name: "Roger · 男声 浑厚" },
+  { id: "steve", name: "Steve · 男声 低沉" },
+];
+/** 内置音色（与后端 tts_list_voices 前几名对齐，下拉选择用） */
+const voiceOptions = [
+  { id: "zh-CN-XiaoxiaoNeural", name: "晓晓 · 温暖亲切（默认）" },
+  { id: "zh-CN-XiaoyiNeural", name: "晓伊 · 活泼少女" },
+  { id: "zh-CN-YunxiNeural", name: "云希 · 阳光少年" },
+  { id: "zh-CN-YunjianNeural", name: "云健 · 沉稳成熟" },
+  { id: "zh-CN-XiaochenNeural", name: "晓辰 · 清澈邻家女孩" },
+  { id: "zh-CN-XiaohanNeural", name: "晓涵 · 甜美温柔" },
+  { id: "zh-CN-XiaomengNeural", name: "晓梦 · 亲切自然" },
+  { id: "zh-CN-XiaomoNeural", name: "晓墨 · 成熟知性" },
+  { id: "zh-CN-XiaoruiNeural", name: "晓睿 · 温柔睿智" },
+  { id: "en-US-EmmaMultilingualNeural", name: "Emma · 多语言女声" },
+];
+
 let unlistenMsg: UnlistenFn | null = null;
 let unlistenStatus: UnlistenFn | null = null;
 
@@ -80,6 +217,16 @@ function pushLog(s: string) {
 
 function fmtTs(ts: number): string {
   try { return new Date(ts).toLocaleTimeString(); } catch { return ""; }
+}
+
+/** 消息类型图标（voice=语音转写 / image=图片 / file=文件 / 其余文本） */
+function typeIcon(t: string): string {
+  switch (t) {
+    case "voice": return "🔊";
+    case "image": return "🖼️";
+    case "file": return "📎";
+    default: return "";
+  }
 }
 
 /** 设置主动聊天（后端 wechat_set_proactive，随机区间） */
@@ -142,11 +289,14 @@ function selectSlot(slot: number) {
   personaText.value = "";
   personaSaved.value = false;
   personaDirty.value = false; // 切换槽位 = 放弃未保存编辑，重新进入同步状态
+  voiceDirty.value = false; // ★ 切换槽位重置语音设置编辑态，防止把 A 槽位的值写进 B
   historyList.value = [];
+  messages.value = []; // ★ 清空最近消息，防止残留上一槽位的消息
   const b = bots.value.find((x) => x.slot === slot);
   if (b?.personaText) personaText.value = b.personaText;
   syncProactive(b);
   void loadHistory(slot);
+  reloadChats(); // 内置微信聊天界面：切换槽位重建会话列表
   pushLog(`已切换到 ${b?.name || `微信${slot + 1}`}`);
 }
 
@@ -161,6 +311,8 @@ onMounted(async () => {
     selectSlot(logged ? logged.slot : 0);
   }
   statusTimer.value = window.setInterval(refreshStatus, 5000);
+  // 内置聊天界面：每 5 秒同步一次聊天记录（新消息自动出现）
+  chatTimer.value = window.setInterval(() => void reloadChats(), 5000);
   try {
     unlistenMsg = await listen<WechatMsg>("wechat-message", (e) => {
       const m = e.payload;
@@ -169,6 +321,7 @@ onMounted(async () => {
       if (slot === curSlot.value) {
         messages.value.unshift(m);
         if (messages.value.length > 30) messages.value.pop();
+        void reloadChats();
       }
     });
     unlistenStatus = await listen<any>("wechat-bot-status", (e) => {
@@ -193,9 +346,55 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenMsg?.();
   unlistenStatus?.();
-  if (pollTimer.value) window.clearInterval(pollTimer.value);
+  if (pollTimer.value) window.clearTimeout(pollTimer.value);
   if (statusTimer.value) window.clearInterval(statusTimer.value);
+  if (chatTimer.value) window.clearInterval(chatTimer.value);
 });
+
+function setVoiceReply(v: boolean) {
+  voiceReply.value = v;
+  localStorage.setItem("clawdesk_wechat_voicereply", v ? "on" : "off");
+  pushLog(v ? "🎙 AI 语音回复已开启（文字回复后自动发一条真人音色语音）" : "🔇 AI 语音回复已关闭");
+}
+
+/** 保存使用规则（白名单 + 音色 + 引擎，后端持久化） */
+async function saveRules() {
+  try {
+    const r = await invoke<any>("wechat_set_bot_rules", {
+      slot: curSlot.value,
+      allowedUsers: allowedUsers.value.trim() || null,
+      voiceId: voiceId.value.trim() || null,
+      voiceEngine: voiceEngine.value,
+      cosyvoiceApiKey: cosyvoiceKey.value.trim() || null,
+      indexttsUrl: indexttsUrl.value.trim() || null,
+      indexttsVoicePath: indexttsVoicePath.value.trim() || null,
+    });
+    allowedUsers.value = (r?.allowedUsers || []).join("，");
+    voiceId.value = r?.voiceId || "zh-CN-XiaoxiaoNeural";
+    voiceEngine.value = r?.voiceEngine || "edge";
+    cosyvoiceKey.value = r?.cosyvoiceApiKey || "";
+    indexttsUrl.value = r?.indexttsUrl || "http://127.0.0.1:8000";
+    indexttsVoicePath.value = r?.indexttsVoicePath || "";
+    // 同步到 localStorage：语音回复发送时后端优先用已保存的 voice_id，
+    // 此处兜底保证旧路径也能拿到正确音色
+    if (voiceId.value) localStorage.setItem("clawdesk_wechat_voice", voiceId.value);
+    voiceDirty.value = false; // 保存成功 → 恢复与后端同步
+    pushLog(
+      r?.allowedUsers?.length
+        ? `🔒 白名单已保存：只与 ${r.allowedUsers.length} 位指定用户聊天`
+        : "🌐 白名单已清除：不限制聊天对象",
+    );
+    pushLog(
+      voiceEngine.value === "cosyvoice"
+        ? "🎙 语音引擎：CosyVoice 2（真人级音色）"
+        : voiceEngine.value === "indextts"
+          ? "🎙 语音引擎：IndexTTS2 本地声音克隆（诗妍的声音）"
+          : "🎙 语音引擎：Edge TTS（免费神经网络音色）",
+    );
+  } catch (e) {
+    pushLog(`保存规则失败: ${e}`);
+  }
+}
 
 function setAutoReply(v: boolean) {
   autoReply.value = v;
@@ -215,7 +414,22 @@ async function refreshStatus() {
       // 人设回填：仅当本地为空且后端有值时（不打断正在编辑的内容）
       // ★ personaDirty：用户编辑中绝不回填，防止旧人设覆盖新输入
       if (!personaDirty.value && b.personaText && !personaText.value) personaText.value = b.personaText;
+      // ★ 规则回填（白名单/音色/引擎）：切换槽位时同步后端保存的配置
+      //   用户编辑中（voiceDirty）绝不回填，防止「选了又弹回」
+      if (!voiceDirty.value) {
+        if (b.allowedUsers) allowedUsers.value = b.allowedUsers.join("，");
+        if (b.voiceId) voiceId.value = b.voiceId;
+        if (b.voiceEngine) voiceEngine.value = b.voiceEngine;
+        if (b.cosyvoiceApiKey) cosyvoiceKey.value = b.cosyvoiceApiKey;
+        if (b.indexttsUrl) indexttsUrl.value = b.indexttsUrl;
+        if (b.indexttsVoicePath) indexttsVoicePath.value = b.indexttsVoicePath;
+      }
     }
+  } catch { /* 静默 */ }
+  // ★ AI 生活状态（世界线）：与 bot 状态一并刷新，展示 AI 此刻在做什么
+  try {
+    const s = await invoke<string>("wechat_living_state");
+    if (s) livingState.value = s;
   } catch { /* 静默 */ }
 }
 
@@ -249,30 +463,47 @@ async function refreshQr() {
 
 function startPoll() {
   if (pollTimer.value) window.clearInterval(pollTimer.value);
-  pollTimer.value = window.setInterval(pollQr, 5000);
+  // ★ 递归 setTimeout（后端长轮询最长 35s，5s interval 会堆积并发请求）
+  const tick = () => {
+    if (qrState.value === "confirmed") return;
+    void pollQr().finally(() => {
+      if (qrState.value === "confirmed" || qrState.value === "need_verifycode") return;
+      pollTimer.value = window.setTimeout(tick, 5000);
+    });
+  };
+  tick();
 }
 
+let pollBusy = false;
 async function pollQr() {
-  if (qrState.value === "confirmed") return;
+  if (pollBusy || qrState.value === "confirmed") return;
+  pollBusy = true;
   try {
     const r = await invoke<any>("wechat_qr_status", { slot: curSlot.value });
     const s = r?.status;
     if (s === "confirmed") {
       qrState.value = "confirmed";
-      if (pollTimer.value) window.clearInterval(pollTimer.value);
+      if (pollTimer.value) window.clearTimeout(pollTimer.value);
       pushLog("✅ 扫码成功，正在启动 Bot…");
       await startBot();
     } else if (s === "need_verifycode") {
       qrState.value = "need_verifycode";
-      if (pollTimer.value) window.clearInterval(pollTimer.value);
+      if (pollTimer.value) window.clearTimeout(pollTimer.value);
       pushLog("🔢 手机微信显示配对码，请在下框输入");
     } else if (s === "scaned_but_redirect") {
       qrState.value = "scaned";
     } else if (s === "verify_code_blocked") {
       pushLog("❌ 配对码错误次数过多，请刷新二维码");
       qrState.value = "wait";
+    } else if (s === "expired" || s === "invalid") {
+      // ★ 二维码过期：明确提示并停止轮询，等用户刷新
+      qrState.value = "idle";
+      if (pollTimer.value) window.clearTimeout(pollTimer.value);
+      pushLog("⏳ 二维码已过期，请点击「刷新二维码」重新获取");
     }
-  } catch { /* 网络错误继续轮询 */ }
+  } catch { /* 网络错误继续轮询 */ } finally {
+    pollBusy = false;
+  }
 }
 
 async function submitVerifyCode() {
@@ -389,7 +620,7 @@ async function testReply() {
       <div class="wc-head">
         <div class="wc-title">
           <span class="wc-logo">💬</span>
-          <span>微信 Bot（多账号）</span>
+          <span>内置微信（多账号 · 独立于电脑上的微信）</span>
           <span
             class="wc-dot"
             :class="{
@@ -436,6 +667,7 @@ async function testReply() {
             <div class="wc-row"><span>Bot ID</span><b>{{ cur?.botId || "—" }}</b></div>
             <div class="wc-row"><span>消息数</span><b>{{ cur?.messageCount ?? 0 }}</b></div>
             <div class="wc-row"><span>聊天记录</span><b>{{ cur?.historyCount ?? 0 }} 条（D 盘）</b></div>
+            <div class="wc-row"><span>AI 生活状态</span><b class="wc-living">{{ livingState || "—" }}</b></div>
             <div class="wc-row"><span>自动回复</span><b>
               <label class="wc-switch">
                 <input type="checkbox" :checked="autoReply" @change="(e: any) => setAutoReply((e.target as HTMLInputElement).checked)" />
@@ -479,13 +711,13 @@ async function testReply() {
           <!-- 已登录控制 -->
           <div v-else class="wc-ctrl">
             <div class="wc-ctrl-btns">
-              <button v-if="!cur?.running" class="wc-btn wc-primary" @click="startBot">▶ 启动 Bot</button>
-              <button v-else class="wc-btn" @click="stopBot">⏸ 停止 Bot</button>
+              <button v-if="!cur?.running" class="wc-btn wc-primary" @click="startBot">▶ 启动消息收发</button>
+              <button v-else class="wc-btn" @click="stopBot">⏸ 停止消息收发</button>
               <button class="wc-btn" @click="testReply">📨 测试回复</button>
-              <button class="wc-btn wc-danger" @click="logout">登出</button>
+              <button class="wc-btn wc-danger" @click="logout">登出此账号</button>
             </div>
             <p class="wc-tip">
-              {{ cur?.running ? "Bot 正在长轮询接收微信消息，收到后由该微信的 AI 自动回复。" : "Bot 未运行。点「启动 Bot」恢复接收。" }}
+              {{ cur?.running ? "消息收发已启动：好友发来消息时，由该账号的 AI 自动回复（可在右上角开关关闭）。" : "消息收发未运行，仅能在中栏手动聊天。点「启动消息收发」让 AI 自动回复。" }}
             </p>
           </div>
 
@@ -547,6 +779,61 @@ async function testReply() {
             </button>
           </div>
 
+          <!-- 使用规则（白名单 / 语音） -->
+          <div class="wc-persona">
+            <div class="wc-log-title">🔒 使用规则（谁可以聊天 / AI 的声音）</div>
+            <div class="wc-info" style="margin: 0 10px;">
+              <div class="wc-row"><span>只允许和谁聊</span><b>
+                <input v-model="allowedUsers" class="wc-num-input" style="width:200px;" placeholder="留空 = 不限制；填微信用户 ID，逗号分隔" @change="voiceDirty = true" />
+              </b></div>
+              <div class="wc-row"><span>AI 的声音</span><b>
+                <select v-model="voiceEngine" class="wc-num-input" style="width:130px;" @change="voiceDirty = true">
+                  <option value="edge">Edge TTS</option>
+                  <option value="cosyvoice">CosyVoice 2</option>
+                  <option value="indextts">IndexTTS2 克隆</option>
+                </select>
+                <select v-if="voiceEngine === 'edge'" v-model="voiceId" class="wc-num-input" style="width:150px;" @change="voiceDirty = true">
+                  <option v-for="v in voiceOptions" :key="v.id" :value="v.id">{{ v.name }}</option>
+                </select>
+                <select v-else-if="voiceEngine === 'cosyvoice'" v-model="voiceId" class="wc-num-input" style="width:150px;" @change="voiceDirty = true">
+                  <option v-for="v in cosyvoiceOptions" :key="v.id" :value="v.id">{{ v.name }}</option>
+                </select>
+              </b></div>
+              <div v-if="voiceEngine === 'cosyvoice'" class="wc-row"><span>硅基流动 Key</span><b>
+                <input v-model="cosyvoiceKey" class="wc-num-input" style="width:200px;" placeholder="sk-...（免费申请，留空回退 Edge）" type="password" @change="voiceDirty = true" />
+              </b></div>
+              <div v-if="voiceEngine === 'indextts'" class="wc-row"><span>参考音频</span><b>
+                <input v-model="indexttsVoicePath" class="wc-num-input" style="width:200px;" placeholder="D:\...\诗妍.wav（10~30秒清晰人声）" @change="voiceDirty = true" />
+              </b></div>
+              <div class="wc-row"><span>语音回复</span><b>
+                <label class="wc-switch">
+                  <input type="checkbox" :checked="voiceReply" @change="(e: any) => setVoiceReply((e.target as HTMLInputElement).checked)" />
+                  <span class="wc-knob"></span>
+                </label>
+              </b></div>
+            </div>
+            <div style="padding: 0 10px 10px;">
+              <button class="wc-btn wc-primary" @click="saveRules">保存规则</button>
+              <span style="font-size:11px; color:#64748b; margin-left:8px;">白名单外的消息不回复、不主动找</span>
+            </div>
+          </div>
+
+          <!-- 内置微信说明 -->
+          <div class="wc-persona">
+            <div class="wc-log-title">💎 内置微信（账号跑在软件里，不影响电脑上的微信）</div>
+            <div class="wc-info" style="margin: 0 10px;">
+              <p style="font-size:11px; color:#94a3b8; margin:2px 0; line-height:1.6;">
+                每个槽位 = 一个独立的微信账号：用手机微信扫码登录后，该账号完全在
+                ClawDesk 内收发消息（中栏聊天界面），<b>不需要多开、不需要在电脑上装第二个微信</b>，
+                也不影响你电脑上正常运行的微信。
+              </p>
+              <p style="font-size:11px; color:#94a3b8; margin:2px 0; line-height:1.6;">
+                👉 建议用专用小号登录作为 AI 的独立微信；AI 自动回复与你手动聊天（中栏）
+                共用同一账号同一会话，互不冲突。
+              </p>
+            </div>
+          </div>
+
           <!-- 日志 -->
           <div class="wc-log">
             <div class="wc-log-title">运行日志</div>
@@ -557,6 +844,87 @@ async function testReply() {
           </div>
         </div>
 
+        <!-- 中：内置微信聊天界面（会话列表 + 聊天窗 + 输入框） -->
+        <div class="wc-mid">
+          <!-- 未登录：先扫码登录该内置微信 -->
+          <div v-if="!cur?.loggedIn" class="wc-mid-login">
+            <div class="wc-log-title">📱 登录内置微信（微信{{ curSlot + 1 }}）</div>
+            <p class="wc-login-desc">
+              用手机微信<b>扫码登录</b>（建议用专用小号），该账号将完全在 ClawDesk 内运行，
+              不影响电脑上正常使用的微信。
+            </p>
+            <div v-if="qrSvg" class="wc-qr-svg" v-html="qrSvg"></div>
+            <img v-else-if="qrcodeUrl" class="wc-qr-img" :src="qrcodeUrl" alt="微信登录二维码" />
+            <div class="wc-qr-hint">
+              <template v-if="qrState === 'loading'">获取二维码中…</template>
+              <template v-else-if="qrState === 'wait'">⏳ 等待扫码…</template>
+              <template v-else-if="qrState === 'scaned'">📲 已扫码，等待手机确认…</template>
+              <template v-else-if="qrState === 'confirmed'">✅ 登录成功，正在进入内置微信…</template>
+              <template v-else-if="qrState === 'need_verifycode'">🔢 手机微信显示配对码，请在下框输入</template>
+            </div>
+            <div v-if="qrState === 'need_verifycode'" class="wc-verify">
+              <input
+                v-model="verifyCode"
+                class="wc-input"
+                placeholder="输入手机微信显示的配对码"
+                @keydown.enter="submitVerifyCode"
+              />
+              <button class="wc-btn wc-primary" @click="submitVerifyCode">提交</button>
+            </div>
+            <div class="wc-login-ops">
+              <button class="wc-btn wc-primary" @click="startQr" :disabled="qrState === 'loading'">
+                {{ qrState === 'loading' ? '获取中…' : '获取登录二维码' }}
+              </button>
+              <button v-if="qrState === 'wait' || qrState === 'scaned'" class="wc-btn" @click="refreshQr">刷新二维码</button>
+            </div>
+            <p class="wc-login-tip">提示：顶部「微信1 ~ 微信10」是 10 个互不影响的独立账号，可分别扫码登录不同的微信号。</p>
+          </div>
+
+          <!-- 已登录：会话列表 + 聊天窗 -->
+          <template v-else>
+          <!-- 会话列表 -->
+          <div class="wc-chat-list">
+            <div class="wc-log-title">💬 会话（{{ chats.length }}）</div>
+            <div
+              v-for="c in chats"
+              :key="c.dir"
+              class="wc-chat-item"
+              :class="{ active: c.dir === activeChat }"
+              @click="openChat(c.dir)"
+            >
+              <span class="wc-chat-name">{{ c.dir }}</span>
+              <span class="wc-chat-preview">{{ typeIcon(c.lastType) }} {{ c.last }}</span>
+              <span class="wc-chat-time">{{ fmtTs(c.lastTime) }}</span>
+            </div>
+            <p v-if="!chats.length" class="wc-log-empty">暂无会话 — 好友发来消息后自动出现在这里</p>
+          </div>
+          <!-- 聊天窗 -->
+          <div class="wc-chat-main">
+            <template v-if="activeChat">
+              <div class="wc-chat-head">{{ activeChat }} <span class="wc-state">· {{ chatTip }}</span></div>
+              <div class="wc-bubbles">
+                <div v-for="(m, i) in chatMsgs" :key="i" class="wc-bubble-row" :class="m.fromBot ? 'me' : 'them'">
+                  <div class="wc-bubble" :title="fmtTs(m.timestamp)">{{ m.content }}</div>
+                </div>
+                <p v-if="!chatMsgs.length" class="wc-log-empty">暂无消息，发一句开场白吧</p>
+              </div>
+              <div class="wc-chat-input">
+                <textarea
+                  v-model="chatInput"
+                  rows="2"
+                  placeholder="以该微信身份发送消息（Enter 发送，Shift+Enter 换行）"
+                  @keydown.enter.exact.prevent="sendChat"
+                ></textarea>
+                <button class="wc-btn wc-primary" :disabled="chatSending || !chatInput.trim() || !activeChat" @click="sendChat">
+                  {{ chatSending ? "发送中…" : "发送" }}
+                </button>
+              </div>
+            </template>
+            <p v-else class="wc-log-empty" style="margin-top:40px; text-align:center;">← 选择一个会话开始聊天<br /><br />这是该微信的内置聊天界面，<br />AI 自动回复与本界面共用同一会话</p>
+          </div>
+          </template>
+        </div>
+
         <!-- 右：最近消息 + 聊天记录 -->
         <div class="wc-right">
           <div class="wc-log-title">最近消息（{{ messages.length }}）</div>
@@ -564,7 +932,7 @@ async function testReply() {
             <div v-for="m in messages" :key="m.msgId + m.timestamp" class="wc-msg">
               <div class="wc-msg-meta">
                 <span class="wc-msg-from">{{ m.fromUser.slice(0, 8) }}</span>
-                <span class="wc-msg-time">{{ fmtTs(m.timestamp) }}</span>
+                <span class="wc-msg-time">{{ fmtTs(m.timestamp) }} {{ typeIcon(m.msgType) }}</span>
               </div>
               <div class="wc-msg-content">{{ m.content }}</div>
             </div>
@@ -575,7 +943,7 @@ async function testReply() {
             <div v-for="(h, i) in historyList.slice(-20).reverse()" :key="i" class="wc-msg">
               <div class="wc-msg-meta">
                 <span class="wc-msg-from">{{ h.fromUser === h.toUser ? h.fromUser.slice(0, 8) : "我" }}</span>
-                <span class="wc-msg-time">{{ fmtTs(h.timestamp) }} · {{ h.msgType }}</span>
+                <span class="wc-msg-time">{{ fmtTs(h.timestamp) }} · {{ typeIcon(h.msgType) }}</span>
               </div>
               <div class="wc-msg-content">{{ String(h.content || "").slice(0, 120) }}</div>
             </div>
@@ -599,8 +967,8 @@ async function testReply() {
   backdrop-filter: blur(4px);
 }
 .wc-card {
-  width: min(880px, 92vw);
-  height: min(600px, 86vh);
+  width: min(1180px, 96vw);
+  height: min(640px, 88vh);
   background: linear-gradient(180deg, #1b2233 0%, #141a28 100%);
   border: 1px solid #2c3a55;
   border-radius: 14px;
@@ -656,7 +1024,7 @@ async function testReply() {
   min-height: 0;
 }
 .wc-left {
-  width: 46%;
+  width: 32%;
   border-right: 1px solid #26324a;
   padding: 16px;
   display: flex;
@@ -669,6 +1037,152 @@ async function testReply() {
 }
 .wc-left > *:not(.wc-log) {
   flex-shrink: 0;
+}
+/* ── 中栏：内置微信聊天界面 ── */
+.wc-mid {
+  width: 38%;
+  border-right: 1px solid #26324a;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #121826;
+}
+.wc-chat-list {
+  height: 34%;
+  border-bottom: 1px solid #26324a;
+  padding: 10px 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.wc-chat-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  background: #1b2436;
+  border: 1px solid transparent;
+  min-width: 0;
+}
+.wc-chat-item:hover { border-color: #2c3a55; }
+.wc-chat-item.active { border-color: #3b82f6; background: #1f2b41; }
+.wc-chat-name {
+  font-size: 12px;
+  color: #e8edf7;
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wc-chat-preview {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wc-chat-time { font-size: 10px; color: #64748b; flex-shrink: 0; }
+.wc-chat-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+}
+.wc-chat-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e8edf7;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #26324a;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.wc-bubbles {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+}
+.wc-bubble-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.wc-bubble-row.me { align-items: flex-end; }
+.wc-bubble {
+  max-width: 82%;
+  padding: 7px 11px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.wc-bubble-row.them .wc-bubble { background: #26324a; color: #e8edf7; border-bottom-left-radius: 3px; }
+.wc-bubble-row.me .wc-bubble { background: #1d4ed8; color: #fff; border-bottom-right-radius: 3px; }
+.wc-chat-input {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid #26324a;
+  flex-shrink: 0;
+}
+.wc-chat-input textarea {
+  flex: 1;
+  resize: none;
+  background: #1b2436;
+  border: 1px solid #2c3a55;
+  border-radius: 8px;
+  color: #e8edf7;
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+  font-family: inherit;
+  line-height: 1.5;
+  min-height: 54px;
+  max-height: 120px;
+}
+.wc-chat-input textarea:focus { border-color: #3b82f6; }
+/* ── 中栏登录面板（未登录时） ── */
+.wc-mid-login {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 20px;
+  overflow-y: auto;
+}
+.wc-login-desc {
+  font-size: 12px;
+  color: #94a3b8;
+  text-align: center;
+  line-height: 1.7;
+  margin: 0;
+}
+.wc-login-ops {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wc-login-tip {
+  font-size: 11px;
+  color: #64748b;
+  text-align: center;
+  margin: 0;
+  line-height: 1.6;
 }
 .wc-right {
   flex: 1;

@@ -69,12 +69,13 @@ pub struct ToolDispatcher {
 }
 
 impl ToolDispatcher {
-    /// 默认熔断阈值：5 轮（DEV_SPEC.md §9；可在设置 maxToolRounds 调整）。
+    /// 默认熔断阈值：15 轮（2026-08-12 统一：与 settings.maxToolRounds / 系统提示一致；
+    /// 可在设置 maxToolRounds 调整，agent_chat 每次调用时同步）。
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
         Self {
             registry,
             middleware: RwLock::new(Vec::new()),
-            max_rounds: RwLock::new(5),
+            max_rounds: RwLock::new(15),
         }
     }
 
@@ -189,19 +190,19 @@ mod tests {
     #[tokio::test]
     async fn reject_round_exceeded() {
         let dispatcher = ToolDispatcher::new(registry_with(echo_def(), echo_handler()));
-        // 默认熔断 5 轮，round=6 必须被拒
+        // 默认熔断 15 轮，round=16 必须被拒
         let err = dispatcher
-            .dispatch(call("builtin:echo", 6), ToolContext::default())
+            .dispatch(call("builtin:echo", 16), ToolContext::default())
             .await
             .unwrap_err();
         assert_eq!(err.kind, ToolErrorKind::MaxRoundsExceeded);
     }
 
     #[tokio::test]
-    async fn round_5_is_allowed() {
+    async fn round_15_is_allowed() {
         let dispatcher = ToolDispatcher::new(registry_with(echo_def(), echo_handler()));
         let result = dispatcher
-            .dispatch(call("builtin:echo", 5), ToolContext::default())
+            .dispatch(call("builtin:echo", 15), ToolContext::default())
             .await
             .unwrap();
         assert!(result.is_success());

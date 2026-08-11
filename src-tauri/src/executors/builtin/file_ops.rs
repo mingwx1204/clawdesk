@@ -265,6 +265,11 @@ fn extract_pdf_text(path: &str, bytes: &[u8]) -> Result<serde_json::Value, Strin
 
 /// 读取 zip 压缩包：列出文件清单 + 尝试读取第一个文本/PDF 内容。
 /// 让 AI 不依赖外部工具就能"看见"压缩包内部。
+///
+/// ★ 防解压炸弹（2026-08-12 修复）：单条目声明大小 > 1MB 直接拒绝；
+/// 实际解压字节总数限制 256KB（`Read::take` 截断，恶意声明小尺寸的条目也会被拦）。
+const MAX_ZIP_DECLARED_SIZE: u64 = 1024 * 1024; // 单条目声明大小上限 1MB
+const MAX_ZIP_EXTRACT_TOTAL: u64 = 256 * 1024; // 解压总量上限 256KB
 fn read_zip_archive(path: &str, bytes: &[u8]) -> Result<serde_json::Value, String> {
     use std::io::Cursor;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
@@ -273,6 +278,7 @@ fn read_zip_archive(path: &str, bytes: &[u8]) -> Result<serde_json::Value, Strin
     let mut file_list: Vec<String> = Vec::new();
     let mut first_text: Option<String> = None;
     let mut first_name = String::new();
+    let mut total_read: u64 = 0; // 累计解压字节数
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -280,6 +286,14 @@ fn read_zip_archive(path: &str, bytes: &[u8]) -> Result<serde_json::Value, Strin
         let name = entry.name().to_string();
         if entry.is_dir() {
             continue;
+        }
+        // ★ 声明大小超限直接拒绝（防解压炸弹）
+        if entry.size() > MAX_ZIP_DECLARED_SIZE {
+            return Err(format!(
+                "压缩包条目 `{}` 声明大小 {}MB 超限（>1MB），拒绝解压（防解压炸弹）",
+                name,
+                entry.size() / (1024 * 1024)
+            ));
         }
         file_list.push(format!("- {} ({}KB)", name, entry.size() / 1024));
         // 第一个文本类文件：读出内容给 AI（最多 50KB）
@@ -302,9 +316,22 @@ fn read_zip_archive(path: &str, bytes: &[u8]) -> Result<serde_json::Value, Strin
                 || lower.ends_with(".py")
                 || lower.ends_with(".html");
             if is_text {
-                let mut buf = Vec::with_capacity(entry.size() as usize);
-                std::io::copy(&mut entry, &mut buf)
-                    .map_err(|e| format!("读取压缩包内文件失败: {e}"))?;
+                // ★ 解压总量截断：take 限制单条目读取量，防止高压缩比炸弹解出 GB 级数据
+                let remaining = MAX_ZIP_EXTRACT_TOTAL.saturating_sub(total_read);
+                let mut buf = Vec::with_capacity(entry.size().min(remaining) as usize);
+                // UFCS 明确调用 Read::take（避免与方法解析歧义报"不是迭代器"）
+                let n = std::io::copy(
+                    &mut std::io::Read::take(&mut entry, remaining + 1),
+                    &mut buf,
+                )
+                .map_err(|e| format!("读取压缩包内文件失败: {e}"))?;
+                total_read += n;
+                if n > remaining || total_read > MAX_ZIP_EXTRACT_TOTAL {
+                    return Err(format!(
+                        "压缩包解压总量超过 {}KB，已终止（防解压炸弹）",
+                        MAX_ZIP_EXTRACT_TOTAL / 1024
+                    ));
+                }
                 let content = if lower.ends_with(".pdf") && buf.starts_with(b"%PDF") {
                     // PDF 走轻量提取
                     extract_pdf_text(&name, &buf)
@@ -361,9 +388,13 @@ fn write_file(path: &str, content: &str) -> Result<serde_json::Value, String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
+    // ★ 2026-08-12：备份名加随机后缀 —— 同一毫秒内多次写同一文件时，
+    //   `{时间戳}_{file_name}.bak` 会同名覆盖导致旧备份丢失。
+    let rand_suffix: String = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
     let backup = snapshot_dir.join(format!(
-        "{}_{}.bak",
+        "{}_{}_{}.bak",
         chrono::Local::now().format("%Y%m%d_%H%M%S%3f"),
+        rand_suffix,
         file_name
     ));
     if std::path::Path::new(path).exists() {

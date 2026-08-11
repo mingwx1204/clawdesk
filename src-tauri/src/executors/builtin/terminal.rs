@@ -86,6 +86,10 @@ pub fn register(registry: &ToolRegistry) -> Result<(), ToolError> {
 }
 
 /// 执行 PowerShell（带超时）。
+///
+/// ★ 管道死锁修复（2026-08-12）：spawn 后**立即**起两个 reader 线程边执行边收集
+///   stdout/stderr —— 旧实现等进程退出后才读，输出超 64KB 管道缓冲时子进程阻塞
+///   写不出去 → 永不退出 → 30s 超时。超时 kill 时用 taskkill /T 杀进程树（含子进程）。
 fn run_powershell(command: &str) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("powershell");
     hide_console(&mut cmd)
@@ -96,29 +100,90 @@ fn run_powershell(command: &str) -> Result<serde_json::Value, String> {
         .spawn()
         .map_err(|e| format!("无法启动 PowerShell: {}", e))?;
 
+    // 立即起 reader 线程（单管道最多保留 1MB，超出丢弃但继续排空，防止再次阻塞子进程）
+    const MAX_CAPTURE: usize = 1024 * 1024;
+    let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 65536];
+            loop {
+                match std::io::Read::read(&mut stdout, &mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if buf.len() < MAX_CAPTURE {
+                            let take = n.min(MAX_CAPTURE - buf.len());
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                }
+            }
+            let _ = tx_out.send(buf);
+        });
+    } else {
+        let _ = tx_out.send(Vec::new());
+    }
+    let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 65536];
+            loop {
+                match std::io::Read::read(&mut stderr, &mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if buf.len() < MAX_CAPTURE {
+                            let take = n.min(MAX_CAPTURE - buf.len());
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                }
+            }
+            let _ = tx_err.send(buf);
+        });
+    } else {
+        let _ = tx_err.send(Vec::new());
+    }
+
     // 简单超时：轮询等待（PowerShell 进程）
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|e| format!("等待进程失败: {}", e))? {
-            let mut out = String::new();
-            let mut err = String::new();
-            if let Some(mut stdout) = child.stdout.take() {
-                let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
-            }
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
-            }
+            let out = rx_out.recv().unwrap_or_default();
+            let err = rx_err.recv().unwrap_or_default();
+            let out_s = String::from_utf8_lossy(&out).into_owned();
+            let err_s = String::from_utf8_lossy(&err).into_owned();
             return Ok(json!({
                 "exitCode": status.code().unwrap_or(-1),
-                "stdout": truncate(&out, 4000),
-                "stderr": truncate(&err, 2000),
+                "stdout": truncate(&out_s, 4000),
+                "stderr": truncate(&err_s, 2000),
             }));
         }
         if start.elapsed() > CMD_TIMEOUT {
-            let _ = child.kill();
+            kill_process_tree(child.id());
+            let _ = child.wait(); // 回收僵尸进程
             return Err("命令执行超时（30s），已终止".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// 超时终止：Windows 用 taskkill /T /F 杀整棵进程树（含子进程），
+/// 避免只杀父进程留下后台子进程继续运行；非 Windows 直接 SIGKILL。
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
     }
 }
 

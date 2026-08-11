@@ -124,11 +124,20 @@ export interface WechatBotConfig {
 export interface WechatMessage {
   msgId: string;
   fromUser: string;
+  /** 消息文本（含语音云端转写 `[语音] …`、引用消息注记） */
   content: string;
   msgType: string;
   timestamp: number;
   /** iLink 消息上下文令牌（回复时必须携带） */
   contextToken?: string;
+  /** 所属微信槽位（0 = 微信1 …），每个槽位独立会话记忆/人设 */
+  botSlot?: number;
+  /** 图片本地路径（后端已下载解密，AI 用 analyze_image 读取） */
+  images?: string[];
+  /** 文件/语音/视频本地路径（AI 用 file_read 读取） */
+  attachments?: string[];
+  /** 语音云端转写文本（腾讯已转好；内容里已含 `[语音] …`，此字段供前端标记） */
+  voiceTranscript?: string;
 }
 
 /** 微信 Bot 运行状态 */
@@ -141,6 +150,19 @@ export interface WechatBotState {
   /** 是否已登录（本地保存了 bot token） */
   loggedIn?: boolean;
   botId?: string;
+  /** 能力声明（对齐 AstrBot PlatformMetadata）：上层据此决定 UI 与行为 */
+  capabilities?: {
+    sendText: boolean;
+    sendImage: boolean;
+    receiveVoiceTranscript: boolean;
+    receiveImages: boolean;
+    receiveFiles: boolean;
+    replyQuote: boolean;
+    typing: boolean;
+    proactive: boolean;
+    groupChat: boolean;
+    sendVoice: boolean;
+  };
 }
 
 /** 微信登录二维码 */

@@ -15,12 +15,13 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use aes::Aes128;
 use cipher::generic_array::GenericArray;
 use cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use futures_util::FutureExt;
 use md5::{Digest, Md5};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -78,6 +79,9 @@ pub struct WechatMessage {
     /// 文件/语音/视频本地路径（AI 用 file_read 读取）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
+    /// 语音云端转写文本（腾讯服务器已转好；已拼入 content 的 `[语音] …`，单独字段供前端标记）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_transcript: Option<String>,
 }
 
 /// 进行中的二维码登录会话
@@ -90,13 +94,20 @@ pub(crate) struct QrSession {
     polling_base: String,
 }
 
-/// 持久化的账号文件
+/// 持久化的账号文件（DPAPI 加密落盘）
+/// 含 get_updates 游标（sync_buf）与各用户 context_token：重启后断点续拉，不丢消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AccountFile {
     token: String,
     bot_id: String,
     base_url: String,
     user_id: String,
+    /// get_updates 同步游标（base64 字符串），重启后从断点续拉
+    #[serde(default)]
+    sync_buf: String,
+    /// from_user_id -> 最近 context_token（回复必须携带），重启后无需等新消息即可回复
+    #[serde(default)]
+    context_tokens: std::collections::HashMap<String, String>,
 }
 
 /// Bot 内部状态（跨线程共享）—— 每个微信槽位一个实例，互不干扰
@@ -116,10 +127,30 @@ pub(crate) struct WechatInner {
     pub context_map: Mutex<HashMap<String, String>>,
     /// 登录时从 getconfig 获取，用于发送"正在输入"状态
     pub typing_ticket: Mutex<Option<String>>,
+    /// per-user typing ticket 缓存（user_id -> ticket）：ticket 必须带
+    /// 该用户的 context_token 单独获取，且有 TTL（60s）需定期刷新
+    pub typing_tickets: Mutex<HashMap<String, TypingTicketEntry>>,
+    /// typing 保活任务（AI 生成期间每 10s 持续发送"正在输入"）
+    pub typing_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// typing 当前目标用户（None 表示无保活任务）
+    pub typing_target: Mutex<Option<String>>,
     pub qr_session: Mutex<Option<QrSession>>,
     pub data_dir: Mutex<Option<PathBuf>>,
     /// 该微信的人设（system prompt 文本，可随时修改，AI 回复时注入）
     pub persona: Mutex<Option<String>>,
+    /// 聊天白名单（from_user_id 列表；空 = 不限制，只和这些人聊天）
+    /// 配置后，白名单外的用户发消息会被忽略（不自动回复、不主动聊天）
+    pub allowed_users: Mutex<Vec<String>>,
+    /// AI 语音音色 ID（Edge TTS；用于语音回复，空 = 默认晓晓）
+    pub voice_id: Mutex<Option<String>>,
+    /// 语音引擎（edge / cosyvoice / indextts；indextts 用本地 IndexTTS2 声音克隆）
+    pub voice_engine: Mutex<String>,
+    /// 硅基流动 API Key（CosyVoice 用；空则回退 Edge TTS）
+    pub cosyvoice_api_key: Mutex<Option<String>>,
+    /// IndexTTS2 本地服务地址（如 http://127.0.0.1:8000）
+    pub indextts_url: Mutex<Option<String>>,
+    /// IndexTTS2 参考音频路径（声音克隆的母版，如 D:\...\诗妍.wav）
+    pub indextts_voice_path: Mutex<Option<String>>,
     /// 聊天记录 JSONL 文件路径（D:\ClawDeskData\wechat\slot{N}\history.jsonl）
     pub history_path: Mutex<Option<PathBuf>>,
     /// 主动聊天开关（Bot 主动找用户聊）
@@ -136,7 +167,20 @@ pub(crate) struct WechatInner {
     pub proactive_last_msg: Mutex<Option<String>>,
     /// 连续空闲轮数（AI 发言占比过高/用户未回复时的退避计数，用户回复后重置）
     pub proactive_idle_rounds: Mutex<u64>,
+    /// 用户最近一次发消息的时间戳（毫秒）：热聊检测依据。
+    /// 30 分钟内用户回过消息 → 进入热聊模式（短间隔续话）；超过则自然冷却回普通模式。
+    pub last_user_msg_at: Mutex<u64>,
+    /// 最近处理过的消息 ID 环形队列（去重：防止 getupdates 重复投递导致重复回复）
+    pub last_msg_ids: Mutex<std::collections::VecDeque<String>>,
     pub shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// getupdates 循环当前使用的 token（用于 start 时判断旧循环是否已过期需让位）
+    pub loop_token: Mutex<Option<String>>,
+    /// getupdates 循环代数（防旧循环退出清理误清新循环的 shutdown 槽位）
+    pub loop_gen: AtomicU64,
+    /// 主动聊天停止信号（stop/登出时置 true，proactive_loop 每轮检查）
+    pub proactive_stop: AtomicBool,
+    /// 主动聊天循环任务句柄（防重入：已存在则不重复启动）
+    pub proactive_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl WechatInner {
@@ -154,9 +198,18 @@ impl WechatInner {
             get_updates_buf: Mutex::new(String::new()),
             context_map: Mutex::new(HashMap::new()),
             typing_ticket: Mutex::new(None),
+            typing_tickets: Mutex::new(HashMap::new()),
+            typing_task: Mutex::new(None),
+            typing_target: Mutex::new(None),
             qr_session: Mutex::new(None),
             data_dir: Mutex::new(None),
             persona: Mutex::new(None),
+            allowed_users: Mutex::new(Vec::new()),
+            voice_id: Mutex::new(None),
+            voice_engine: Mutex::new("edge".to_string()),
+            cosyvoice_api_key: Mutex::new(None),
+            indextts_url: Mutex::new(None),
+            indextts_voice_path: Mutex::new(None),
             history_path: Mutex::new(None),
             proactive_enabled: AtomicBool::new(false),
             proactive_interval_min: Mutex::new(1),
@@ -165,8 +218,30 @@ impl WechatInner {
             proactive_target: Mutex::new(None),
             proactive_last_msg: Mutex::new(None),
             proactive_idle_rounds: Mutex::new(0),
+            last_user_msg_at: Mutex::new(0),
+            last_msg_ids: Mutex::new(std::collections::VecDeque::new()),
             shutdown: Mutex::new(None),
+            loop_token: Mutex::new(None),
+            loop_gen: AtomicU64::new(0),
+            proactive_stop: AtomicBool::new(false),
+            proactive_task: Mutex::new(None),
         }
+    }
+    /// 聊天白名单检查：allowed_users 非空时，只有名单内的用户才会被处理
+    fn is_allowed(&self, from: &str) -> bool {
+        let list = self.allowed_users.lock();
+        if list.is_empty() {
+            return true;
+        }
+        list.iter().any(|u| u == from)
+    }
+
+    /// 该 AI 的语音音色（默认晓晓）
+    fn voice(&self) -> String {
+        self.voice_id
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string())
     }
 }
 
@@ -305,7 +380,7 @@ fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
 /// 安全截取前 max_chars 个字符（按字符数，不按字节）。
 /// ★ 修复：`&s[..s.len().min(n)]` 按字节切片，中文等多字节字符会被切到中间
 ///   → 触发 "byte index is not a char boundary" panic（曾导致 getupdates 循环崩溃）。
-fn trunc_chars(s: &str, max_chars: usize) -> &str {
+pub fn trunc_chars(s: &str, max_chars: usize) -> &str {
     if s.len() <= max_chars {
         return s;
     }
@@ -466,12 +541,14 @@ fn detect_image_ext(bytes: &[u8]) -> &'static str {
     "bin"
 }
 
-/// 处理单个媒体 item：下载 + 解密 + 保存到附件目录，返回 (本地路径, 种类)
+/// 处理单个媒体 item：下载 + 解密 + 保存到附件目录，返回 (本地路径, 种类, 语音云端转写文本)。
+/// 第三个返回值仅语音消息（ITEM_TYPE_VOICE）携带：腾讯服务器已把语音转成文字
+/// （voice_item.text），直接拼入消息文本即可让 AI 听懂语音，无需本地 ASR。
 async fn process_media_item(
     client: &reqwest::Client,
     item: &serde_json::Value,
     dir: &std::path::Path,
-) -> Option<(String, WechatMediaKind)> {
+) -> Option<(String, WechatMediaKind, Option<String>)> {
     let item_type = item["type"].as_i64()?;
     let (media, filename, aes_key_b64, kind) = match item_type {
         ITEM_TYPE_IMAGE => {
@@ -546,7 +623,10 @@ async fn process_media_item(
         _ => format!("wechat_{}.{}", ts, ext),
     };
     let path = dir.join(&fname);
-    std::fs::write(&path, &bytes).ok()?;
+    // 异步写盘：getupdates 热路径不做阻塞 IO
+    tokio::fs::write(&path, &bytes).await.ok()?;
+    // ★ 旧文件清理（按天，低频）：inbound 目录超 7 天的媒体自动删除
+    crate::executors::builtin::attachment::cleanup_old_files(dir, 7, 1);
 
     // ★ 压缩包自动解压：用户发 .zip（≤2MB）→ 解压到附件目录，AI 可直接查看内部文件。
     //   超 2MB 不解压，返回明确提示（避免解压炸弹 / 大文件撑爆磁盘）。
@@ -558,13 +638,106 @@ async fn process_media_item(
                 fname,
                 bytes.len() / 1024
             );
-        } else if let Ok(extract_dir) = extract_zip_archive(&path, dir) {
-            eprintln!("[wechat] 压缩包 {} 已解压到: {}", fname, extract_dir.display());
-            return Some((extract_dir.to_string_lossy().to_string(), WechatMediaKind::File));
+        } else {
+            // ZIP 解压为 CPU/IO 重活 → 移到阻塞线程池，避免卡住 getupdates 异步循环
+            let zip_path = path.clone();
+            let parent = dir.to_path_buf();
+            let extracted = tokio::task::spawn_blocking(move || {
+                extract_zip_archive(&zip_path, &parent)
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok());
+            if let Some(extract_dir) = extracted {
+                eprintln!("[wechat] 压缩包 {} 已解压到: {}", fname, extract_dir.display());
+                return Some((
+                    extract_dir.to_string_lossy().to_string(),
+                    WechatMediaKind::File,
+                    None,
+                ));
+            }
         }
     }
 
-    Some((path.to_string_lossy().to_string(), kind))
+    // ★ 语音云端转写：voice_item.text 是腾讯服务器已转好的文字（可能为空/缺失）
+    let voice_transcript = if kind == WechatMediaKind::Voice {
+        item["voice_item"]["text"]
+            .as_str()
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+
+    Some((path.to_string_lossy().to_string(), kind, voice_transcript))
+}
+
+/// 引用消息信息（ref_msg 解析结果）
+struct RefMsgInfo {
+    /// 引用描述文本（被引用文本/语音转写），拼入消息文本头部
+    note: String,
+    /// 被引用图片路径（进前端 images，AI 用 analyze_image 读取）
+    images: Vec<String>,
+    /// 被引用其他媒体路径（进前端 attachments，AI 用 file_read 读取）
+    attachments: Vec<String>,
+}
+
+/// 解析引用消息（ref_msg，openclaw-weixin 协议）：
+/// ref_msg.message_item 携带被引用的原消息（文本或媒体 item），
+/// 提取为 AI 可读的描述文本 + 下载被引用媒体供 AI 读取。
+async fn parse_ref_msg(
+    client: &reqwest::Client,
+    ref_msg: &serde_json::Value,
+    inbound: &std::path::Path,
+) -> Option<RefMsgInfo> {
+    let message_item = ref_msg.get("message_item")?;
+    if !message_item.is_object() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut images: Vec<String> = Vec::new();
+    let mut attachments: Vec<String> = Vec::new();
+
+    // 被引用文本
+    if let Some(t) = message_item["text_item"]["text"].as_str() {
+        let t = t.trim();
+        if !t.is_empty() {
+            parts.push(t.to_string());
+        }
+    }
+    // 被引用语音的云端转写文本
+    if let Some(t) = message_item["voice_item"]["text"].as_str() {
+        let t = t.trim();
+        if !t.is_empty() {
+            parts.push(format!("[语音转写] {}", t));
+        }
+    }
+    // 被引用媒体（图片/语音/视频/文件）：下载解密到附件目录供 AI 读取
+    if let Some(t) = message_item["type"].as_i64() {
+        if (2..=5).contains(&t) {
+            if let Some((path, kind, _)) =
+                process_media_item(client, message_item, inbound).await
+            {
+                match kind {
+                    WechatMediaKind::Image => images.push(path),
+                    _ => attachments.push(path),
+                }
+            }
+        }
+    }
+    if parts.is_empty() && images.is_empty() && attachments.is_empty() {
+        return None;
+    }
+    let note = if parts.is_empty() {
+        "[用户引用了消息]（媒体见下方）".to_string()
+    } else {
+        format!("[用户引用了消息：{}]", parts.join("；"))
+    };
+    Some(RefMsgInfo {
+        note,
+        images,
+        attachments,
+    })
 }
 
 /// 解压 zip 到同目录 `{文件名}_解压/`，返回解压目录路径。
@@ -686,7 +859,7 @@ fn proactive_file(inner: &Arc<WechatInner>) -> Option<PathBuf> {
 /// 重启后 proactive.json 中目标为空时，用历史最后一条的对方用户作为目标，
 /// 保证「自动（最近聊过的人）」模式在无人新发消息时也能触发主动聊天。
 fn last_history_peer(inner: &Arc<WechatInner>) -> Option<String> {
-    let recs = read_history(inner);
+    let recs = read_history_limit(inner, 200);
     for r in recs.iter().rev() {
         if let Some(d) = r.get("dir").and_then(|x| x.as_str()) {
             let d = d.trim();
@@ -698,7 +871,7 @@ fn last_history_peer(inner: &Arc<WechatInner>) -> Option<String> {
     None
 }
 
-/// 持久化主动聊天设置（应用退出 / 重启后恢复上次配置，不丢用户设置）
+/// 持久化主动聊天设置 + 白名单 + 音色（应用退出 / 重启后恢复上次配置，不丢用户设置）
 fn save_proactive(inner: &Arc<WechatInner>) {
     let Some(path) = proactive_file(inner) else { return };
     let data = serde_json::json!({
@@ -708,6 +881,12 @@ fn save_proactive(inner: &Arc<WechatInner>) {
         "lastAt": *inner.proactive_last_at.lock(),
         "target": inner.proactive_target.lock().clone().unwrap_or_default(),
         "lastMsg": inner.proactive_last_msg.lock().clone().unwrap_or_default(),
+        "allowedUsers": inner.allowed_users.lock().clone(),
+        "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
+        "voiceEngine": inner.voice_engine.lock().clone(),
+        "cosyvoiceApiKey": inner.cosyvoice_api_key.lock().clone().unwrap_or_default(),
+        "indexttsUrl": inner.indextts_url.lock().clone().unwrap_or_default(),
+        "indexttsVoicePath": inner.indextts_voice_path.lock().clone().unwrap_or_default(),
     });
     if let Ok(json) = serde_json::to_string_pretty(&data) {
         if let Err(e) = write_text_atomic(&path, &json) {
@@ -744,6 +923,50 @@ fn load_proactive(inner: &Arc<WechatInner>) {
     if let Some(m) = v.get("lastMsg").and_then(|x| x.as_str()) {
         let m = m.trim().to_string();
         *inner.proactive_last_msg.lock() = if m.is_empty() { None } else { Some(m) };
+    }
+    // ★ 聊天白名单（逗号/换行分隔）
+    if let Some(list) = v.get("allowedUsers").and_then(|x| x.as_array()) {
+        let cleaned: Vec<String> = list
+            .iter()
+            .filter_map(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        *inner.allowed_users.lock() = cleaned;
+    }
+    // ★ AI 语音音色
+    if let Some(vid) = v.get("voiceId").and_then(|x| x.as_str()) {
+        let vid = vid.trim();
+        if !vid.is_empty() {
+            *inner.voice_id.lock() = Some(vid.to_string());
+        }
+    }
+    // ★ 语音引擎
+    if let Some(eng) = v.get("voiceEngine").and_then(|x| x.as_str()) {
+        let eng = eng.trim();
+        if eng == "edge" || eng == "cosyvoice" {
+            *inner.voice_engine.lock() = eng.to_string();
+        }
+    }
+    // ★ CosyVoice API Key
+    if let Some(k) = v.get("cosyvoiceApiKey").and_then(|x| x.as_str()) {
+        let k = k.trim();
+        if !k.is_empty() {
+            *inner.cosyvoice_api_key.lock() = Some(k.to_string());
+        }
+    }
+    // ★ IndexTTS2 服务地址与参考音频
+    if let Some(u) = v.get("indexttsUrl").and_then(|x| x.as_str()) {
+        let u = u.trim();
+        if !u.is_empty() {
+            *inner.indextts_url.lock() = Some(u.to_string());
+        }
+    }
+    if let Some(p) = v.get("indexttsVoicePath").and_then(|x| x.as_str()) {
+        let p = p.trim();
+        if !p.is_empty() {
+            *inner.indextts_voice_path.lock() = Some(p.to_string());
+        }
     }
     // ★ 磁盘目标为空（未手动指定过）→ 从聊天记录恢复最近聊过的人，
     //   否则「自动（最近聊过的人）」重启后 target 为 None，主动聊天永不触发
@@ -826,6 +1049,7 @@ pub(crate) fn history_path_of(inner: &Arc<WechatInner>) -> Option<PathBuf> {
 
 /// 追加一条聊天记录（用户消息或 AI 回复都记录，保证完整双向聊天记录）
 /// from_bot：该消息是否为 AI 发送（true=AI / 主动消息，false=用户消息）
+/// proactive：是否主动聊天循环发出的消息（区分手动/自动回复，存在感统计只计主动消息）
 pub(crate) fn append_history(
     inner: &Arc<WechatInner>,
     dir: &str,
@@ -833,6 +1057,7 @@ pub(crate) fn append_history(
     content: &str,
     msg_type: &str,
     from_bot: bool,
+    proactive: bool,
 ) {
     let Some(path) = history_path_of(inner) else { return };
     let rec = serde_json::json!({
@@ -844,6 +1069,7 @@ pub(crate) fn append_history(
         "msgType": msg_type,
         "timestamp": now_millis(),
         "fromBot": from_bot,
+        "proactive": proactive,
     });
     let line = format!("{}\n", rec.to_string());
     use std::io::Write;
@@ -859,11 +1085,29 @@ pub fn persona_of(inner: &Arc<WechatInner>) -> Option<String> {
 
 /// 读取该微信全部聊天记录（供前端展示 / 导出）
 pub(crate) fn read_history(inner: &Arc<WechatInner>) -> Vec<serde_json::Value> {
+    read_history_limit(inner, 0)
+}
+
+/// 读取该微信聊天记录（limit=0 表示全部；>0 时只解析最近 limit 条，
+/// 供 5 秒轮询 / 主动聊天每轮使用，避免 history.jsonl 无界增长拖慢热路径）
+pub(crate) fn read_history_limit(
+    inner: &Arc<WechatInner>,
+    limit: usize,
+) -> Vec<serde_json::Value> {
     let Some(path) = history_path_of(inner) else { return vec![] };
     let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
-    text.lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .collect()
+    let lines: Vec<&str> = text.lines().collect();
+    if limit > 0 && lines.len() > limit {
+        lines[lines.len() - limit..]
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .collect()
+    } else {
+        lines
+            .iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .collect()
+    }
 }
 
 async fn save_account(inner: &Arc<WechatInner>) {
@@ -885,7 +1129,21 @@ async fn save_account(inner: &Arc<WechatInner>) {
     if token.is_empty() {
         return;
     }
-    let acc = AccountFile { token, bot_id, base_url, user_id };
+    // ★ 游标与 context_token 一并持久化：重启后从断点续拉（sync_buf），
+    //   且无需等新消息即可回复旧会话（context_tokens 恢复 context_map）
+    let (sync_buf, context_tokens) = {
+        let s = inner.get_updates_buf.lock().clone();
+        let m = inner.context_map.lock().clone();
+        (s, m)
+    };
+    let acc = AccountFile {
+        token,
+        bot_id,
+        base_url,
+        user_id,
+        sync_buf,
+        context_tokens,
+    };
     // DPAPI 加密后落盘（带魔数标记），不再明文保存凭据
     if let Ok(json) = serde_json::to_string(&acc) {
         if let Some(enc) = dpapi_encrypt(json.as_bytes()) {
@@ -916,6 +1174,13 @@ async fn load_account(inner: &Arc<WechatInner>) {
                         *inner.bot_id.lock() = Some(acc.bot_id);
                         *inner.base_url.lock() = Some(acc.base_url);
                         *inner.user_id.lock() = Some(acc.user_id);
+                        // ★ 恢复 get_updates 游标（断点续拉）与 context_token 缓存
+                        if !acc.sync_buf.is_empty() {
+                            *inner.get_updates_buf.lock() = acc.sync_buf;
+                        }
+                        if !acc.context_tokens.is_empty() {
+                            *inner.context_map.lock() = acc.context_tokens;
+                        }
                         // 旧明文文件：顺手迁移为加密格式
                         if was_plain {
                             save_account(inner).await;
@@ -1012,10 +1277,20 @@ async fn poll_qr_status(client: &reqwest::Client, session: &QrSession) -> serde_
     }
 }
 
-/// 发送"正在输入"状态（可选体验优化）
-async fn send_typing(inner: &Arc<WechatInner>, to: &str) {
+/// 单个用户的 typing ticket 缓存项（AstrBot 对齐：ticket 绑定 context_token，TTL 60s）
+#[derive(Debug, Clone)]
+struct TypingTicketEntry {
+    ticket: String,
+    ctx: String,
+    refresh_after_ms: u64,
+}
+
+/// 发送"正在输入"状态（active=true 开始输入，false 结束输入）
+/// ★ 修复：ticket 按用户获取（带 context_token），status 用 1/2（对齐 AstrBot）：
+///   旧实现用全局空 ticket + status=0，服务端不识别 → 对方看不到"正在输入"。
+async fn send_typing(inner: &Arc<WechatInner>, to: &str, active: bool) {
     let Some(token) = inner.token.lock().clone() else { return };
-    let Some(ticket) = inner.typing_ticket.lock().clone() else { return };
+    let Some(ticket) = ensure_typing_ticket(inner, to).await else { return };
     let base_url = inner
         .base_url
         .lock()
@@ -1028,36 +1303,68 @@ async fn send_typing(inner: &Arc<WechatInner>, to: &str) {
         .json(&serde_json::json!({
             "ilink_user_id": to,
             "typing_ticket": ticket,
-            "status": 1,
+            "status": if active { 1 } else { 2 },
+            "base_info": { "channel_version": CHANNEL_VERSION },
         }))
         .send()
         .await;
 }
 
-/// 登录成功后获取 typing_ticket 并缓存
-async fn refresh_typing_ticket(inner: &Arc<WechatInner>) {
-    let Some(token) = inner.token.lock().clone() else { return };
+/// 确保拿到 to 用户的 typing ticket（带 context_token，60s TTL）。
+/// 缓存有效（ctx 匹配 + 未过期）→ 复用；否则调 getconfig 现取。
+/// 没有该用户的 context_token 时返回 None（无法获取，跳过 typing）。
+async fn ensure_typing_ticket(inner: &Arc<WechatInner>, to: &str) -> Option<String> {
+    let Some(token) = inner.token.lock().clone() else { return None };
     let base_url = inner
         .base_url
         .lock()
         .clone()
         .unwrap_or_else(|| ILINK_BASE_URL.to_string());
+    let ctx = inner.context_map.lock().get(to).cloned()?;
+
+    // 缓存命中：ticket 存在 + context_token 匹配 + 未过期（60s）
+    {
+        let map = inner.typing_tickets.lock();
+        if let Some(e) = map.get(to) {
+            if e.ctx == ctx && now_millis() < e.refresh_after_ms {
+                return Some(e.ticket.clone());
+            }
+        }
+    }
+
+    // 重新获取（AstrBot 对齐：getconfig 必须带 ilink_user_id + context_token）
     let client = http_client();
-    if let Ok(resp) = client
+    let resp = client
         .post(format!("{base_url}/ilink/bot/getconfig"))
         .headers(build_headers(Some(&token)))
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({
+            "ilink_user_id": to,
+            "context_token": ctx,
+            "base_info": { "channel_version": CHANNEL_VERSION },
+        }))
         .send()
-        .await
-    {
+        .await;
+    if let Ok(resp) = resp {
         if let Ok(v) = resp.json::<serde_json::Value>().await {
             if let Some(t) = v["typing_ticket"].as_str() {
                 if !t.is_empty() {
-                    *inner.typing_ticket.lock() = Some(t.to_string());
+                    let entry = TypingTicketEntry {
+                        ticket: t.to_string(),
+                        ctx,
+                        refresh_after_ms: now_millis() + 60_000,
+                    };
+                    inner.typing_tickets.lock().insert(to.to_string(), entry);
+                    return Some(t.to_string());
                 }
             }
         }
     }
+    None
+}
+
+/// 登录成功后清理 typing ticket 缓存（旧 ticket 随会话失效，下次发送时现取）
+async fn refresh_typing_ticket(inner: &Arc<WechatInner>) {
+    inner.typing_tickets.lock().clear();
 }
 
 /// 通知腾讯服务"客户端已启动"（sendmessage 前置条件，缺省会返回 -14 session timeout）
@@ -1128,11 +1435,6 @@ async fn send_message_once(
             "context_token": context_token.unwrap_or(""),
         }
     });
-    eprintln!(
-        "[wechat] sendmessage to={} ctx={}",
-        to,
-        if context_token.unwrap_or("").is_empty() { "NONE" } else { "YES" }
-    );
     crate::llm::logging::debug("wechat", &format!("发送文本消息 to={} len={}", to, text.len()));
     let resp = client
         .post(format!("{base_url}/ilink/bot/sendmessage"))
@@ -1143,10 +1445,7 @@ async fn send_message_once(
         .map_err(|e| (format!("发送微信消息失败: {e}"), None))?;
     let status = resp.status();
     let text_resp = resp.text().await.unwrap_or_default();
-    eprintln!(
-        "[wechat] sendmessage status={status} body={}",
-        trunc_chars(&text_resp, 300)
-    );
+    eprintln!("[wechat] sendmessage status={status}");
     if !status.is_success() {
         return Err((
             format!(
@@ -1219,16 +1518,19 @@ async fn upload_image_to_cdn(
     image_path: &str,
 ) -> Result<(String, String, String), String> {
     let client = http_client();
-    let plaintext = std::fs::read(image_path).map_err(|e| format!("读取图片失败: {}", e))?;
+    let plaintext = tokio::fs::read(image_path)
+        .await
+        .map_err(|e| format!("读取图片失败: {e}"))?;
     if plaintext.is_empty() {
         return Err("图片文件为空".into());
     }
     let rawsize = plaintext.len();
     let rawfilemd5 = md5_hex(&plaintext);
-    let aeskey: Vec<u8> = (0..16).map(|_| (now_millis() as u8).wrapping_add(rand_byte())).collect();
+    let aeskey = random_16_bytes();
     let ciphertext = aes_ecb_encrypt(&plaintext, &aeskey).ok_or("AES 加密失败")?;
     let filesize = ciphertext.len();
-    let filekey = format!("{:x}", now_millis());
+    // 时间戳 + 随机 4 字节 hex：避免同毫秒 filekey 碰撞
+    let filekey = format!("{:x}{:08x}", now_millis(), random_u32());
 
     // 1) getuploadurl
     let upload_body = serde_json::json!({
@@ -1291,9 +1593,25 @@ async fn upload_image_to_cdn(
     Ok((dl, BASE64.encode(&aeskey), filekey))
 }
 
-/// 伪随机单字节（无需强随机，用于 aeskey 混淆）
-fn rand_byte() -> u8 {
-    (now_millis() as u8).wrapping_mul(31).wrapping_add(7)
+/// 16 字节真随机密钥（CDN AES 加密用，getrandom 系统级熵源）。
+/// 极低概率失败时回退到时间+伪随机混合，保证功能可用。
+fn random_16_bytes() -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        return buf.to_vec();
+    }
+    (0..16)
+        .map(|i| ((now_millis() as u8).wrapping_add(i as u8)) ^ (pseudo_rand() as u8))
+        .collect()
+}
+
+/// 随机 32 位整数（filekey 后缀防同毫秒碰撞）
+fn random_u32() -> u32 {
+    let mut buf = [0u8; 4];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        return u32::from_le_bytes(buf);
+    }
+    pseudo_rand() as u32
 }
 
 /// 字节 → hex
@@ -1401,108 +1719,444 @@ async fn send_image_once(
     Ok(())
 }
 
-// ─── getUpdates 长轮询后台循环 ───
+// ─── 微信发文件（getuploadurl media_type=3 → CDN 上传 → sendmessage file_item）───
+// 协议参考：AstrBot weixin_oc _prepare_media_item（FILE_UPLOAD_TYPE=3, FILE_ITEM_TYPE=4）
+// 用于发送 AI 语音回复（Edge TTS 合成的 mp3）等任意本地文件。
 
-async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
-    // 已有循环则不重复启动
-    if inner.shutdown.lock().is_some() {
-        return;
+/// 上传本地文件到微信 CDN，返回 (downloadEncryptedQueryParam, aeskey_base64, filekey)。
+async fn upload_file_to_cdn(
+    token: &str,
+    base_url: &str,
+    to: &str,
+    file_path: &str,
+) -> Result<(String, String, String), String> {
+    let client = http_client();
+    let plaintext = tokio::fs::read(file_path)
+        .await
+        .map_err(|e| format!("读取文件失败: {e}"))?;
+    if plaintext.is_empty() {
+        return Err("文件为空".into());
     }
-    let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
-    *inner.shutdown.lock() = Some(tx);
+    let rawsize = plaintext.len();
+    let rawfilemd5 = md5_hex(&plaintext);
+    let aeskey = random_16_bytes();
+    let ciphertext = aes_ecb_encrypt(&plaintext, &aeskey).ok_or("AES 加密失败")?;
+    let filesize = ciphertext.len();
+    // 时间戳 + 随机 4 字节 hex：避免同毫秒 filekey 碰撞
+    let filekey = format!("{:x}{:08x}", now_millis(), random_u32());
 
-    let token = inner.token.lock().clone().unwrap_or_default();
+    // 1) getuploadurl（media_type=3 = FILE）
+    let upload_body = serde_json::json!({
+        "filekey": filekey,
+        "media_type": 3, // FILE
+        "to_user_id": to,
+        "rawsize": rawsize,
+        "rawfilemd5": rawfilemd5,
+        "filesize": filesize,
+        "no_need_thumb": true,
+        "aeskey": hex_encode(&aeskey),
+        "base_info": { "channel_version": CHANNEL_VERSION, "bot_agent": "ClawDesk" },
+    });
+    let resp = client
+        .post(format!("{base_url}/ilink/bot/getuploadurl"))
+        .headers(build_headers(Some(token)))
+        .json(&upload_body)
+        .send()
+        .await
+        .map_err(|e| format!("获取上传地址失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "getuploadurl HTTP {status}: {}",
+            trunc_chars(&text, 200)
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("解析 getuploadurl 响应失败: {e}"))?;
+    if v["ret"].as_i64().unwrap_or(0) != 0 {
+        return Err(format!("getuploadurl ret={} errmsg={}", v["ret"], v["errmsg"].as_str().unwrap_or("")));
+    }
+    let upload_full_url = v["upload_full_url"].as_str().unwrap_or("").to_string();
+    let upload_param = v["upload_param"].as_str().unwrap_or("").to_string();
+    let cdn_url = if !upload_full_url.is_empty() {
+        upload_full_url
+    } else if !upload_param.is_empty() {
+        format!("{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={}", urlencode(&upload_param), urlencode(&filekey))
+    } else {
+        return Err(format!(
+            "getuploadurl 未返回上传地址: {}",
+            trunc_chars(&text, 200)
+        ));
+    };
+
+    // 2) CDN 上传密文
+    let resp = client
+        .post(&cdn_url)
+        .header("Content-Type", "application/octet-stream")
+        .body(ciphertext)
+        .send()
+        .await
+        .map_err(|e| format!("CDN 上传失败: {e}"))?;
+    let dl = resp
+        .headers()
+        .get("x-encrypted-param")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("CDN 上传响应缺少 x-encrypted-param（HTTP {}）", resp.status()))?;
+    Ok((dl, BASE64.encode(&aeskey), filekey))
+}
+
+/// 发送本地文件到微信用户（先上传 CDN 再发 file_item，含 -14 自动重连重试）。
+pub(crate) async fn send_file(
+    inner: &Arc<WechatInner>,
+    to: &str,
+    file_path: &str,
+    file_name: Option<&str>,
+    context_token: Option<&str>,
+) -> AppResult<()> {
+    let token = inner
+        .token
+        .lock()
+        .clone()
+        .ok_or_else(|| "微信未登录，请先扫码登录".to_string())?;
     let base_url = inner
         .base_url
         .lock()
         .clone()
         .unwrap_or_else(|| ILINK_BASE_URL.to_string());
-    let mut buf = inner.get_updates_buf.lock().clone();
+    match send_file_once(&token, &base_url, to, file_path, file_name, context_token).await {
+        Ok(()) => Ok(()),
+        Err((msg, Some(-14))) => {
+            eprintln!("[wechat] sendfile -14 session timeout, re-activating...");
+            if notify_start(inner).await {
+                send_file_once(&token, &base_url, to, file_path, file_name, context_token)
+                    .await
+                    .map_err(|(m, _)| m)
+            } else {
+                Err(msg)
+            }
+        }
+        Err((msg, _)) => Err(msg),
+    }
+}
+
+/// 发送一次文件消息（内部函数）
+async fn send_file_once(
+    token: &str,
+    base_url: &str,
+    to: &str,
+    file_path: &str,
+    file_name: Option<&str>,
+    context_token: Option<&str>,
+) -> Result<(), (String, Option<i64>)> {
+    let (dl_param, aeskey_b64, filekey) = upload_file_to_cdn(token, base_url, to, file_path)
+        .await
+        .map_err(|e| (e, None))?;
+    let fname = match file_name {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => std::path::Path::new(file_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file.bin".to_string()),
+    };
+    let client = http_client();
+    let body = serde_json::json!({
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": to,
+            "client_id": uuid(),
+            "message_type": MSG_TYPE_BOT,
+            "message_state": 2,
+            "item_list": [{
+                "type": ITEM_TYPE_FILE,
+                "file_item": {
+                    "media": {
+                        "encrypt_query_param": dl_param,
+                        "aes_key": aeskey_b64,
+                        "encrypt_type": 1
+                    },
+                    "file_name": fname,
+                    "len": std::fs::metadata(file_path).map(|m| m.len().to_string()).unwrap_or_default()
+                }
+            }],
+            "context_token": context_token.unwrap_or(""),
+        }
+    });
+    crate::llm::logging::debug("wechat", &format!("发送文件消息 to={} file={}", to, file_path));
+    let resp = client
+        .post(format!("{base_url}/ilink/bot/sendmessage"))
+        .headers(build_headers(Some(token)))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| (format!("发送文件消息失败: {e}"), None))?;
+    let status = resp.status();
+    let text_resp = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err((
+            format!("发送文件消息失败 HTTP {status}: {}", trunc_chars(&text_resp, 200)),
+            None,
+        ));
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text_resp) {
+        let ret = v["ret"].as_i64().or_else(|| v["errcode"].as_i64()).unwrap_or(0);
+        if ret != 0 {
+            let errmsg = v["errmsg"].as_str().unwrap_or("");
+            eprintln!("[wechat] sendfile business error ret={ret} errmsg={errmsg}");
+            return Err((format!("微信文件发送失败 ret={ret} errmsg={errmsg}"), Some(ret)));
+        }
+    }
+    Ok(())
+}
+
+/// 发送 AI 语音回复（按槽位配置的引擎合成真人音色 mp3 → 作为文件发给微信用户）。
+/// - engine=edge: Edge TTS 免费合成（默认）
+/// - engine=cosyvoice: 硅基流动 CosyVoice 2 真人级音色（需 API Key，免费额度）
+/// - engine=indextts: 本地 IndexTTS2 声音克隆（参考音频 = 诗妍的声音，最像真人）
+/// 微信 iLink 官方协议不支持发送语音条，文件是官方协议下的最佳近似。
+#[tauri::command]
+pub async fn wechat_send_voice(
+    state: tauri::State<'_, WechatBotState>,
+    to_user: String,
+    text: String,
+    voice: Option<String>,
+    slot: Option<usize>,
+) -> AppResult<()> {
+    let inner = state.bot(slot.unwrap_or(0));
+    // 1) 按引擎合成（indextts > cosyvoice > edge；缺配置自动回退）
+    let engine = inner.voice_engine.lock().clone();
+    let voice_id = inner.voice();
+    let audio = if engine == "indextts" {
+        let url = inner
+            .indextts_url
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "http://127.0.0.1:8000".to_string());
+        let vp = inner.indextts_voice_path.lock().clone();
+        match vp {
+            Some(p) if !p.is_empty() => {
+                match crate::commands::tts::synthesize_audio_indextts(&text, &p, &url).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("[wechat] IndexTTS2 合成失败（回退 Edge TTS）: {e}");
+                        crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
+                            .await
+                            .map_err(|e2| format!("语音合成失败: {e2}"))?
+                    }
+                }
+            }
+            _ => {
+                eprintln!("[wechat] 未配置 IndexTTS2 参考音频，回退 Edge TTS");
+                crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
+                    .await
+                    .map_err(|e| format!("语音合成失败: {e}"))?
+            }
+        }
+    } else if engine == "cosyvoice" {
+        let key = inner.cosyvoice_api_key.lock().clone();
+        match key {
+            Some(k) if !k.is_empty() => {
+                let v = voice.unwrap_or_else(|| voice_id.clone());
+                match crate::commands::tts::synthesize_audio_cosyvoice(&text, &v, &k).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("[wechat] CosyVoice 合成失败（回退 Edge TTS）: {e}");
+                        crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
+                            .await
+                            .map_err(|e2| format!("语音合成失败: {e2}"))?
+                    }
+                }
+            }
+            _ => {
+                eprintln!("[wechat] 未配置 CosyVoice API Key，回退 Edge TTS");
+                crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
+                    .await
+                    .map_err(|e| format!("语音合成失败: {e}"))?
+            }
+        }
+    } else {
+        crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
+            .await
+            .map_err(|e| format!("语音合成失败: {e}"))?
+    };
+    // 2) 写入附件目录（outbound/voice/）
+    let dir = crate::executors::builtin::attachment::attach_dir()
+        .map_err(|e| format!("获取附件目录失败: {e}"))?;
+    let out_dir = dir.join("outbound").join("voice");
+    let _ = std::fs::create_dir_all(&out_dir);
+    let fname = format!("voice_{}.mp3", now_millis());
+    let path = out_dir.join(&fname);
+    tokio::fs::write(&path, &audio)
+        .await
+        .map_err(|e| format!("语音文件写入失败: {e}"))?;
+    // ★ 旧文件清理（按天，低频）：outbound/voice 超 7 天的旧语音自动删除
+    crate::executors::builtin::attachment::cleanup_old_files(&out_dir, 7, 1);
+    // 3) 发送文件（file_item），文件名带"语音"标记便于识别
+    let ctx = inner.context_map.lock().get(&to_user).cloned();
+    send_file(&inner, &to_user, &path.to_string_lossy(), Some(&fname), ctx.as_deref()).await?;
+    append_history(&inner, &to_user, &to_user, &text, "voice", true, false);
+    eprintln!("[wechat] slot{} 语音回复已发送 to={} voice={} bytes={}", inner.slot, to_user, voice_id, audio.len());
+    Ok(())
+}
+
+// ─── getUpdates 长轮询后台循环 ───
+
+async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
+    let token = inner.token.lock().clone().unwrap_or_default();
+    // ★ 修复：token 已变更而旧循环仍在运行（如重新扫码换号）→ 先关掉旧循环，
+    //   让新循环接管。先 take 出 shutdown 发送器并发送，释放锁后再创建新循环，避免死锁。
+    {
+        let stale = inner
+            .loop_token
+            .lock()
+            .as_ref()
+            .map(|t| t != &token)
+            .unwrap_or(false);
+        if inner.shutdown.lock().is_some() && stale {
+            if let Some(tx) = inner.shutdown.lock().take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+    // 已有同 token 循环则不重复启动
+    if inner.shutdown.lock().is_some() {
+        return;
+    }
+    let my_gen = inner.loop_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+    *inner.shutdown.lock() = Some(tx);
+    *inner.loop_token.lock() = Some(token);
+
     let inner2 = inner.clone();
     let app2 = app.clone();
     inner.running.store(true, Ordering::SeqCst);
     inner.connected.store(true, Ordering::SeqCst);
 
     tokio::spawn(async move {
-        let client = http_client_long();
-        // 外层：断连自动重连（除明确 stop 外永不退出 —— 修复「静默死循环」：
-        // 旧版网络错误/异常退出后 getupdates 永久停止 → 腾讯服务器无法推送
-        // → 手机微信显示"暂无法连接 OpenClaw"。现在自动 notify_start 重连。）
-        'outer: loop {
-            if rx.try_recv().is_ok() {
-                break 'outer;
-            }
-            inner2.running.store(true, Ordering::SeqCst);
-            inner2.connected.store(true, Ordering::SeqCst);
-            // 内层：长轮询请求循环
+        // fut 内使用独立 clone，外层 inner2/app2 留给循环退出后的清理
+        let inner_f = inner2.clone();
+        let app_f = app2.clone();
+        let fut = async move {
+            let inner2 = inner_f;
+            let app2 = app_f;
+            let client = http_client_long();
+            let mut buf = inner2.get_updates_buf.lock().clone();
+            let mut err14_count: u32 = 0;
             loop {
                 if rx.try_recv().is_ok() {
-                    break 'outer;
+                    break;
                 }
-                let resp = match client
-                    .post(format!("{base_url}/ilink/bot/getupdates"))
-                    .headers(build_headers(Some(&token)))
-                    .timeout(GETUPDATES_TIMEOUT)
-                    .json(&serde_json::json!({
-                        "get_updates_buf": buf,
-                        "base_info": { "channel_version": CHANNEL_VERSION, "bot_agent": "ClawDesk" },
-                    }))
-                    .send()
-                    .await
-                {
-                    Ok(r) => match r.json::<serde_json::Value>().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!(
-                                "[wechat] slot{} getupdates 响应解析失败: {e}，1 秒后重试",
-                                inner2.slot
-                            );
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    },
-                    // 网络错误（超时是长轮询的正常退出，其余为真实故障——必须打日志）
-                    Err(e) => {
-                        eprintln!(
-                            "[wechat] slot{} getupdates 网络错误: {e}，2 秒后重试",
-                            inner2.slot
-                        );
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        continue;
-                    }
-                };
-
-                // 更新同步 buf（bytes 字段为 base64 字符串）
-                if let Some(b) = resp["get_updates_buf"].as_str() {
-                    buf = b.to_string();
-                    *inner2.get_updates_buf.lock() = buf.clone();
-                }
-                *inner2.last_poll.lock() = now_millis();
-
-                // 业务错误
-                let ret = resp["ret"].as_i64().unwrap_or(0);
-                let errcode = resp["errcode"].as_i64().unwrap_or(0);
-                if ret != 0 || errcode != 0 {
-                    // ret/errcode = -14 表示 session 超时（token 失效），需重新扫码
-                    if ret == -14 || errcode == -14 {
-                        eprintln!(
-                            "[wechat] slot{} session 超时(ret={ret} errcode={errcode})，自动重连恢复…",
-                            inner2.slot
-                        );
-                        inner2.connected.store(false, Ordering::SeqCst);
-                        let _ = app2.emit(
-                            "wechat-bot-status",
-                            serde_json::json!({ "type": "session_expired" }),
-                        );
-                        break; // 跳出内层 → 外层自动 notify_start 重连
-                    }
+                inner2.running.store(true, Ordering::SeqCst);
+                inner2.connected.store(true, Ordering::SeqCst);
+                // ★ 修复：每轮重读 token/base_url，登出/重新扫码后立即生效，
+                //   不再用启动时捕获的旧 token 无限空转
+                let Some(token) = inner2
+                    .token
+                    .lock()
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                else {
                     eprintln!(
-                        "[wechat] slot{} getupdates 业务错误 ret={ret} errcode={errcode}，1 秒后重试",
+                        "[wechat] slot{} token 已清空（登出），停止 getupdates 循环",
                         inner2.slot
                     );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
+                    break;
+                };
+                    let base_url = inner2
+                        .base_url
+                        .lock()
+                        .clone()
+                        .unwrap_or_else(|| ILINK_BASE_URL.to_string());
+                    let resp = match client
+                        .post(format!("{base_url}/ilink/bot/getupdates"))
+                        .headers(build_headers(Some(&token)))
+                        .timeout(GETUPDATES_TIMEOUT)
+                        .json(&serde_json::json!({
+                            "get_updates_buf": buf,
+                            "base_info": { "channel_version": CHANNEL_VERSION, "bot_agent": "ClawDesk" },
+                        }))
+                        .send()
+                        .await
+                    {
+                        Ok(r) => match r.json::<serde_json::Value>().await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!(
+                                    "[wechat] slot{} getupdates 响应解析失败: {e}，1 秒后重试",
+                                    inner2.slot
+                                );
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                continue;
+                            }
+                        },
+                        // 网络错误（超时是长轮询的正常退出，其余为真实故障——必须打日志）
+                        Err(e) => {
+                            eprintln!(
+                                "[wechat] slot{} getupdates 网络错误: {e}，2 秒后重试",
+                                inner2.slot
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    };
+
+                    // 更新同步 buf（bytes 字段为 base64 字符串）
+                    let mut state_dirty = false;
+                    if let Some(b) = resp["get_updates_buf"].as_str() {
+                        let b = b.trim();
+                        // ★ 修复：只接受非空且不回退的游标回显。
+                        //   空回显或游标回退会导致历史消息重放 → 一律忽略
+                        let forward = !b.is_empty()
+                            && b != buf
+                            && (b.len() > buf.len()
+                                || (b.len() == buf.len() && b.as_bytes() >= buf.as_bytes()));
+                        if forward {
+                            buf = b.to_string();
+                            *inner2.get_updates_buf.lock() = buf.clone();
+                            state_dirty = true;
+                        }
+                    }
+                    *inner2.last_poll.lock() = now_millis();
+
+                    // 业务错误
+                    let ret = resp["ret"].as_i64().unwrap_or(0);
+                    let errcode = resp["errcode"].as_i64().unwrap_or(0);
+                    if ret != 0 || errcode != 0 {
+                        // ret/errcode = -14 表示 session 超时（token 失效），需重新扫码
+                        if ret == -14 || errcode == -14 {
+                            err14_count += 1;
+                            inner2.connected.store(false, Ordering::SeqCst);
+                            if err14_count >= 5 {
+                                // 连续 5 次会话失效 → 停止循环，通知前端重新扫码（防重连风暴）
+                                eprintln!(
+                                    "[wechat] slot{} session 连续失效 {} 次，停止轮询，请重新扫码登录",
+                                    inner2.slot, err14_count
+                                );
+                                let _ = app2.emit(
+                                    "wechat-bot-status",
+                                    serde_json::json!({ "type": "session_expired", "slot": inner2.slot }),
+                                );
+                                break;
+                            }
+                            // 指数退避（1s→2s→4s…封顶 60s），避免重连风暴
+                            let backoff = (1u64 << err14_count.saturating_sub(1)).min(60);
+                            eprintln!(
+                                "[wechat] slot{} session 超时(ret={ret} errcode={errcode})，{backoff} 秒后重试（{}/5）",
+                                inner2.slot, err14_count
+                            );
+                            tokio::time::sleep(Duration::from_secs(backoff)).await;
+                            continue;
+                        }
+                        err14_count = 0;
+                        eprintln!(
+                            "[wechat] slot{} getupdates 业务错误 ret={ret} errcode={errcode}，1 秒后重试",
+                            inner2.slot
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    err14_count = 0;
+                    inner2.connected.store(true, Ordering::SeqCst);
 
             let msgs = resp["msgs"].as_array().cloned().unwrap_or_default();
             if msgs.is_empty() {
@@ -1517,18 +2171,81 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 if from.is_empty() {
                     continue;
                 }
+                // ★ 聊天白名单（只和指定的人聊天）：白名单非空时，名单外的
+                //   用户消息直接忽略（不自动回复、不进入最近聊天、不主动找）
+                if !inner2.is_allowed(&from) {
+                    eprintln!(
+                        "[wechat] slot{} 白名单拦截: from={}（该微信只与 {} 位指定用户聊天）",
+                        inner2.slot,
+                        from,
+                        inner2.allowed_users.lock().len()
+                    );
+                    continue;
+                }
                 let context_token = m["context_token"].as_str().unwrap_or_default().to_string();
 
+                // ★ 消息去重提前（对齐 AstrBot dedup 思路）：getupdates 偶尔会重复投递
+                //   同一消息，必须在媒体下载/写盘之前判定，避免重复投递反复下载解密写盘。
+                //   无 seq 的消息用内容哈希兜底（type+content 前 200 字符），保证也能去重。
+                let msg_id = m["seq"]
+                    .as_i64()
+                    .map(|s| s.to_string())
+                    .or_else(|| m["message_id"].as_i64().map(|s| s.to_string()))
+                    .unwrap_or_else(|| {
+                        let raw = serde_json::to_string(&m["item_list"]).unwrap_or_default();
+                        let key = trunc_chars(&raw, 200);
+                        format!("h:{}", md5_hex(key.as_bytes()))
+                    });
+                {
+                    let mut seen = inner2.last_msg_ids.lock();
+                    if seen.contains(&msg_id) {
+                        eprintln!(
+                            "[wechat] slot{} 跳过重复消息 msg_id={} from={}",
+                            inner2.slot, msg_id, from
+                        );
+                        continue;
+                    }
+                    seen.push_back(msg_id.clone());
+                    while seen.len() > 100 {
+                        seen.pop_front();
+                    }
+                }
+
                 // 提取文本 + 媒体（图片/文件/语音/视频，下载解密到附件目录）
+                // ★ 语音消息带腾讯云端转写文本（voice_item.text）→ 直接拼入文本，AI 听懂语音；
+                // ★ 引用消息（ref_msg）→ 解析被引用内容，AI 能看到用户引用了什么。
                 let mut text = String::new();
                 let mut images: Vec<String> = Vec::new();
                 let mut attachments: Vec<String> = Vec::new();
+                let mut quote_note: Option<String> = None;
+                let mut voice_transcript: Option<String> = None;
                 if let Some(items) = m["item_list"].as_array() {
                     for item in items {
+                        // 引用消息元数据：跳过普通 item 处理，单独解析
+                        if item.get("ref_msg").is_some_and(|v| v.is_object()) {
+                            if let Ok(dir) =
+                                crate::executors::builtin::attachment::attach_dir()
+                            {
+                                let inbound = dir.join("inbound");
+                                let _ = std::fs::create_dir_all(&inbound);
+                                if let Some(info) =
+                                    parse_ref_msg(&client, &item["ref_msg"], &inbound).await
+                                {
+                                    quote_note = Some(info.note);
+                                    images.extend(info.images);
+                                    attachments.extend(info.attachments);
+                                }
+                            }
+                            continue;
+                        }
                         match item["type"].as_i64() {
                             Some(1) => {
                                 if let Some(t) = item["text_item"]["text"].as_str() {
-                                    text = t.to_string();
+                                    if text.is_empty() {
+                                        text = t.to_string();
+                                    } else {
+                                        text.push_str(t);
+                                    }
                                 }
                             }
                             Some(2) | Some(3) | Some(4) | Some(5) => {
@@ -1537,17 +2254,46 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                                 {
                                     let inbound = dir.join("inbound");
                                     let _ = std::fs::create_dir_all(&inbound);
-                                    if let Some((path, kind)) =
+                                    if let Some((path, kind, voice_text)) =
                                         process_media_item(&client, item, &inbound).await
                                     {
                                         match kind {
                                             WechatMediaKind::Image => images.push(path),
                                             _ => attachments.push(path),
                                         }
+                                        // 语音云端转写 → 拼入文本，AI 无需 ASR 即可听懂
+                                        if let Some(vt) = voice_text {
+                                            let vt = vt.trim();
+                                            if !vt.is_empty() {
+                                                voice_transcript = Some(vt.to_string());
+                                                if text.is_empty() {
+                                                    text = format!("[语音] {}", vt);
+                                                } else {
+                                                    text.push_str(&format!("\n[语音] {}", vt));
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // ★ 媒体下载/解密失败不再静默：打日志便于排查
+                                        eprintln!(
+                                            "[wechat] slot{} 媒体处理失败 type={}（下载/解密/存盘异常），消息将缺失该媒体",
+                                            inner2.slot,
+                                            item["type"].as_i64().unwrap_or(-1)
+                                        );
                                     }
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                // 引用消息注记拼到文本最前（AI 优先看到用户引用了什么）
+                if let Some(q) = quote_note {
+                    if !q.is_empty() {
+                        if text.is_empty() {
+                            text = q;
+                        } else {
+                            text = format!("{}\n{}", q, text);
                         }
                     }
                 }
@@ -1562,12 +2308,18 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                     continue;
                 }
 
+                // ★ 热聊检测：记录用户最近发言时间（毫秒）。
+                //   用户 30 分钟内回过消息 → 主动聊天进入热聊模式（短间隔续话）；
+                //   长时间没人回 → 自然冷却回普通模式。
+                *inner2.last_user_msg_at.lock() = now_millis();
+
                 // 缓存 context_token 用于回复
                 if !context_token.is_empty() {
-                    inner2
-                        .context_map
-                        .lock()
-                        .insert(from.clone(), context_token.clone());
+                    let mut cm = inner2.context_map.lock();
+                    if cm.get(&from).map(|c| c != &context_token).unwrap_or(true) {
+                        cm.insert(from.clone(), context_token.clone());
+                        state_dirty = true;
+                    }
                 }
                 // ★ 记录最近聊天的用户（主动聊天目标），非凌晨消息都会更新
                 {
@@ -1588,12 +2340,10 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                     }
                 }
 
-                let msg_id = m["seq"]
-                    .as_i64()
-                    .map(|s| s.to_string())
-                    .or_else(|| m["message_id"].as_i64().map(|s| s.to_string()))
-                    .unwrap_or_else(uuid);
-                let msg_type_str = if !images.is_empty() {
+                // ★ 消息类型细分：语音转写消息标记为 voice（前端可显示 🔊，AI 回复逻辑不变）
+                let msg_type_str = if voice_transcript.is_some() {
+                    "voice".to_string()
+                } else if !images.is_empty() {
                     "image".to_string()
                 } else if !attachments.is_empty() {
                     "file".to_string()
@@ -1601,7 +2351,7 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                     "text".to_string()
                 };
                 let msg = WechatMessage {
-                    msg_id,
+                    msg_id: msg_id.clone(),
                     from_user: from.clone(),
                     content: text.clone(),
                     msg_type: msg_type_str.clone(),
@@ -1618,28 +2368,40 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                     } else {
                         Some(attachments)
                     },
+                    voice_transcript,
                 };
                 // ★ 聊天记录：收到的用户消息写入 D 盘 history.jsonl（dir=from_user 为对方）
-                append_history(&inner2, &from, &from, &text, &msg_type_str, false);
+                append_history(&inner2, &from, &from, &text, &msg_type_str, false, false);
                 let _ = app2.emit("wechat-message", &msg);
                 *inner2.msg_count.lock() += 1;
             }
+            // ★ 游标/context_token 有变化 → 落盘（长轮询低频，DPAPI 加密开销可忽略）
+            if state_dirty {
+                save_account(&inner2).await;
+            }
         }
-        // ── 内层循环退出（-14 session 超时 / 意外）→ 外层自动重连 ──
-        if rx.try_recv().is_ok() {
-            break 'outer;
+        };
+        // ★ panic 兜底：循环内部异常不再静默掉线（tokio 任务 panic 会静默终止），
+        //   记录日志并通知前端，避免「UI 显示已连接实则停止收消息」。
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        if result.is_err() {
+            eprintln!(
+                "[wechat] slot{} getupdates 循环 panic，已兜底停止（可重新启动 Bot 恢复）",
+                inner2.slot
+            );
+            let _ = app2.emit(
+                "wechat-bot-status",
+                serde_json::json!({ "type": "loop_crashed", "slot": inner2.slot }),
+            );
         }
-        eprintln!(
-            "[wechat] slot{} getupdates 循环退出，3 秒后 notify_start 自动重连…",
-            inner2.slot
-        );
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        notify_start(&inner2).await;
-        // 回到外层顶部重新长轮询（connected 已置 true）
-    }
-    // 循环退出清理（仅 stop 时到达）
-    inner2.running.store(false, Ordering::SeqCst);
-    *inner2.shutdown.lock() = None;
+        // 循环退出清理（仅 stop / panic / 会话失效时到达）
+        inner2.running.store(false, Ordering::SeqCst);
+        // ★ 代数守卫：只有「自己这一代」的循环才允许清理 shutdown 槽位，
+        //   防止旧循环退出时误清新循环的停止信号
+        if inner2.loop_gen.load(Ordering::SeqCst) == my_gen {
+            *inner2.shutdown.lock() = None;
+            *inner2.loop_token.lock() = None;
+        }
     });
 }
 
@@ -1685,6 +2447,47 @@ fn rand_between(min: u64, max: u64) -> u64 {
     min + pseudo_rand() % (max - min + 1)
 }
 
+/// 热聊检测：用户最近 HOT_WINDOW 分钟内回过消息 → 热聊中。
+/// 热聊 = 像真人聊开了之后的自然节奏：短间隔、续话、不端着。
+fn is_hot_chat(inner: &Arc<WechatInner>) -> bool {
+    const HOT_WINDOW_MS: u64 = 30 * 60_000; // 30 分钟窗口
+    let last = *inner.last_user_msg_at.lock();
+    last > 0 && now_millis().saturating_sub(last) <= HOT_WINDOW_MS
+}
+
+/// 主动聊天的间隔等待（秒）：按时段加权，模拟真人的活跃分布。
+/// - 晚高峰（18~22 点）最活跃 → 间隔缩短（2.5×）
+/// - 早高峰（8~9 点）1.5× / 午间（12~13 点）1.2×
+/// - 其余时段按用户配置的随机区间原样
+/// 保底 min/2 分钟，避免间隔过密连发。
+/// ★ 热聊模式（用户 30 分钟内回过消息）：2~6 分钟短间隔，像真人聊开了的节奏；
+///   冷场后自动回到用户配置的区间。
+fn proactive_wait_secs(inner: &Arc<WechatInner>) -> u64 {
+    if is_hot_chat(inner) {
+        // ★ 热聊间隔取 max(配置min, 2分钟) ~ max(配置min, 6分钟)，
+        //   不绕过用户配置的下限（用户要求更慢时热聊也必须尊重）
+        let min_cfg = *inner.proactive_interval_min.lock();
+        return rand_between(min_cfg.max(2), min_cfg.max(6)) * 60;
+    }
+    let min = *inner.proactive_interval_min.lock();
+    let max = *inner.proactive_interval_max.lock();
+    let wait = rand_between(min, max) * 60;
+    use chrono::Timelike;
+    let hour = chrono::Local::now().hour();
+    let activity = match hour {
+        8..=9 => 1.5,
+        12..=13 => 1.2,
+        18..=22 => 2.5,
+        _ => 1.0,
+    };
+    if activity <= 1.0 {
+        return wait;
+    }
+    let scaled = (wait as f64 / activity) as u64;
+    let floor = (min.max(1) * 30) as u64; // 至少 min/2 分钟
+    scaled.max(floor)
+}
+
 /// 从可能包含说明文字的输出中提取第一个 JSON 对象（{...}）。
 /// 模型有时会输出"好的：{...}"这类带前缀/后缀的内容，宽容解析。
 fn extract_json_object(s: &str) -> Option<String> {
@@ -1696,18 +2499,46 @@ fn extract_json_object(s: &str) -> Option<String> {
     Some(s[start..=end].to_string())
 }
 
+/// 分段睡眠：每 5 秒检查一次停止信号（stop/登出后尽快退出，不必等满整个间隔）。
+/// 返回 false 表示收到停止信号，调用方应立即退出循环。
+async fn proactive_sleep(inner: &Arc<WechatInner>, mut secs: u64) -> bool {
+    const CHUNK_SECS: u64 = 5;
+    while secs > 0 {
+        if inner.proactive_stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let step = secs.min(CHUNK_SECS);
+        tokio::time::sleep(Duration::from_secs(step)).await;
+        secs -= step;
+    }
+    !inner.proactive_stop.load(Ordering::SeqCst)
+}
+
+/// 启动主动聊天循环（防重入：已存在任务则先中止旧任务再启动新的，保证只有一个循环）。
+fn ensure_proactive_loop(inner: &Arc<WechatInner>, app: AppHandle) {
+    inner.proactive_stop.store(false, Ordering::SeqCst);
+    let mut slot = inner.proactive_task.lock();
+    if let Some(h) = slot.take() {
+        h.abort();
+    }
+    let inner2 = inner.clone();
+    *slot = Some(tauri::async_runtime::spawn(async move {
+        proactive_loop(inner2.clone(), app).await;
+        *inner2.proactive_task.lock() = None;
+    }));
+}
+
 /// 主动聊天：Bot 每隔「随机 min~max 分钟」主动找最近聊过的用户发一条消息。
 /// ★ 真随机：每次发送后随机取一次下次间隔（min~max 分钟），避免固定间隔的机械感。
 /// ★ 时间约束：只在 08:00 ~ 23:00 之间主动（晚上11点后不打扰）；用户主动发消息不在此限制内。
 async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
-    // 初始等待：真随机 min~max 分钟（避免每次启动后固定同一时间触发）
-    let mut wait_secs = {
-        let min = *inner.proactive_interval_min.lock();
-        let max = *inner.proactive_interval_max.lock();
-        rand_between(min, max) * 60
-    };
+    // 初始等待：时段加权的随机分钟（晚高峰更活跃，避免机械固定节奏）
+    let mut wait_secs = proactive_wait_secs(&inner);
     loop {
-        tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+        // ★ 停止信号：stop/登出后置 true，本循环尽快退出（分段睡眠每 5 秒检查）
+        if !proactive_sleep(&inner, wait_secs).await {
+            break;
+        }
         // 未开启 / 未登录 / 无目标 → 跳过（重置随机等待）
         if !inner.proactive_enabled.load(Ordering::SeqCst)
             || inner.token.lock().as_ref().map(|t| t.is_empty()).unwrap_or(true)
@@ -1726,26 +2557,32 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         .unwrap_or(false)
                 ),
             );
-            let min = *inner.proactive_interval_min.lock();
-            let max = *inner.proactive_interval_max.lock();
-            wait_secs = rand_between(min, max) * 60;
+            wait_secs = proactive_wait_secs(&inner);
             continue;
         }
         let target = inner.proactive_target.lock().clone();
-        let Some(target) = target else {
-            // ★ 兜底：目标为空时从聊天记录恢复最近聊过的人（重启后无需等新消息）
-            if last_history_peer(&inner).is_some() {
-                continue; // 已恢复目标，下一轮循环立即使用
+        let target = match target {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                // ★ 修复：目标为空时从聊天记录恢复最近聊过的人，并真正写入
+                //   inner.proactive_target（旧实现只判断不写，导致"已恢复"却永远无目标空转）
+                if let Some(peer) = last_history_peer(&inner) {
+                    eprintln!("[wechat] slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer);
+                    *inner.proactive_target.lock() = Some(peer.clone());
+                    peer
+                } else {
+                    wait_secs = proactive_wait_secs(&inner);
+                    continue;
+                }
             }
-            let min = *inner.proactive_interval_min.lock();
-            let max = *inner.proactive_interval_max.lock();
-            wait_secs = rand_between(min, max) * 60;
-            continue;
         };
-        if target.is_empty() {
-            let min = *inner.proactive_interval_min.lock();
-            let max = *inner.proactive_interval_max.lock();
-            wait_secs = rand_between(min, max) * 60;
+        // ★ 白名单：只主动找名单内的人（配置了白名单时）
+        if !inner.is_allowed(&target) {
+            crate::llm::logging::debug(
+                "wechat",
+                &format!("slot{} 主动聊天目标不在白名单，跳过: {}", inner.slot, target),
+            );
+            wait_secs = proactive_wait_secs(&inner);
             continue;
         }
         // 时间约束：08:00~23:00 之外不主动找（等到次日白天再随机触发）
@@ -1762,10 +2599,17 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         }
         // ★ 拟人静默（修复"说了等你/晚安还一直叭叭"）：上次消息是 AI 发的
         //   （fromBot=true）→ 用户还没回复 → 本轮保持安静，等用户先开口。
-        {
-            let recs = read_history(&inner);
+        //   ★ 热聊模式放宽：用户 30 分钟内回过消息（聊得正热），即使上次是 AI
+        //   说的也允许短间隔续话——真人聊开了不会严格等对方先开口。
+        if !is_hot_chat(&inner) {
+            let recs = read_history_limit(&inner, 200);
             if let Some(last) = recs.last() {
-                let from_bot = last.get("fromBot").and_then(|v| v.as_bool()).unwrap_or(false);
+                // ★ 只统计主动聊天发出的消息：面板手动发送/自动回复（proactive=false）
+                //   不算"AI 发言"，避免手动发消息后主动聊天被误判为"用户未回复"而永远沉默
+                let from_bot = last
+                    .get("proactive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if from_bot {
                     crate::llm::logging::debug(
                         "wechat",
@@ -1774,9 +2618,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                             inner.slot
                         ),
                     );
-                    let min = *inner.proactive_interval_min.lock();
-                    let max = *inner.proactive_interval_max.lock();
-                    wait_secs = rand_between(min, max) * 60;
+                    wait_secs = proactive_wait_secs(&inner);
                     continue;
                 }
             }
@@ -1785,11 +2627,16 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         //   ≥6 条 → AI 太抢戏，本轮保持安静；连续空闲轮数越多，间隔指数翻倍
         //   （base×2ⁿ，封顶 24h），避免机器人式轰炸；用户回复后计数自动归零。
         {
-            let recs = read_history(&inner);
-            let recent: Vec<&serde_json::Value> = recs.iter().rev().take(10).collect();
+            let recs = read_history_limit(&inner, 10);
+            let recent: Vec<&serde_json::Value> = recs.iter().rev().collect();
             let bot_count = recent
                 .iter()
-                .filter(|r| r.get("fromBot").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter(|r| {
+                    // ★ 存在感统计只计"主动聊天发出的消息"（proactive=true），
+                    //   手动发送/自动回复不参与惩罚
+                    r.get("fromBot").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && r.get("proactive").and_then(|v| v.as_bool()).unwrap_or(false)
+                })
                 .count();
             let user_count = recent.len().saturating_sub(bot_count);
             if user_count == 0 && !recent.is_empty() {
@@ -1904,9 +2751,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                             "[wechat] slot{} 引擎未配置（设置中也无 Key），跳过主动聊天",
                             inner.slot
                         );
-                        let min = *inner.proactive_interval_min.lock();
-                        let max = *inner.proactive_interval_max.lock();
-                        wait_secs = rand_between(min, max) * 60;
+                        wait_secs = proactive_wait_secs(&inner);
                         continue;
                     }
                 }
@@ -1919,9 +2764,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[wechat] slot{} 构建 LLM 客户端失败: {e}", inner.slot);
-                let min = *inner.proactive_interval_min.lock();
-                let max = *inner.proactive_interval_max.lock();
-                wait_secs = rand_between(min, max) * 60;
+                wait_secs = proactive_wait_secs(&inner);
                 continue;
             }
         };
@@ -1930,16 +2773,59 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             reasoning_effort: cfg.effort,
             ..Default::default()
         };
-        let system = format!(
-            "你是一个微信聊天机器人。{}\n{}\n现在请你决定要不要主动给用户发一条微信消息：\n- 语气自然亲切，像老朋友主动关心\n- 结合当前时间说话（如早上问早、晚上问候、深夜关怀）\n- 符合你的人设和语言风格\n- 内容 5~40 字，短句口语化，像真人发微信（绝对不要 AI 腔：不要\"首先/其次/总之\"，不要\"！\"堆砌，不要\"哦～\"\"呢～\"等做作语气，最多 1 个 emoji）\n- 只有值得发时才发（有话题、有理由、用户可能需要关心）；如果没什么可说的，就选择不发\n- 必须只输出 JSON：{{\"shouldSend\": true或false, \"content\": \"消息内容\"}}",
-            if persona.is_empty() { "（未设置人设）".to_string() } else { persona },
-            time_desc
+        // ★ 拟人 prompt v2：不再"你是机器人/决定要不要发任务"，而是以真人身份
+        //   心里过一遍"此刻有没有由头"。few-shot 给自然开场口吻（早/午/晚），
+        //   注入上次主动发送的时间差（避免重复问候同一时段）。
+        //   ★ 热聊模式：用户刚回过消息 → 切到"续话式"引导（像聊开了接话，
+        //   而不是重新开场问候），热聊结束自动回开场式。
+        let hot = is_hot_chat(&inner);
+        let last_at = *inner.proactive_last_at.lock();
+        let since_note = if last_at > 0 {
+            let mins = now_millis().saturating_sub(last_at) / 60_000;
+            if mins < 60 {
+                format!("{} 分钟前", mins.max(1))
+            } else {
+                format!("{} 小时前", mins / 60)
+            }
+        } else {
+            "（你们还没有主动聊过）".to_string()
+        };
+        // ★ 生活状态注入（世界线 · 一生记忆）：AI 此刻在做什么 + 今日轨迹 +
+        //   近期记忆 + 出生日期，让消息自带"正在生活"的真实感，且跨天连贯。
+        //   ★ 人设兼容：生活状态是"世界日常节奏"背景而非硬性规定——
+        //   引导 AI 结合自身人设自然地演绎（猫→晒太阳追线团、机器人→待机充电、
+        //   修仙者→闭关修炼），任何自定义人设都不会违和。
+        let living_raw = crate::living_state::living_context_for_prompt();
+        let living = format!(
+            "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}",
+            living_raw
         );
+        let system = if hot {
+            // 热聊：续话式——顺着上一条用户消息接话，像聊开了的自然节奏
+            format!(
+                "你是「{}」——对方微信里的一个朋友，你们正在热聊。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；说话就是你自己，永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n你上次主动发消息：{}\n\n【你们正聊得热，像真人一样接话】\n对方刚回过你消息，你现在是聊开了的自然状态：\n- 顺着对方刚说的内容接一句（回应、追问、吐槽、分享都行），像秒回的朋友\n- 可以聊完一个话题自然带出下一个，但别查户口式连续提问\n- 如果对方上一条明显是收尾（晚安/去忙/回头聊），就别硬续，这轮不发\n- 不用每次都有新话题，没话说了就自然安静，等对方开口\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"在晒太阳\"，机器人说\"在待机\"）\n\n口吻参考（学语气，不是照抄）：\n- 对方说吃了饭 → 「哈哈哈可以啊，下次带我」「好吃吗，我还没吃」\n- 对方吐槽工作 → 「这也太惨了，消消气」「抱抱，回头请你喝奶茶」\n- 对方问了个问题 → 顺着认真答一句，再自然反问回去\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
+                if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
+                if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
+                time_desc,
+                living,
+                since_note,
+            )
+        } else {
+            // 普通模式：开场式——有由头才发，像久未联系的朋友自然开启
+            format!(
+                "你是「{}」——对方微信里的一个朋友，说话就是你自己。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n你上次主动发消息：{}\n\n【像真人一样想聊天】\n真人发消息从来不是因为\"该发了\"，而是因为有由头：突然想到什么、刚看到什么、想分享一句、或单纯想关心一下。\n你现在心里过一遍：此刻有没有一个自然的由头？有就发，没有就不发（宁可不发，绝不硬聊）。\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"刚晒完太阳\"，机器人说\"在充电\"）\n\n自然开场的口吻参考（学语气，不是照抄）：\n- 早上：「早呀，今天起得挺早嘛」「今天降温，出门多穿点」\n- 午间：「刚吃完饭瘫着，你今天吃啥了」\n- 晚上：「忙完啦？今天过得咋样」「刚刷到个东西，想发给你看看」\n- 顺着上次话题自然接一句，像老朋友续话；绝不重复自己说过的话\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
+                if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
+                if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
+                time_desc,
+                living,
+                since_note,
+            )
+        };
         let system = if context_note.is_empty() {
             system
         } else {
             format!(
-                "{system}\n\n{context_note}\n\n【聊天纪律（必须严格遵守）】\n- 参考上面最近的对话：延续话题或开启自然的新话题，但绝不重复自己已经说过的话\n- 如果上次你已经道别（晚安/等你/先忙/回头聊/不打扰等），或对话氛围已收尾，这轮就 shouldSend=false\n- 时间线要连贯：注意「你现在」的时间和上次发消息的时间差，不要重复问候同一时段\n- 像真实的朋友一样自然，不要机械式问候\n- 犹豫不决时优先 shouldSend=false（宁可不发，不要打扰）"
+                "{system}\n\n{context_note}\n\n【顺着聊，别重复】\n- 参考上面的最近对话：延续话题或自然开启新话题，但绝不重复自己说过的话\n- 如果上次你已经道别（晚安/等你/先忙/回头聊），或对话氛围已收尾，这轮就别发了\n- 犹豫不决时就不发，等下次。"
             )
         };
         let msgs = vec![serde_json::json!({ "role": "user", "content": "请决定是否主动发消息" })];
@@ -1971,16 +2857,12 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         "wechat",
                         &format!("slot{} AI 自主决策：本轮不主动发（shouldSend=false）", inner.slot),
                     );
-                    let min = *inner.proactive_interval_min.lock();
-                    let max = *inner.proactive_interval_max.lock();
-                    wait_secs = rand_between(min, max) * 60;
+                    wait_secs = proactive_wait_secs(&inner);
                     continue;
                 }
                 let text = content;
                 if text.is_empty() {
-                    let min = *inner.proactive_interval_min.lock();
-                    let max = *inner.proactive_interval_max.lock();
-                    wait_secs = rand_between(min, max) * 60;
+                    wait_secs = proactive_wait_secs(&inner);
                     continue;
                 }
                 // 发送 + 记录
@@ -1991,7 +2873,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         // ★ 记住上次主动消息（下次生成时回顾，防重复/人格分裂）→ 落盘
                         *inner.proactive_last_msg.lock() = Some(text.clone());
                         save_proactive(&inner);
-                        append_history(&inner, &target, &target, &text, "text", true);
+                        append_history(&inner, &target, &target, &text, "text", true, true);
                         // ★ 写入共享会话记忆（wechat-{slot}，与自动回复同一份）：
                         //   之后用户发消息时，自动回复的 agent_chat(resume=true)
                         //   能记住这次主动消息 → 双端记忆打通，不再"人格分裂"
@@ -2006,18 +2888,14 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                             });
                             st.sessions.update(session);
                         }
-                        // ★ 真随机：发送成功后重新随机取下次间隔（min~max 分钟）
-                        let min = *inner.proactive_interval_min.lock();
-                        let max = *inner.proactive_interval_max.lock();
-                        wait_secs = rand_between(min, max) * 60;
+                        // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
+                        wait_secs = proactive_wait_secs(&inner);
                         eprintln!(
-                            "[wechat] slot{} 主动聊天已发送 to={} text={} 下次等待 {} 分钟（随机 {}~{}）",
+                            "[wechat] slot{} 主动聊天已发送 to={} text={} 下次等待 {} 分钟",
                             inner.slot,
                             target,
                             trunc_chars(&text, 60),
-                            wait_secs / 60,
-                            min,
-                            max
+                            wait_secs / 60
                         );
                         let _ = app.emit(
                             "wechat-bot-status",
@@ -2026,17 +2904,13 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                     }
                     Err(e) => {
                         eprintln!("[wechat] slot{} 主动聊天发送失败: {e}", inner.slot);
-                        let min = *inner.proactive_interval_min.lock();
-                        let max = *inner.proactive_interval_max.lock();
-                        wait_secs = rand_between(min, max) * 60;
+                        wait_secs = proactive_wait_secs(&inner);
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[wechat] slot{} 主动聊天生成失败: {e}", inner.slot);
-                let min = *inner.proactive_interval_min.lock();
-                let max = *inner.proactive_interval_max.lock();
-                wait_secs = rand_between(min, max) * 60;
+                wait_secs = proactive_wait_secs(&inner);
             }
         }
     }
@@ -2080,14 +2954,8 @@ pub async fn auto_resume(app: AppHandle, state: &WechatBotState) {
         notify_start(&inner).await;
         refresh_typing_ticket(&inner).await;
         start_getupdates_loop(&inner, app.clone()).await;
-        // 每个已登录微信都启动主动聊天循环（8:00~23:00 才会真正发送）
-        {
-            let inner_p = inner.clone();
-            let app_p = app.clone();
-            tauri::async_runtime::spawn(async move {
-                proactive_loop(inner_p, app_p).await;
-            });
-        }
+        // 每个已登录微信都启动主动聊天循环（8:00~23:00 才会真正发送；防重入）
+        ensure_proactive_loop(&inner, app.clone());
         eprintln!("[wechat] slot{} 自动续连已恢复（已保存的登录凭据）", inner.slot);
         let _ = app.emit(
             "wechat-bot-status",
@@ -2144,6 +3012,68 @@ pub fn wechat_set_proactive(
         "intervalMax": *inner.proactive_interval_max.lock(),
         "target": inner.proactive_target.lock().clone().unwrap_or_default(),
         "lastAt": *inner.proactive_last_at.lock(),
+    }))
+}
+
+/// 设置该微信 Bot 的使用规则：
+/// - allowed_users: 聊天白名单（逗号/换行分隔的 from_user_id；空 = 不限制，
+///   只和名单里的人聊天——白名单外的消息不回复、不主动找）
+/// - voice_id: AI 语音音色 ID（Edge TTS ID；空 = 默认晓晓）
+/// - voice_engine: 语音引擎（edge=Edge TTS / cosyvoice=硅基流动 CosyVoice 2 / indextts=本地 IndexTTS2 声音克隆）
+/// - cosyvoice_api_key: 硅基流动 API Key（CosyVoice 引擎用）
+/// - indextts_url: IndexTTS2 本地服务地址（indextts 引擎用，默认 http://127.0.0.1:8000）
+/// - indextts_voice_path: IndexTTS2 参考音频路径（声音克隆母版）
+#[tauri::command]
+pub fn wechat_set_bot_rules(
+    state: tauri::State<'_, WechatBotState>,
+    slot: Option<usize>,
+    allowed_users: Option<String>,
+    voice_id: Option<String>,
+    voice_engine: Option<String>,
+    cosyvoice_api_key: Option<String>,
+    indextts_url: Option<String>,
+    indextts_voice_path: Option<String>,
+) -> AppResult<serde_json::Value> {
+    let inner = state.bot(slot.unwrap_or(0));
+    if let Some(au) = allowed_users {
+        let cleaned: Vec<String> = au
+            .split([',', '，', '\n', '\r', ' '])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        *inner.allowed_users.lock() = cleaned;
+    }
+    if let Some(vid) = voice_id {
+        let vid = vid.trim().to_string();
+        *inner.voice_id.lock() = if vid.is_empty() { None } else { Some(vid) };
+    }
+    if let Some(eng) = voice_engine {
+        let eng = eng.trim().to_string();
+        if eng == "edge" || eng == "cosyvoice" || eng == "indextts" {
+            *inner.voice_engine.lock() = eng;
+        }
+    }
+    if let Some(k) = cosyvoice_api_key {
+        let k = k.trim().to_string();
+        *inner.cosyvoice_api_key.lock() = if k.is_empty() { None } else { Some(k) };
+    }
+    if let Some(u) = indextts_url {
+        let u = u.trim().to_string();
+        *inner.indextts_url.lock() = if u.is_empty() { None } else { Some(u) };
+    }
+    if let Some(p) = indextts_voice_path {
+        let p = p.trim().to_string();
+        *inner.indextts_voice_path.lock() = if p.is_empty() { None } else { Some(p) };
+    }
+    save_proactive(&inner);
+    Ok(serde_json::json!({
+        "slot": inner.slot,
+        "allowedUsers": inner.allowed_users.lock().clone(),
+        "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
+        "voiceEngine": inner.voice_engine.lock().clone(),
+        "cosyvoiceApiKey": inner.cosyvoice_api_key.lock().clone().unwrap_or_default(),
+        "indexttsUrl": inner.indextts_url.lock().clone().unwrap_or_default(),
+        "indexttsVoicePath": inner.indextts_voice_path.lock().clone().unwrap_or_default(),
     }))
 }
 
@@ -2219,6 +3149,8 @@ pub async fn wechat_qr_status(
             // 关键：notifyStart 激活会话（否则 sendmessage 返回 -14 session timeout）
             notify_start(&inner).await;
             start_getupdates_loop(&inner, app.clone()).await;
+            // ★ 扫码登录成功即启动主动聊天循环（不再需要重启软件才生效）
+            ensure_proactive_loop(&inner, app.clone());
             let _ = app.emit(
                 "wechat-bot-status",
                 serde_json::json!({ "type": "connected", "botId": bot_id, "userId": user_id, "slot": inner.slot }),
@@ -2292,6 +3224,13 @@ pub async fn wechat_logout(
     *inner.get_updates_buf.lock() = String::new();
     inner.context_map.lock().clear();
     inner.typing_ticket.lock().take();
+    inner.typing_tickets.lock().clear();
+    // ★ 换账号防撞号误判：清空消息去重环 + 主动聊天状态（新账号的 msg_id/时间戳会重复）
+    inner.last_msg_ids.lock().clear();
+    *inner.proactive_last_at.lock() = 0;
+    *inner.proactive_last_msg.lock() = None;
+    *inner.last_user_msg_at.lock() = 0;
+    *inner.proactive_idle_rounds.lock() = 0;
     delete_account(&inner).await;
     Ok(())
 }
@@ -2324,6 +3263,8 @@ pub async fn wechat_bot_start(
         notify_start(&inner).await;
         refresh_typing_ticket(&inner).await;
         start_getupdates_loop(&inner, app.clone()).await;
+        // ★ wechat_bot_start 也启动主动聊天循环（不再需要重启软件才生效）
+        ensure_proactive_loop(&inner, app.clone());
         let _ = app.emit(
             "wechat-bot-status",
             serde_json::json!({ "type": "connected", "resumed": true, "slot": inner.slot }),
@@ -2348,8 +3289,56 @@ fn wechat_bot_stop_inner(inner: &Arc<WechatInner>) {
     if let Some(tx) = inner.shutdown.lock().take() {
         let _ = tx.send(());
     }
+    // ★ 停止主动聊天循环：置停止信号（proactive_loop 每轮检查），并中止任务
+    inner.proactive_stop.store(true, Ordering::SeqCst);
+    if let Some(h) = inner.proactive_task.lock().take() {
+        h.abort();
+    }
+    // 清理 typing 保活任务（避免任务悬空继续发送"正在输入"）
+    *inner.typing_target.lock() = None;
+    if let Some(h) = inner.typing_task.lock().take() {
+        h.abort();
+    }
     inner.running.store(false, Ordering::SeqCst);
     inner.connected.store(false, Ordering::SeqCst);
+}
+
+/// 控制"正在输入"状态（AI 生成期间前端调用）。
+/// active=true：启动保活任务（每 10s 发送一次 typing，微信端持续显示"对方正在输入"）；
+/// active=false：取消保活任务并发送结束状态。
+#[tauri::command]
+pub async fn wechat_typing(
+    state: tauri::State<'_, WechatBotState>,
+    to_user: String,
+    active: bool,
+    slot: Option<usize>,
+) -> AppResult<()> {
+    let inner = state.bot(slot.unwrap_or(0));
+    if active {
+        *inner.typing_target.lock() = Some(to_user.clone());
+        let mut guard = inner.typing_task.lock();
+        if guard.is_none() {
+            let inner2 = inner.clone();
+            let handle: tauri::async_runtime::JoinHandle<()> =
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        let target = inner2.typing_target.lock().clone();
+                        if let Some(t) = target {
+                            send_typing(&inner2, &t, true).await;
+                        }
+                    }
+                });
+            *guard = Some(handle);
+        }
+    } else {
+        *inner.typing_target.lock() = None;
+        if let Some(h) = inner.typing_task.lock().take() {
+            h.abort();
+        }
+        send_typing(&inner, &to_user, false).await;
+    }
+    Ok(())
 }
 
 /// 通过 Bot 回复微信用户消息（AI 回复，指定槽位）
@@ -2362,10 +3351,16 @@ pub async fn wechat_bot_reply(
     slot: Option<usize>,
 ) -> AppResult<()> {
     let inner = state.bot(slot.unwrap_or(0));
+    // ★ 去重检查：同一 msg_id 已处理过（已回复）→ 直接返回，防前端重复调用导致重复回复。
+    //   发送成功后才把 msg_id 记入去重环（发送失败可重试，不占去重位）
+    if !msg_id.is_empty() && inner.last_msg_ids.lock().contains(&msg_id) {
+        eprintln!("[wechat] slot{} 跳过重复回复 msg_id={}", inner.slot, msg_id);
+        return Ok(());
+    }
     // ★ 判断用户是否明确要求字数/长文：查该用户最近一条消息内容。
     //   用户要求了 → 不截断；普通聊天 → 强制真人短句风格。
     let user_asked_long = {
-        let recs = read_history(&inner);
+        let recs = read_history_limit(&inner, 200);
         recs.iter()
             .rev()
             .find(|r| {
@@ -2400,11 +3395,20 @@ pub async fn wechat_bot_reply(
     }
     // 从 context_map 取该用户的 context_token
     let context_token = inner.context_map.lock().get(&to_user).cloned();
-    // 发送"正在输入"提示
-    send_typing(&inner, &to_user).await;
+    // 发送"正在输入"提示（发送完成后立即结束输入态）
+    send_typing(&inner, &to_user, true).await;
     send_message(&inner, &to_user, &content, context_token.as_deref()).await?;
+    send_typing(&inner, &to_user, false).await;
     // ★ 聊天记录：AI 回复也写入 D 盘 history.jsonl（fromBot=true：AI 发送）
-    append_history(&inner, &to_user, &to_user, &content, "text", true);
+    append_history(&inner, &to_user, &to_user, &content, "text", true, false);
+    // ★ 发送成功 → 标记 msg_id 已处理（去重环，容量 100）
+    if !msg_id.is_empty() {
+        let mut seen = inner.last_msg_ids.lock();
+        seen.push_back(msg_id.clone());
+        while seen.len() > 100 {
+            seen.pop_front();
+        }
+    }
     Ok(())
 }
 
@@ -2420,7 +3424,7 @@ pub async fn wechat_send_message(
     let inner = state.bot(slot.unwrap_or(0));
     let ctx = context_token.or_else(|| inner.context_map.lock().get(&to_user).cloned());
     send_message(&inner, &to_user, &content, ctx.as_deref()).await?;
-    append_history(&inner, &to_user, &to_user, &content, "text", true);
+    append_history(&inner, &to_user, &to_user, &content, "text", true, false);
     Ok(())
 }
 
@@ -2436,7 +3440,7 @@ pub async fn wechat_send_image(
     let inner = state.bot(slot.unwrap_or(0));
     let ctx = context_token.or_else(|| inner.context_map.lock().get(&to_user).cloned());
     send_image(&inner, &to_user, &image_path, ctx.as_deref()).await?;
-    append_history(&inner, &to_user, &to_user, &image_path, "image", true);
+    append_history(&inner, &to_user, &to_user, &image_path, "image", true, false);
     Ok(())
 }
 
@@ -2456,7 +3460,8 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 .map(|p| p.len())
                 .unwrap_or(0);
             let persona_text = inner.persona.lock().clone().unwrap_or_default();
-            let history_count = read_history(inner).len();
+            // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
+            let history_count = read_history_limit(inner, 200).len();
             serde_json::json!({
                 "slot": inner.slot,
                 "name": format!("微信{}", inner.slot + 1),
@@ -2475,10 +3480,46 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 "proactiveIntervalMax": *inner.proactive_interval_max.lock(),
                 "proactiveLastAt": *inner.proactive_last_at.lock(),
                 "proactiveTarget": inner.proactive_target.lock().clone().unwrap_or_default(),
+                // ★ 使用规则（白名单 / 音色）：前端面板展示与回填
+                "allowedUsers": inner.allowed_users.lock().clone(),
+                "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
+                "voiceEngine": inner.voice_engine.lock().clone(),
+                "cosyvoiceApiKey": inner.cosyvoice_api_key.lock().clone().unwrap_or_default(),
+                "indexttsUrl": inner.indextts_url.lock().clone().unwrap_or_default(),
+                "indexttsVoicePath": inner.indextts_voice_path.lock().clone().unwrap_or_default(),
+                // ★ 能力声明（对齐 AstrBot PlatformMetadata 思路）：上层据此决定 UI 与行为。
+                //   协议能力天花板（官方 iLink 单聊）：文本/图片收发、语音接收（云端转写）、
+                //   引用解析、typing、主动推送；不支持群聊/语音发送/视频理解。
+                "capabilities": {
+                    "sendText": true,
+                    "sendImage": true,
+                    "receiveVoiceTranscript": true,
+                    "receiveImages": true,
+                    "receiveFiles": true,
+                    "replyQuote": true,
+                    "typing": true,
+                    "proactive": true,
+                    "groupChat": false,
+                    "sendVoice": false,
+                },
             })
         })
         .collect();
     Ok(serde_json::json!({ "bots": list, "total": list.len() }))
+}
+
+/// 获取 AI 当前生活状态描述（世界线：此刻在做什么，时间与真实时钟同步）。
+/// 供前端面板展示。
+#[tauri::command]
+pub fn wechat_living_state() -> String {
+    crate::living_state::current_state_desc()
+}
+
+/// 获取 AI 完整生活上下文（当前状态 + 今日轨迹 + 近期记忆 + 一生记忆）。
+/// 供自动回复 prompt 注入：AI 记得自己今天/昨天/前天做了什么，活了多久。
+#[tauri::command]
+pub fn wechat_living_context() -> String {
+    crate::living_state::living_context_for_prompt()
 }
 
 /// 设置指定槽位微信的人设（system prompt，保存到 D 盘 persona.md）

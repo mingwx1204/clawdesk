@@ -72,6 +72,58 @@
 [data-theme="dark"] .bubble { color: var(--txt); }
 [data-theme="dark"] .tc-out { color: var(--txt-2); }
 
+/* ── 深色模式补全：标题栏 / 弹窗 / 列表项对比度（浅色系元素在暗色下不可读） ── */
+[data-theme="dark"] .tb-brand { color: #d8d9e4; }
+[data-theme="dark"] .tb-btn { color: #a8aabc; }
+[data-theme="dark"] .tb-btn:hover { background: rgba(255,255,255,.08); color: #fff; }
+[data-theme="dark"] .tb-btn.tb-close:hover { background: rgba(255,69,58,.8); color: #fff; }
+[data-theme="dark"] .mem-btn {
+  background: rgba(255,255,255,.06); color: #c8c9d6; border-color: rgba(255,255,255,.12);
+}
+[data-theme="dark"] .mem-btn:hover { background: rgba(255,255,255,.12); color: #fff; }
+[data-theme="dark"] .sp-name { color: #e0e1e8; }
+[data-theme="dark"] .sp-time { color: #7c8494; }
+[data-theme="dark"] .model-menu,
+[data-theme="dark"] .attach-menu,
+[data-theme="dark"] .settings-card,
+[data-theme="dark"] .perm-card,
+[data-theme="dark"] .mode-menu,
+[data-theme="dark"] .prompt-menu {
+  background: rgba(24,28,40,.96); border-color: rgba(255,255,255,.1);
+}
+[data-theme="dark"] .mm-name { color: #e0e1e8; }
+[data-theme="dark"] .mm-desc { color: #8a93a6; }
+[data-theme="dark"] .pm-item { color: #d0d2dc; }
+[data-theme="dark"] .ns-input,
+[data-theme="dark"] .sc-select,
+[data-theme="dark"] .sc-input {
+  background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.14); color: #e0e1e8;
+}
+[data-theme="dark"] .ns-input::placeholder,
+[data-theme="dark"] .sc-input::placeholder { color: #6b7482; }
+[data-theme="dark"] .search-item,
+[data-theme="dark"] .snap-item,
+[data-theme="dark"] .mcp-item,
+[data-theme="dark"] .sandbox-item {
+  background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.1);
+}
+[data-theme="dark"] .search-item .search-content,
+[data-theme="dark"] .search-meta { color: #b4b9c6; }
+[data-theme="dark"] .snap-item .sn-name,
+[data-theme="dark"] .sn-info { color: #d0d2dc; }
+[data-theme="dark"] .mcp-item .mc-name,
+[data-theme="dark"] .mcp-item .mc-path { color: #d0d2dc; }
+[data-theme="dark"] .sandbox-item .sx-path { color: #c8cbd6; }
+[data-theme="dark"] .pc-sub { color: #9aa3b2; }
+[data-theme="dark"] .sc-label { color: #b4b9c6; }
+[data-theme="dark"] .st-item,
+[data-theme="dark"] .st-label { color: #b4b9c6; }
+[data-theme="dark"] .pct {
+  color: #d8d9e4; background: rgba(24,28,40,.85); border-color: rgba(255,255,255,.14);
+}
+[data-theme="dark"] .wall-clock .t { color: #f0f1f5; text-shadow: 0 2px 18px rgba(0,0,0,.7); }
+[data-theme="dark"] .wall-clock .d { color: #c8cbd6; }
+
 html, body, #app {
   height: 100vh; width: 100vw; overflow: hidden;
   background: var(--color-bg); color: var(--color-text);
@@ -317,8 +369,8 @@ body { background:#0a0a0f; }
   display: flex; align-items: center; justify-content: center;
 }
 .iv-nav:hover { background: rgba(255,255,255,.25); }
-.iv-prev { left: -56px; }
-.iv-next { right: -56px; }
+.iv-prev { left: 12px; }
+.iv-next { right: 12px; }
 .iv-count {
   position: absolute; bottom: -40px; left: 50%; transform: translateX(-50%);
   color: rgba(255,255,255,.85); font-size: 13px; background: rgba(0,0,0,.5);

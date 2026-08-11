@@ -68,13 +68,13 @@ mod tests {
 
     #[test]
     fn record_writes_log_file() {
-        // 共享串行锁：与 logging / error_guard 等测试的 set_var(APPDATA) 互斥
+        // 共享串行锁：与 logging / error_guard 等测试的 set_var(数据目录) 互斥
         let _g = crate::llm::logging::test_env_lock();
         let dir = std::env::temp_dir().join(format!("clawdesk-log-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // 覆盖 APPDATA 以便测试写临时目录
-        let old = std::env::var("APPDATA").ok();
-        std::env::set_var("APPDATA", &dir);
+        // ★ 用 CLAWDESK_DATA_DIR 覆盖（clawdesk_dir 优先读它，避免写入真实数据目录）
+        let old = std::env::var("CLAWDESK_DATA_DIR").ok();
+        std::env::set_var("CLAWDESK_DATA_DIR", &dir);
 
         record(
             "builtin:get_time",
@@ -84,7 +84,8 @@ mod tests {
             5,
         );
 
-        let log = dir.join("clawdesk").join("tool_logs.log");
+        // ★ 实际路径：<数据目录>/tool_logs.log（无 clawdesk 子目录）
+        let log = dir.join("tool_logs.log");
         assert!(log.exists(), "日志文件应已创建");
         let content = std::fs::read_to_string(&log).unwrap();
         assert!(content.contains("builtin:get_time"));
@@ -92,8 +93,8 @@ mod tests {
 
         // 恢复环境变量
         match old {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
+            Some(v) => std::env::set_var("CLAWDESK_DATA_DIR", v),
+            None => std::env::remove_var("CLAWDESK_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

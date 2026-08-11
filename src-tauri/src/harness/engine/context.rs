@@ -302,13 +302,25 @@ impl ContextManager {
     }
 
     /// 等待后台压缩结束并返回状态（主循环轮询用）。
-    pub async fn wait_for_compaction(&self) -> CompactionStatus {
+    ///
+    /// ★ 可取消（2026-08-12 修复）：`cancel` 触发时不再无限等待（压缩 LLM 调用最长
+    ///   120s），返回 Idle 由调用方继续调度 —— 用户取消任务/心跳 abort 时不再卡死在等待。
+    pub async fn wait_for_compaction(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> CompactionStatus {
         loop {
             let st = *self.status.read().await;
             if st != CompactionStatus::Running {
                 return st;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                _ = cancel.cancelled() => {
+                    // 取消：不再等待；后台任务完成时会自行写回状态，无害
+                    return CompactionStatus::Idle;
+                }
+            }
         }
     }
 

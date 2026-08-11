@@ -17,6 +17,7 @@ interface ModelOption { id: string; label: string; desc: string; }
 const props = defineProps<{
   running?: boolean;
   disabled?: boolean;
+  currentRound?: number;
   modelLabel?: string;
   models?: ModelOption[];
   selectedModel?: string;
@@ -26,7 +27,6 @@ const props = defineProps<{
   ctxPct?: number;
   ctxTokens?: string;
   ctxItems?: { sys: number[]; usr: number[] };
-  compressBusy?: boolean;
 }>();
 const emit = defineEmits<{
   (e: "send", content: string, images?: string[], attachments?: string[]): void;
@@ -35,7 +35,6 @@ const emit = defineEmits<{
   (e: "toggle-agent"): void;
   (e: "set-mode", id: string): void;
   (e: "toggle-thinking"): void;
-  (e: "compress"): void;
 }>();
 
 const prompt = ref("");
@@ -47,7 +46,7 @@ const attachMenuOpen = ref(false);
 const modelMenuOpen = ref(false);
 const modeMenuOpen = ref(false);
 const promptMenuOpen = ref(false);
-const roundNum = ref(1);
+const roundNum = computed(() => Math.max(1, props.currentRound ?? 1));
 
 /** 快捷指令库（对标大厂提示词模板）。 */
 const PROMPT_TEMPLATES = [
@@ -147,17 +146,18 @@ function fileToDataUrl(file: File): Promise<string> {
 
 async function addFiles(files: FileList | null) {
   if (!files) return;
-  for (const f of Array.from(files)) {
-    if (f.type.startsWith("image/")) {
-      // 图片：dataURL 预览（最多 4 张）
-      if (images.value.length >= 4) continue;
-      const url = await fileToDataUrl(f);
-      images.value.push(url);
-    } else {
-      // 任意文件：base64 → attachment_save 工具保存到本地附件目录
-      await addAttachment(f);
-    }
-  }
+  // ★ 并行处理（图片读 dataURL + 附件上传互不阻塞），10 个大文件不再逐个排队
+  await Promise.all(
+    Array.from(files).map(async (f) => {
+      if (f.type.startsWith("image/")) {
+        if (images.value.length >= 4) return;
+        const url = await fileToDataUrl(f);
+        images.value.push(url);
+      } else {
+        await addAttachment(f);
+      }
+    }),
+  );
 }
 
 /** 非图片附件：读 base64 → 调用 builtin:attachment_save → 记录路径。 */
@@ -198,10 +198,8 @@ function onPaste(e: ClipboardEvent) {
   if (!items) return;
   const files: File[] = [];
   for (const item of Array.from(items)) {
-    if (item.type.startsWith("image/")) {
-      const f = item.getAsFile();
-      if (f) files.push(f);
-    }
+    const f = item.getAsFile();
+    if (f) files.push(f);
   }
   if (files.length) {
     e.preventDefault();
@@ -368,9 +366,6 @@ function removeAttachment(idx: number) {
           <div class="cp-item"><span>消息</span><span>{{ ctxItems?.usr[0] }}%</span></div>
           <div class="cp-item"><span>工具操控</span><span>{{ ctxItems?.usr[1] }}%</span></div>
           <div class="cp-item"><span>文件</span><span>{{ ctxItems?.usr[2] }}%</span></div>
-          <button class="cp-compress" :class="{ busy: compressBusy }" @click="emit('compress')">
-            {{ compressBusy ? '压缩中…' : '压缩对话' }}
-          </button>
         </div>
         <div class="ring">
           <svg width="26" height="26" viewBox="0 0 24 24">

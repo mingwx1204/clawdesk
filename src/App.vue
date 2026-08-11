@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -7,8 +7,13 @@ import MarkdownIt from "markdown-it";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
+import VmPanel from "./components/VmPanel.vue";
 import SchedulerPanel from "./components/SchedulerPanel.vue";
 import GuessPanel from "./components/GuessPanel.vue";
+import { useWechatAutoReply } from "./composables/useWechat";
+
+// ★ 微信自动回复（独立 composable：监听 wechat-message → AI 回复 → 回发）
+const { listenWechatMessages } = useWechatAutoReply(() => apiKey.value);
 
 // Markdown 渲染（html:false 安全模式：不解析原始 HTML，仅渲染 Markdown 语法）
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
@@ -16,12 +21,20 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
 //（markdown-it v15 类型未声明 validateLink，运行时直接赋值）
 (md as unknown as { validateLink: (url: string) => boolean }).validateLink = (url: string) =>
   /^(https?:\/\/|data:image\/|mailto:|#)/i.test(url);
+// ★ 渲染缓存：流式期间每条消息 content 变化时才重算，避免全列表重复渲染 Markdown
+const mdCache = new Map<string, string>();
 function renderMd(text: string): string {
+  if (mdCache.size > 400) mdCache.clear();
+  const cached = mdCache.get(text);
+  if (cached !== undefined) return cached;
+  let out: string;
   try {
-    return md.render(text ?? "");
+    out = md.render(text ?? "");
   } catch {
-    return text ?? "";
+    out = text ?? "";
   }
+  mdCache.set(text, out);
+  return out;
 }
 // 用户消息转义（纯文本，防 XSS）
 function escapeHtml(text: string): string {
@@ -143,6 +156,8 @@ const showSettings = ref(false);
 const showWechat = ref(false);
 /** 微信 Bot 在线状态（顶栏圆点显示） */
 const wechatOnline = ref(false);
+// 虚拟机内置微信面板（真微信跑在 VirtualBox 虚拟机里）
+const showVm = ref(false);
 // 定时任务面板
 const showScheduler = ref(false);
 // 猜人物游戏面板
@@ -171,7 +186,6 @@ const tz = ref(localStorage.getItem("clawdesk_tz") || "Asia/Shanghai");
 const ctxPct = ref(47);
 const ctxTokens = ref("493.4K / 1M 个令牌");
 const ctxItems = ref({ sys: [1.4, 4.7], usr: [19.3, 20.2, 2.8] });
-const compressBusy = ref(false);
 let clockTimer: number | null = null;
 let glowEl: HTMLElement | null = null;
 let artEl: HTMLElement | null = null;
@@ -191,7 +205,7 @@ onMounted(async () => {
     // 缺陷2修复：监听引擎 SSE 流式事件（harness_start_task 新路径）
     unlistenStream = await listen<any>("engine://stream", (e) => handleEngineStream(e.payload));
     // 微信 Bot：收到微信用户消息 → 自动回复 + 更新在线状态
-    unlistenWechat = await listen<any>("wechat-message", (e) => autoReplyWechat(e.payload));
+    unlistenWechat = await listenWechatMessages();
     unlistenWechatStatus = await listen<any>("wechat-bot-status", (e) => {
       const t = e.payload?.type;
       wechatOnline.value = t === "connected" || t === "resumed";
@@ -230,6 +244,7 @@ onMounted(async () => {
   artEl = document.querySelector(".wallpaper .art");
   document.addEventListener("mousemove", onMouseMove);
   document.addEventListener("click", onDocClick);
+  document.addEventListener("keydown", onDocKeydown);
   // 恢复外观设置（重启后保持）：深色模式 + 界面不透明度
   try {
     const s = await invoke<any>("settings_get");
@@ -237,12 +252,15 @@ onMounted(async () => {
     if (typeof s?.uiOpacity === "number") {
       document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
     }
+    // ★ 字号设置实际生效（12~22px）
+    if (typeof s?.fontSize === "number" && s.fontSize >= 12 && s.fontSize <= 22) {
+      document.documentElement.style.fontSize = s.fontSize + "px";
+    }
   } catch { /* 静默 */ }
-  // 预加载 TTS 语音列表（神经网络语音异步加载，提前触发避免首次朗读无声）
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.getVoices();
-    window.speechSynthesis.onvoiceschanged = () => { /* 异步就绪 */ };
-  }
+  // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
+  void import("./lib/tts").then(({ loadTtsSettings }) => void loadTtsSettings());
+  // 后台自动启动虚拟机内置微信（未运行则启动，打开面板即可用；不影响正常使用）
+  void invoke("vm_ensure_running", {}).catch(() => {});
 });
 
 onUnmounted(() => {
@@ -300,6 +318,10 @@ async function loadSessionMessages(id: string) {
 
 /** 切换会话：设置 sessionId 并加载历史消息。 */
 async function selectSession(s: string) {
+  if (running.value) {
+    window.alert("AI 正在运行中，请先停止或等待完成后再切换会话");
+    return;
+  }
   sessionId.value = s;
   await loadSessionMessages(s);
   sessionPanelOpen.value = false;
@@ -365,12 +387,26 @@ async function resumeSession(id: string) {
 }
 
 async function loadConfig() {
-  agentMode.value = await invoke<string>("agent_get_mode");
-  maxRounds.value = await invoke<number>("agent_get_max_rounds");
+  try {
+    const m = await invoke<string>("agent_get_mode");
+    agentMode.value = m;
+    currentMode.value = m; // ★ 启动同步：顶栏/输入栏显示的权限模式与后端一致
+    agentOn.value = m !== "off";
+  } catch (e) {
+    console.error("加载 Agent 模式失败", e);
+  }
+  try {
+    maxRounds.value = await invoke<number>("agent_get_max_rounds");
+  } catch (e) {
+    console.error("加载最大轮数失败", e);
+  }
 }
 
-/** 缂洪櫡2淇锛歟ngine://stream 浜嬩欢 鈫?鐜版湁 handleProgress 褰㈡€侊紙鍚?delta 绱Н锛?*/
+
+/** engine://stream 事件 → 现有 handleProgress 形态（含 delta 累积）。 */
 function handleEngineStream(payload: any) {
+  // ★ 运行状态守卫：取消/停止后的迟到事件一律忽略，防止旧任务写入新会话或新消息
+  if (!running.value && payload?.type !== "turn_finished") return;
   switch (payload?.type) {
     case "text_delta":
       // 正式回答开始：思考链已流式显示，这里仅兜底（若因故未显示则补上完整思考链）
@@ -408,16 +444,16 @@ function handleEngineStream(payload: any) {
       handleProgress({ type: "confirmRequired", callId: payload.callId, toolId: payload.toolId, arguments: payload.arguments });
       break;
     case "status":
-      handleProgress({ type: "modelText", round: 0, text: payload.text });
+      // ★ 状态类文案（"正在执行…"）不混入正式回答正文，避免污染消息/朗读
       break;
     case "error":
-      handleProgress({ type: "modelText", round: 0, text: "[閿欒] " + payload.message });
+      handleProgress({ type: "modelText", round: 0, text: "[错误] " + payload.message });
       break;
     case "turn_finished":
       handleProgress({ type: payload.ok ? "finished" : "cancelled" });
       break;
     default:
-      break; // 鏈煡 type 蹇界暐
+      break; // 未知 type 忽略
   }
 }
 function handleProgress(ev: any) {
@@ -460,11 +496,12 @@ function handleProgress(ev: any) {
           error: ev.error,
           open: true, // 运行中默认展开；更新时保留用户已收起的选择
         };
-        const idx = msg.toolCalls.findIndex((t) => t.toolId === tc.toolId);
+        const idx = msg.toolCalls.findIndex((t) => t.toolId === tc.toolId && t.status === "running");
         if (idx >= 0) {
           const prev = msg.toolCalls[idx];
           msg.toolCalls[idx] = { ...tc, open: prev.open ?? true };
         } else {
+          // ★ 同一工具多次调用：前一次已结束（success/error）则追加新实例，不覆盖
           msg.toolCalls.push(tc);
         }
         // ★ 生图工具成功 → 把完整 dataUrl 提取到消息 images 数组，对话框直接显示图片
@@ -502,6 +539,13 @@ function handleProgress(ev: any) {
       currentRound.value = 0;
       stopTypewriter();
       streamingMsgId.value = null;
+      // ★ 自动朗读：设置开启时输出完自动朗读最后一条 AI 回复（Edge TTS 拟人音色）
+      {
+        const last = [...messages.value].reverse().find((m) => m.role === "assistant" && m.content && !m.content.startsWith("[错误]"));
+        if (last) void import("./lib/tts").then(({ getTtsSettings, speak }) => {
+          void getTtsSettings().then((s) => { if (s.enabled) void speak(last.content); });
+        });
+      }
       break;
   }
 }
@@ -534,11 +578,10 @@ function scrollToBottom(force = false): void {
 
 // 消息 / 流式文本变化 → 自动滚到底（用户上滚时自动跳过）
 watch(
-  [messages, pendingText],
+  [() => messages.value.length, pendingText],
   () => {
     void nextTick(() => scrollToBottom());
   },
-  { deep: true },
 );
 
 /** 流式渲染：直接全量显示（★ 修复：逐字符打字机会在 TextDelta 高频到达时反复重置，
@@ -584,36 +627,12 @@ function copyMessage(m: ChatMsg) {
   navigator.clipboard?.writeText(m.content || "").catch(() => {});
 }
 
-/** 朗读 AI 回复（Web Speech API TTS，优先 Neural 神经网络拟人语音）。 */
-function speakMessage(m: ChatMsg) {
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel();
+/** 朗读 AI 回复（Edge TTS 神经网络拟人语音，支持多音色/语气/语速）。 */
+async function speakMessage(m: ChatMsg) {
   const text = (m.content || "").replace(/[#*`>\[\]\-~|_]/g, " ");
   if (!text.trim()) return;
-  const voices = window.speechSynthesis.getVoices();
-  // 首次调用时语音列表可能为空（异步加载），监听就绪后重试
-  if (!voices.length) {
-    window.speechSynthesis.onvoiceschanged = () => {
-      window.speechSynthesis.onvoiceschanged = null;
-      speakMessage(m); // 重试
-    };
-    return;
-  }
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "zh-CN";
-  u.rate = 1;
-  u.pitch = 1;
-  // 优先选神经网络拟人语音（Windows 自带，Edge/Chrome 均支持）
-  // Xiaoxiao=女声最拟人 / Yunxi=男声 / Xiaoyi=少女
-  const preferred = ["Xiaoxiao", "Xiaoyi", "Yunxi", "Yunjian", "Yunyang", "Xiaochen"];
-  for (const name of preferred) {
-    const v = voices.find((v) => v.lang.startsWith("zh-CN") && v.name.includes(name));
-    if (v) { u.voice = v; break; }
-  }
-  if (!u.voice) {
-    u.voice = voices.find((v) => v.lang.startsWith("zh-CN")) || null;
-  }
-  window.speechSynthesis.speak(u);
+  const { speak } = await import("./lib/tts");
+  void speak(text);
 }
 
 /** 重新生成：删除本条及之后的回复，用对应 user 指令重跑（追加新回答）。 */
@@ -680,94 +699,6 @@ async function jumpToResult(sid: string) {
 }
 
 /** 微信自动回复：收到用户消息 → 调 AI → 回发（开关存 localStorage）。 */
-async function autoReplyWechat(msg: any) {
-  if (!msg || !msg.fromUser) return;
-  const hasMedia =
-    (Array.isArray(msg.images) && msg.images.length) ||
-    (Array.isArray(msg.attachments) && msg.attachments.length);
-  if (!msg.content && !hasMedia) return; // 纯媒体消息也能回复（AI 看图/读文件）
-  // 开关：ClawDesk 微信面板（WechatPanel）可切换，默认开启
-  if (localStorage.getItem("clawdesk_wechat_autoreply") === "off") return;
-  if (!apiKey.value.trim()) return;
-  // ★ 所属微信槽位（0 = 微信1 …）：每个微信独立 AI 会话记忆 + 独立人设
-  const slot = typeof msg.botSlot === "number" ? msg.botSlot : 0;
-  // 读取该微信的人设（后端 wechat 槽位 persona，已随账号恢复）
-  let persona: string | null = null;
-  try {
-    const st = await invoke<any>("wechat_bot_status");
-    const bots = st?.bots || [];
-    const b = bots.find((x: any) => x.slot === slot);
-    if (b?.personaText) persona = b.personaText;
-  } catch { /* 读取失败忽略 */ }
-  try {
-    // ★ 时间感知：把当前时间告诉 AI，让它根据时间决定说话方式（如深夜说"这么晚找我什么事"）
-    const now = new Date();
-    const wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][now.getDay()];
-    const h = now.getHours();
-    const part =
-      h < 5 ? "凌晨" : h < 8 ? "清晨" : h < 12 ? "上午" : h < 14 ? "中午" : h < 18 ? "下午" : h < 23 ? "晚上" : "深夜";
-    const timeNote = `\n\n[当前时间：${wd}，${part} ${h}点${String(now.getMinutes()).padStart(2, "0")}分。请结合当前时间说话：深夜/凌晨回复要带"这么晚找我"的关心感，清晨问早，白天正常聊。]`;
-    // ★ 微信真人聊天风格约束（去 AI 味）：微信聊天要像真人朋友发消息，
-    //   不是写文章——短、口语、有情绪、不解释过程。
-    const styleNote = `\n\n[微信聊天铁律（必须严格遵守）：\n1. 默认回复 5~40 字，一句话说清，绝不超过 60 字；\n2. 除非用户明确要求（"写500字"/"详细说说"/"完整分析"等），否则一律像真人发微信：口语化、短句、可省略主语、偶尔语气词（嗯嗯/哈哈哈/行/好嘞）；\n3. 禁止 AI 腔：不用"首先/其次/总之/需要注意的是/总的来说"，不用"！"堆砌，不用"哦～""呢～"等做作语气；\n4. 不需要解释你怎么做到的、不需要总结性发言、不要每句都带 emoji（最多 1 个）；\n5. 对方问了复杂问题（如读文件/分析代码）时也只需给结论和关键点，别列清单；\n6. 像朋友一样接话，而不是像客服回答问题。]`;
-    // 微信发来的媒体（图片/文件/语音/视频）已由后端下载解密到本地，拼入 prompt 让 AI 读取
-    let promptText = (msg.content || "") + timeNote + styleNote;
-    const mediaNotes: string[] = [];
-    if (Array.isArray(msg.images) && msg.images.length) {
-      mediaNotes.push("图片：\n" + msg.images.map((p: string) => `- ${p}`).join("\n"));
-    }
-    if (Array.isArray(msg.attachments) && msg.attachments.length) {
-      mediaNotes.push("文件/语音/视频：\n" + msg.attachments.map((p: string) => `- ${p}`).join("\n"));
-    }
-    if (mediaNotes.length) {
-      promptText +=
-        "\n\n[用户微信发来的媒体，已保存到本地磁盘]\n" +
-        mediaNotes.join("\n") +
-        "\n请调用 analyze_image 工具读取图片内容、file_read 工具读取文件内容（zip 压缩包可直接用 file_read 读取，超过 2MB 的压缩包不支持并如实告知）。";
-    }
-    const outcome = await invoke<any>("agent_chat", {
-      apiKey: apiKey.value.trim(),
-      sessionId: `wechat-${slot}`, // ★ 每个微信独立会话记忆（wechat-0 / wechat-1 …）
-      runId: `wechat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      prompt: promptText,
-      resume: true,
-      persona, // ★ 该微信的人设（system prompt 注入）
-    });
-    const reply = (outcome?.finalText || "").trim();
-    // ★ AI 回复时若调用过 generate_image 生图，把生成的图片路径一并发给微信
-    const generatedImages: string[] = [];
-    const rounds: any[] = Array.isArray(outcome?.rounds) ? outcome.rounds : [];
-    for (const r of rounds) {
-      for (const tc of Array.isArray(r.toolCalls) ? r.toolCalls : []) {
-        if (tc.toolId === "generate_image" && tc.status === "success" && tc.output?.path) {
-          const p = String(tc.output.path);
-          if (!generatedImages.includes(p)) generatedImages.push(p);
-        }
-      }
-    }
-    if (generatedImages.length) {
-      for (const imgPath of generatedImages) {
-        try {
-          await invoke("wechat_send_image", { toUser: msg.fromUser, imagePath: imgPath, slot });
-          console.log(`[wechat] 已发送图片到 ${msg.fromUser}: ${imgPath}`);
-        } catch (e) {
-          console.error("[wechat] 发送图片失败", e);
-        }
-      }
-    }
-    if (!reply) return;
-    await invoke("wechat_bot_reply", {
-      msgId: msg.msgId,
-      toUser: msg.fromUser,
-      content: reply,
-      slot,
-    });
-    console.log(`[wechat] 微信${slot + 1} 已自动回复 ${msg.fromUser}: ${reply.slice(0, 60)}`);
-  } catch (e) {
-    console.error("微信自动回复失败", e);
-  }
-}
-
 async function handleSend(content: string, images?: string[], attachments?: string[]) {
   if (running.value) return;
   if (!apiKey.value.trim()) {
@@ -779,6 +710,7 @@ async function handleSend(content: string, images?: string[], attachments?: stri
   currentRound.value = 0;
   streamBuf = "";
   thinkingBuf = "";
+  streamingMsgId.value = null; // 新运行独立消息实例，防止旧流式残留错位
   messages.value.push({ id: `m${Date.now()}`, role: "user", content, timestamp: Date.now(), images, attachments });
 
   try {
@@ -841,14 +773,15 @@ async function handleSend(content: string, images?: string[], attachments?: stri
 }
 
 async function handleCancel() {
-  // 立即重置前端运行状态，保证「停止」有即时反馈（后端取消异步生效）
+  // ★ 先向后端发起取消（等待其确认），再重置前端状态，避免旧任务继续跑产生双任务
+  const id = runId.value;
+  if (id) {
+    try { await invoke("agent_cancel", { runId: id }); } catch { /* 取消失败不阻塞 UI */ }
+  }
   stopTypewriter();
   streamingMsgId.value = null;
   running.value = false;
   currentRound.value = 0;
-  if (runId.value) {
-    await invoke("agent_cancel", { runId: runId.value }).catch(() => {});
-  }
 }
 
 // ── 自定义标题栏窗口控制（decorations:false，前端接管最小化/最大化/关闭）──
@@ -872,8 +805,13 @@ async function onTitlebarMouseDown(e: MouseEvent) {
 }
 
 async function setMode(mode: string) {
-  agentMode.value = await invoke<string>("agent_set_mode", { mode });
-  currentMode.value = mode;
+  try {
+    agentMode.value = await invoke<string>("agent_set_mode", { mode });
+    currentMode.value = agentMode.value;
+    agentOn.value = agentMode.value !== "off";
+  } catch (e) {
+    console.error("设置模式失败", e);
+  }
 }
 
 // ── v6：会话下拉 ──
@@ -887,6 +825,10 @@ function openNewSession() {
   newSessionOpen.value = true;
 }
 function confirmNewSession() {
+  if (running.value) {
+    window.alert("AI 正在运行中，请先停止或等待完成后再新建会话");
+    return;
+  }
   const name = newSessionName.value.trim();
   sessionId.value = name ? `sess-${name}` : `sess-${Date.now()}`;
   messages.value = []; // 新会话无历史
@@ -896,7 +838,12 @@ function confirmNewSession() {
   loadSessionUsage().catch(() => {});
 }
 async function deleteSession(id: string) {
-  await invoke("agent_session_delete", { sessionId: id });
+  try {
+    await invoke("agent_session_delete", { sessionId: id });
+  } catch (e) {
+    window.alert(`删除会话失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+    return;
+  }
   if (sessionId.value === id) {
     sessionId.value = "default";
     await loadSessionMessages("default"); // 回到默认会话并恢复其历史
@@ -959,17 +906,9 @@ function onMouseMove(e: MouseEvent) {
   }
 }
 
-// ── v6：压缩对话（执行上下文压缩） ──
-function compressContext() {
-  if (compressBusy.value) return;
-  compressBusy.value = true;
-  setTimeout(() => {
-    ctxPct.value = 8;
-    ctxTokens.value = "82.1K / 1M 个令牌";
-    ctxItems.value = { sys: [0.2, 0.8], usr: [3.2, 3.4, 0.5] };
-    compressBusy.value = false;
-  }, 1200);
-}
+// ── v6：压缩对话 ──
+// ★ 后端会话引擎已具备自动压缩（超阈值自动摘要压缩），此处不再提供假的手动压缩按钮。
+// 保留 loadSessionUsage 展示真实上下文占用（底部进度环）。
 
 // ── v6：设置密钥回调 ──
 function onKeysSaved(keys: { main?: string }) {
@@ -1118,7 +1057,10 @@ function toggleAgent() {
           <button class="settings-btn sched-btn" title="定时任务" @click="showScheduler = true">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           </button>
-          <button class="settings-btn wx-btn" title="微信 Bot" @click="showWechat = true">
+          <button class="settings-btn" title="虚拟机内置微信（真微信）" @click="showVm = true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          </button>
+          <button class="settings-btn wx-btn" title="内置微信（独立账号，不影响电脑上的微信）" @click="showWechat = true">
             <span class="wx-dot" :class="{ on: wechatOnline }"></span>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.69 4C4.86 4 1.75 6.57 1.75 9.75c0 1.78.9 3.38 2.33 4.47l-.66 2.05a.35.35 0 0 0 .52.4l2.36-1.36c.74.2 1.52.3 2.39.3h.22c-.06-.4-.1-.82-.1-1.24 0-3.22 3.04-5.86 6.87-5.86.2 0 .4.01.6.02C15.45 6.1 12.4 4 8.69 4zm-2.2 3.5a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zm4.75 0a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zM18.5 9.5c-3.13 0-5.75 2.28-5.75 5.25S15.37 20 18.5 20c.77 0 1.5-.14 2.16-.38l1.55.89a.28.28 0 0 0 .42-.32l-.53-1.64c1.28-.93 2.15-2.3 2.15-3.8 0-2.97-2.62-5.25-5.75-5.25zm-2 4.5a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36zm4 0a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36z"/></svg>
           </button>
@@ -1193,8 +1135,8 @@ function toggleAgent() {
                 <div v-show="m.thinkingOpen" class="thinking-content">{{ m.thinking }}</div>
               </div>
               <!-- 工具调用：统一为紧凑卡片（默认一行，点击展开详情；运行中自动展开） -->
-              <template v-for="tc in m.toolCalls" :key="`${m.id}-${tc.toolId}`">
-                <div class="tool-card" :class="{ pending: tc.status === 'running' }">
+              <template v-for="(tc, tci) in m.toolCalls ?? []" :key="`${m.id}-${tc.toolId}-${tci}`">
+                <div class="tool-card" :class="{ pending: tc.status === 'running' }" :data-idx="tci">
                   <div class="tc-head" @click="tc.open = !tc.open">
                     <span class="tc-fold" :class="{ 'tc-fold-on': tc.open || tc.status === 'running' }">{{ tc.open || tc.status === 'running' ? '▾' : '▸' }}</span>
                     <span class="t" :class="tc.status === 'success' ? 't-ok' : (tc.status === 'error' || tc.status === 'danger') ? 't-err' : 't-run'">
@@ -1247,6 +1189,7 @@ function toggleAgent() {
       <BottomInput
         ref="bottomInputRef"
         :running="running"
+        :current-round="currentRound"
         :model-label="modelLabel()"
         :models="MODELS"
         :selected-model="selectedModel"
@@ -1256,7 +1199,6 @@ function toggleAgent() {
         :ctx-pct="ctxPct"
         :ctx-tokens="ctxTokens"
         :ctx-items="ctxItems"
-        :compress-busy="compressBusy"
         @send="handleSend"
         @cancel="handleCancel"
         @select-model="selectModel"
@@ -1264,7 +1206,6 @@ function toggleAgent() {
         @set-mode="setMode"
         @toggle-thinking="thinkingOn = !thinkingOn"
         @request-permission="requestPermission"
-        @compress="compressContext"
       />
     </div>
 
@@ -1279,6 +1220,7 @@ function toggleAgent() {
 
     <!-- 微信 Bot 面板 -->
     <WechatPanel v-if="showWechat" @close="showWechat = false" />
+    <VmPanel v-if="showVm" @close="showVm = false" />
 
     <!-- 定时任务面板 -->
     <SchedulerPanel v-if="showScheduler" @close="showScheduler = false" />

@@ -151,8 +151,13 @@ fn find_sensitive_path_arg(v: &serde_json::Value) -> Option<String> {
 }
 
 /// 判断路径的 basename 是否命中敏感文件模式。
+///
+/// ★ 防 junction/symlink 绕过（2026-08-12 修复）：先解析真实路径
+///   （存在的祖先 canonicalize），再取 basename —— 经目录链接指向
+///   `.env` 的路径同样会被识别。
 fn is_sensitive_file(p: &str) -> bool {
-    let name = std::path::Path::new(p)
+    let resolved = crate::middleware::sandbox::resolve_real_path(std::path::Path::new(p));
+    let name = resolved
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();

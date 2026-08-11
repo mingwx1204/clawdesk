@@ -3,6 +3,9 @@
 //! 前端经 `invoke("list_tools")` / `invoke("invoke_tool")` / `invoke("agent_chat")`
 //! 与后端通信。本层只依赖 core 层与 llm/adapters 层，不感知具体工具实现。
 
+// ── Edge TTS 朗读合成命令（神经网络拟人音色） ──
+pub mod tts;
+
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -310,13 +313,11 @@ pub async fn agent_chat(
         let _ = app.emit("agent://progress", ev);
     });
 
-    let mut mode = *state.agent_mode.read().unwrap();
-    if thinking && matches!(mode, crate::llm::AgentMode::Off | crate::llm::AgentMode::PlanOnly) {
-        // 思考模式必须走 harness 引擎流式路径（Off/PlanOnly 走 router 非流式，收不到 thinking_delta）
-        // → 临时按 Yolo 执行（工具自动放行），保留用户原有 Agent 模式不受影响。
-        mode = crate::llm::AgentMode::Yolo;
-        eprintln!("[CHAT] 思考模式：Agent 未开启，已临时按 Yolo 走引擎流式路径");
-    }
+    let mode = *state.agent_mode.read().unwrap();
+    // ★ 2026-08-12 修复：不再因思考模式静默把 Off/PlanOnly 临时切到 Yolo。
+    //   thinking 只影响模型调用参数（engine_model 已在上方按 thinking 选择推理模型），
+    //   不改变用户的权限模式 —— 否则"未开启 Agent"的用户在思考模式下工具会被静默放行，
+    //   绕过 StepConfirm 高危确认（安全红线）。
     let max_rounds = *state.max_rounds.read().unwrap();
     let cancel = state.cancel_tokens.create(run_id.clone());
 
@@ -535,9 +536,18 @@ pub fn agent_get_max_rounds(state: State<'_, AppState>) -> usize {
 }
 
 /// 应答逐步确认（StepConfirm 模式）；返回是否找到对应调用。
+/// ★ 2026-08-12：先查旧确认通道（CancelRegistry.confirms），查不到再查
+///   PERMISSION_BRIDGE —— 引擎路径的 oneshot 注册在桥里（ID 与 ConfirmRequired 事件统一），
+///   前端用 callId 应答两条路径都能命中。
 #[tauri::command]
 pub fn agent_confirm_call(state: State<'_, AppState>, call_id: String, approve: bool) -> bool {
-    state.cancel_tokens.resolve_confirm(&call_id, approve)
+    if state.cancel_tokens.resolve_confirm(&call_id, approve) {
+        return true;
+    }
+    if let Some(bridge) = crate::harness::hooks::bridge::PERMISSION_BRIDGE.get() {
+        return crate::harness::ENGINE_RT.block_on(bridge.resolve(&call_id, approve, None));
+    }
+    false
 }
 
 /// 列出全部 Agent 会话 ID。
@@ -1000,8 +1010,17 @@ pub fn snapshot_diff(snapshot_id: String) -> Result<serde_json::Value, String> {
 
 /// 读取完整应用设置（五大标签页配置，项目 7）。
 #[tauri::command]
-pub fn settings_get(state: State<'_, AppState>) -> crate::llm::settings::AppSettings {
-    state.settings.get()
+pub fn settings_get(state: State<'_, AppState>) -> serde_json::Value {
+    let mut v = serde_json::to_value(state.settings.get())
+        .unwrap_or(serde_json::json!({}));
+    // ★ 注入 opencode Key（实际存于 DPAPI keys.enc，前端照常读取）
+    if let serde_json::Value::Object(ref mut map) = v {
+        map.insert(
+            "opencodeWatchApiKey".into(),
+            serde_json::Value::String(state.settings.keys().opencode_watch),
+        );
+    }
+    v
 }
 
 /// 读取运行时 API Key（仅内存态，不持久化）。用于前端在组件重载后恢复 Key，
@@ -1024,8 +1043,17 @@ pub fn settings_set(
         if let Some(v) = map.get("mainKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.main = v.to_string(); } }
         if let Some(v) = map.get("visionKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.vision = v.to_string(); } }
         if let Some(v) = map.get("imageKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.image = v.to_string(); } }
+        // ★ opencode 回切 Key：同样只进内存 + DPAPI 加密存储（不落 settings.json 明文）
+        if let Some(v) = map.get("opencodeWatchApiKey").and_then(|v| v.as_str()) {
+            if !v.is_empty() { keys.opencode_watch = v.to_string(); }
+        }
         state.settings.set_keys(keys);
         auto_start_val = map.get("autoStart").and_then(|v| v.as_bool());
+    }
+    let mut patch = patch;
+    // ★ 从持久化补丁中剥离明文 Key（apply → save 不会写入 settings.json）
+    if let serde_json::Value::Object(map) = &mut patch {
+        map.remove("opencodeWatchApiKey");
     }
     let updated = state.settings.apply(patch)?;
     // ★ 开机自启动：设置变更时同步写入/删除注册表 Run 键
@@ -1342,7 +1370,11 @@ pub async fn harness_start_task(app: tauri::AppHandle, state: State<'_, AppState
     let messages_arc = Arc::new(tokio::sync::RwLock::new(messages));
     let client_loop = client.clone(); let executor_loop = executor.clone(); let ctx_loop = ctx_mgr.clone(); let msgs_loop = messages_arc.clone(); let cancel_loop = cancel_token.clone(); let tx_loop = tx_event.clone();
     let result: Result<TurnResult, String> = crate::harness::ENGINE_RT.spawn(async move { turn_loop::run_turn_loop(client_loop,executor_loop,ctx_loop,msgs_loop,turn_cfg,cancel_loop,tx_loop).await.map_err(|e| e.to_string()) }).await.map_err(|e| format!("引擎任务失败: {e}"))?;
-    let _ = watcher.abort(); let _ = relay.abort();
+    // ★ 2026-08-12 修复：不再立即 abort relay（尾部事件丢失）。
+    //   引擎退出时其 tx_event 被 drop → 通道关闭 → relay 的 recv() 返回 None 自然退出，
+    //   期间会把通道里剩余事件（含 TurnFinished）全部转发完。这里 await 等它排空。
+    let _ = watcher.abort();
+    let _ = relay.await;
     state.cancel_tokens.remove(&run_id); state.cancel_tokens.clear_confirms();
 
     match result {

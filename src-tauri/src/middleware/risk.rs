@@ -71,8 +71,16 @@ fn contains_sensitive_path(v: &serde_json::Value) -> bool {
 }
 
 /// 系统敏感路径检查（与 HighRiskGuard / analyze_image 双保险一致）。
+///
+/// ★ 防 junction/symlink 绕过（2026-08-12 修复）：先解析真实路径
+///   （存在的祖先 canonicalize），再对标记做子串匹配 —— 否则通过目录链接
+///   指向 `C:\Windows` 的路径会被字符串匹配漏掉。
+///   注意：同时检查**原始字符串** —— Windows 下 POSIX 风格标记（/etc/ 等）
+///   只存在于原始输入中，规范化后会被转成盘符路径而失配。
 pub fn is_sensitive_path(p: &str) -> bool {
     let lower = p.to_lowercase();
+    let resolved = super::sandbox::resolve_real_path(std::path::Path::new(p));
+    let lower_resolved = resolved.to_string_lossy().to_lowercase();
     const MARKERS: &[&str] = &[
         "c:\\windows",
         "c:\\program files",
@@ -87,7 +95,7 @@ pub fn is_sensitive_path(p: &str) -> bool {
         "\\.ssh",
         "/.ssh/",
     ];
-    MARKERS.iter().any(|m| lower.contains(m))
+    MARKERS.iter().any(|m| lower.contains(m) || lower_resolved.contains(m))
 }
 
 /// 递归检查参数中是否含危险命令片段（terminal 类工具）。

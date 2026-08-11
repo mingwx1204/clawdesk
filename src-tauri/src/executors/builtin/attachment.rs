@@ -2,7 +2,8 @@
 //!
 //! 设计说明（拓展机制，不改动 core / agent）：
 //! - 供前端"拖入任意文件"能力使用：前端读取文件为 base64，经本工具写入本地磁盘；
-//! - 保存目录：`D:\数据库\ClawDesk附件`（用户指定持久化目录，避免被系统临时清理误删）；
+//! - 保存目录：`<ClawDesk 数据目录>\attachments`（数据目录优先 D:\ClawDeskData，
+//!   避免被系统临时清理误删）；
 //! - 文件名净化：仅取 `file_name()` 组件，防路径穿越；
 //! - 大小限制 20MB（base64 解码后），防大文件撑爆磁盘；
 //! - agent 侧无需改动：路径经 prompt 注入后，LLM 可用已有的 `file_read` 工具读取内容。
@@ -16,20 +17,61 @@ use crate::core::tool::error::ToolError;
 use crate::core::tool::registry::{ToolHandler, ToolRegistry};
 use crate::core::tool::result::ToolResult;
 
-/// 附件保存目录名（位于系统临时目录下）。
-pub const ATTACH_DIR_NAME: &str = "clawdesk-attachments";
+/// 附件保存目录名（位于 ClawDesk 数据目录下）。
+pub const ATTACH_DIR_NAME: &str = "attachments";
 /// 单文件大小上限（字节）。
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 附件保存目录的绝对路径（不存在则创建）。
 ///
-/// ★ 持久化路径：`D:\数据库\ClawDesk附件`（用户指定，随 ClawDesk 长期保存，
+/// ★ 持久化路径：`<ClawDesk 数据目录>\attachments`（数据目录优先 D:\ClawDeskData，
 /// 不再使用系统临时目录 —— 临时目录会被磁盘清理误删历史附件/导出文件）。
 /// 该目录同时承载：上传附件、导出对话（export_*.md）、微信接收媒体（inbound/）等。
 pub fn attach_dir() -> Result<std::path::PathBuf, String> {
-    let dir = std::path::PathBuf::from(r"D:\数据库\ClawDesk附件");
+    let dir = crate::llm::settings::clawdesk_dir().join(ATTACH_DIR_NAME);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建附件目录失败: {e}"))?;
     Ok(dir)
+}
+
+/// 最近一次旧文件清理时间（毫秒，全局限频：1 小时最多扫描一次）
+static LAST_CLEANUP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 清理目录中超过 max_age_days 天未修改的旧文件（只删直接子文件，不递归、不删目录）。
+/// 低频执行：min_interval_hours 小时内最多真正扫描一次（多线程并发写盘时仅一个执行）。
+pub fn cleanup_old_files(dir: &std::path::Path, max_age_days: u64, min_interval_hours: u64) {
+    use std::sync::atomic::Ordering as AtOrd;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_CLEANUP_MS.load(AtOrd::Relaxed);
+    if now.saturating_sub(last) < min_interval_hours * 3600_000 {
+        return;
+    }
+    if LAST_CLEANUP_MS
+        .compare_exchange(last, now, AtOrd::Relaxed, AtOrd::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let cutoff = now.saturating_sub(max_age_days * 24 * 3600_000);
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else { continue };
+        let mtime = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if mtime < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 pub fn register(registry: &ToolRegistry) -> Result<(), ToolError> {

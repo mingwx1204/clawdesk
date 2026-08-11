@@ -26,6 +26,8 @@ pub mod win_integration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Agent 权限模式（出厂默认 `Off`，YOLO 需用户手动开启）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +248,50 @@ pub fn serialize_tools(defs: &[crate::core::tool::def::UnifiedToolDef]) -> Value
 /// DeepSeek API 要求 function.name 匹配 `^[a-zA-Z0-9_-]+$`，因此：
 /// - `:` → `__`（保持既有约定，兼容前端 split("__") 逻辑）
 /// - 其他非法字符（空格 / `+` / `.` 等）→ `_XX`（十六进制字节码，可逆解码）
+///
+/// ★ 长度上限保护（2026-08-12 修复）：OpenCode Go 等网关要求 function.name
+///   最长 128 字符。中文技能名每个字节编码成 `_XX`（3 字符），32 字中文名
+///   可达 295 字符 → 网关 HTTP 400 拒绝整轮请求（微信识图曾因此全盘失败）。
+///   超长时改用 `sklng_<12位哈希>` 短名（登记到全局别名表，解码时可还原）。
 pub fn encode_tool_name(id: &str) -> String {
+    let encoded = encode_tool_name_full(id);
+    if encoded.len() <= MAX_TOOL_NAME_LEN {
+        return encoded;
+    }
+    let short = format!("sklng_{:012x}", fnv1a_48(id));
+    register_name_alias(&short, id);
+    short
+}
+
+/// 工具名最大长度（OpenAI 协议常见上限 128；留余量防厂商更严）。
+const MAX_TOOL_NAME_LEN: usize = 128;
+
+/// 别名表：短名（sklng_...）→ 原始工具 id。编码与解码必须同进程，
+/// serialize_tools（编码）与工具分发（解码）均在应用进程内完成。
+static NAME_ALIASES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn name_aliases() -> &'static Mutex<HashMap<String, String>> {
+    NAME_ALIASES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_name_alias(short: &str, id: &str) {
+    if let Ok(mut map) = name_aliases().lock() {
+        map.insert(short.to_string(), id.to_string());
+    }
+}
+
+/// FNV-1a 64 位哈希，取低 48 位 → 12 位十六进制（确定性，跨进程一致）。
+fn fnv1a_48(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h & 0x0000_ffff_ffff_ffff
+}
+
+/// 完整编码（不截断），供 `encode_tool_name` 与测试使用。
+fn encode_tool_name_full(id: &str) -> String {
     let mut out = String::with_capacity(id.len() * 2);
     for b in id.bytes() {
         let c = b as char;
@@ -271,9 +316,21 @@ fn hex_val(c: u8) -> Option<u8> {
 }
 
 /// 将 LLM 返回的函数名解码回 `source:name`。
+/// - 先查别名表：`sklng_...` 短名 → 原始工具 id（超长名编码还原）
 /// - `__` → `:`
 /// - `_XX`（十六进制字节码）→ 原字符（仅当还原出的字符原本非法时，避免误伤合法 `_XX` 字面）
+///
+/// ★ 中文损坏修复（2026-08-12）：多字节 UTF-8（如中文技能名）按字节还原成 Latin-1
+///   字符会乱码。现在把**连续**的 `_XX` 序列收集为字节串后整体按 UTF-8 解码
+///   （解码成功且含非 ASCII 才采用），失败/单字节时回退逐字节旧启发式。
 pub fn decode_tool_name(encoded: &str) -> String {
+    if encoded.starts_with("sklng_") {
+        if let Ok(map) = name_aliases().lock() {
+            if let Some(orig) = map.get(encoded) {
+                return orig.clone();
+            }
+        }
+    }
     let bytes = encoded.as_bytes();
     let mut out = String::new();
     let mut i = 0;
@@ -293,12 +350,45 @@ pub fn decode_tool_name(encoded: &str) -> String {
             }
             if i + 2 < bytes.len() {
                 if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    let b = (h << 4) | l;
+                    // 收集连续 `_XX` 十六进制字节序列（首字节已在上面验证）
+                    let mut run: Vec<u8> = vec![(h << 4) | l];
+                    let mut j = i + 3;
+                    while j + 2 < bytes.len() && bytes[j] == b'_' && bytes[j + 1] != b'_' {
+                        if let (Some(h2), Some(l2)) = (hex_val(bytes[j + 1]), hex_val(bytes[j + 2])) {
+                            run.push((h2 << 4) | l2);
+                            j += 3;
+                        } else {
+                            break;
+                        }
+                    }
+                    if run.len() >= 2 {
+                        // 多字节序列：整体按 UTF-8 解码（中文技能名修复）；
+                        // 解码失败或纯 ASCII（可能是字面 `_XX`）→ 回退逐字节旧启发式
+                        if let Ok(s) = String::from_utf8(run.clone()) {
+                            if s.chars().any(|c| !c.is_ascii()) {
+                                out.push_str(&s);
+                                i = j;
+                                continue;
+                            }
+                        }
+                        for &b in &run {
+                            let orig = b as char;
+                            if !(orig.is_ascii_alphanumeric() || orig == '_' || orig == '-')
+                                && b != b':'
+                            {
+                                out.push(orig);
+                            } else {
+                                out.push('_');
+                                out.push_str(&format!("{:02x}", b));
+                            }
+                        }
+                        i = j;
+                        continue;
+                    }
+                    // 单字节：旧启发式（还原原本非法的字符，合法字面 `_XX` 保持原样）
+                    let b = run[0];
                     let orig = b as char;
-                    // 仅还原原本非法的字符（还原后仍是字母数字_ - 则保持字面 _XX）
-                    if !(orig.is_ascii_alphanumeric() || orig == '_' || orig == '-')
-                        && b != b':'
-                    {
+                    if !(orig.is_ascii_alphanumeric() || orig == '_' || orig == '-') && b != b':' {
                         out.push(orig);
                         i += 3;
                         continue;
@@ -498,6 +588,38 @@ mod tests {
         assert_eq!(decode_tool_name("plain_name"), "plain_name");
     }
 
+    /// 超长中文技能名（微信识图事故复现）：编码后超 128 字符 → 短哈希名，
+    /// 解码经别名表还原为原始 id（不破坏工具调用链路）。
+    #[test]
+    fn tool_name_long_name_gets_short_alias_and_decodes_back() {
+        let id = "skillhub:视频号爆款短视频拆解（免费版：需本地上传视频）【零一数科·出品】";
+        let full = encode_tool_name_full(id);
+        assert!(full.len() > MAX_TOOL_NAME_LEN, "前置条件：完整编码应超限");
+        let short = encode_tool_name(id);
+        assert!(short.len() <= MAX_TOOL_NAME_LEN, "短名必须 ≤128，实际 {}", short.len());
+        assert!(short.starts_with("sklng_"), "短名应有 sklng_ 前缀: {short}");
+        // 确定性：同一 id 两次编码结果一致
+        assert_eq!(encode_tool_name(id), short);
+        // 可逆：解码还原原始 id（工具分发链路）
+        assert_eq!(decode_tool_name(&short), id);
+        // 短名不破坏普通路径
+        assert_eq!(decode_tool_name("builtin__get_time"), "builtin:get_time");
+    }
+
+    /// ★ 中文损坏修复验证：多字节 UTF-8 按字节序列整体解码，不再还原成 Latin-1 乱码。
+    #[test]
+    fn decode_tool_name_utf8_chinese_roundtrip() {
+        // encode("中文技能") → 每个中文 UTF-8 字节编码为 _XX，连续序列应整体还原
+        let name = "中文技能名";
+        let encoded = encode_tool_name_full(&format!("skillhub:{name}"));
+        assert!(encoded.contains("_e"), "前置条件：中文应被编码为 _XX 字节序列");
+        assert_eq!(decode_tool_name(&encoded), format!("skillhub:{name}"));
+        // 单字节非法字符仍按旧启发式还原（空格等）
+        assert_eq!(decode_tool_name("builtin_20echo"), "builtin echo");
+        // 字面 `_XX`（原本合法字符）不被误还原
+        assert_eq!(decode_tool_name("builtin_5fread"), "builtin_5fread");
+    }
+
     #[test]
     fn parse_response_with_tool_calls() {
         let raw = json!({
@@ -608,7 +730,7 @@ mod e2e {
             &provider, &registry, &crate::middleware::sandbox::SandboxManager::new(),
             &dispatcher, &sessions, &confirms, "e2e-session",
             "请调用 get_time 工具获取当前时间，并告诉我日期。",
-            5, AgentMode::Yolo, false, 300, &progress, &cancel,
+            5, AgentMode::Yolo, false, 300, &progress, &cancel, None,
         )
         .await
         .expect("循环应成功完成");
@@ -622,7 +744,7 @@ mod e2e {
             &provider, &registry, &crate::middleware::sandbox::SandboxManager::new(),
             &dispatcher, &sessions, &confirms, "e2e-session",
             "刚才获取到的当前时间是什么？请直接回答。",
-            5, AgentMode::Yolo, false, 300, &progress, &cancel,
+            5, AgentMode::Yolo, false, 300, &progress, &cancel, None,
         )
         .await
         .expect("第二轮应成功完成");

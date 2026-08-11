@@ -26,6 +26,8 @@ npm-debug.log*
 tmp_ocr.*
 *.bak
 *.enc
+test_edge_tts*.cjs
+test_tts_*.mp3
 
 # ── Windows ────────────────────────────────
 Thumbs.db

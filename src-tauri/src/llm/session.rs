@@ -75,6 +75,55 @@ pub struct SessionManager {
     keep_last: usize,
 }
 
+/// 移除"悬空"的 tool 消息（双向配对清理，LlmMessage 版）。
+///
+/// 压缩/截断后可能破坏 tool 配对组，DeepSeek 会报 HTTP 400，两种形态：
+/// 1. 悬空 tool：前置 assistant(tool_calls) 被截掉 / 段首就是 tool 消息 → 丢弃该 tool；
+/// 2. assistant 带 tool_calls 但其部分/全部 tool 响应被截掉 → 整组删除。
+/// （当前 compact_with 在 lib 构建中未被接线，随其一起豁免 dead_code；测试仍覆盖。）
+#[allow(dead_code)]
+fn prune_dangling_tool_messages(messages: &mut Vec<LlmMessage>) {
+    use super::Role;
+    let old = std::mem::take(messages);
+    let mut out: Vec<LlmMessage> = Vec::with_capacity(old.len());
+    let mut i = 0usize;
+    while i < old.len() {
+        // 悬空 tool：无前置 assistant(tool_calls) 支撑 → 丢弃
+        if matches!(old[i].role, Role::Tool) {
+            i += 1;
+            continue;
+        }
+        // assistant 带 tool_calls：检查其 tool 响应是否完整
+        if matches!(old[i].role, Role::Assistant) && old[i].tool_calls.is_some() {
+            let declared: Vec<String> = old[i]
+                .tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
+                .unwrap_or_default();
+            // 向后收集紧接着的 tool 响应（直到下一条非 tool 消息）
+            let mut j = i + 1;
+            let mut responded: Vec<String> = Vec::new();
+            while j < old.len() && matches!(old[j].role, Role::Tool) {
+                if let Some(id) = &old[j].tool_call_id {
+                    responded.push(id.clone());
+                }
+                j += 1;
+            }
+            // 每个声明的 tool_call_id 都必须有响应，否则整组删除 assistant（含残留响应）
+            let complete = declared.iter().all(|id| responded.contains(id));
+            if complete {
+                out.push(old[i].clone());
+                out.extend_from_slice(&old[i + 1..j]);
+            }
+            i = j;
+            continue;
+        }
+        out.push(old[i].clone());
+        i += 1;
+    }
+    *messages = out;
+}
+
 impl SessionManager {
     /// 纯内存模式（离线测试 / 无持久化需求）。
     pub fn new() -> Self {
@@ -248,6 +297,11 @@ impl SessionManager {
     }
 
     /// 应用压缩：用摘要替换历史（保留最近 `keep_last` 条原始消息）。
+    ///
+    /// ★ 2026-08-12 修复：截断后清理首尾不配对的 tool / assistant(tool_calls) 消息
+    ///   （保留窗口可能以 tool 消息开头、或前置 assistant(tool_calls) 被截掉 →
+    ///   DeepSeek HTTP 400 "role 'tool' must be a response to ... 'tool_calls'"）。
+    ///   实现思路移植自 harness::engine::context::prune_dangling_tools（Value 版）。
     pub fn compact_with(&self, session: &mut AgentSession, summary: String) {
         let keep = self.keep_last.min(session.messages.len());
         let kept = session.messages.split_off(session.messages.len() - keep);
@@ -259,6 +313,7 @@ impl SessionManager {
             tool_call_id: None,
         }];
         messages.extend(kept);
+        prune_dangling_tool_messages(&mut messages);
         session.messages = messages;
         session.compacted_count += 1;
     }

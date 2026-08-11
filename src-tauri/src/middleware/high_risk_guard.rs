@@ -99,8 +99,14 @@ fn find_sensitive_path_arg(v: &serde_json::Value) -> Option<String> {
 }
 
 /// 系统敏感路径检查（与 analyze_image 执行器内双保险实现一致）。
+///
+/// ★ 防 junction/symlink 绕过（2026-08-12 修复）：先解析真实路径
+///   （存在的祖先 canonicalize），与 risk.rs / sandbox 保持一致。
+///   同时检查原始字符串（POSIX 风格标记在 Windows 规范化后可能失配）。
 fn is_sensitive_path(p: &str) -> bool {
     let lower = p.to_lowercase();
+    let resolved = super::sandbox::resolve_real_path(std::path::Path::new(p));
+    let lower_resolved = resolved.to_string_lossy().to_lowercase();
     const MARKERS: &[&str] = &[
         "c:\\windows",
         "c:\\program files",
@@ -115,7 +121,7 @@ fn is_sensitive_path(p: &str) -> bool {
         "\\.ssh",
         "/.ssh/",
     ];
-    MARKERS.iter().any(|m| lower.contains(m))
+    MARKERS.iter().any(|m| lower.contains(m) || lower_resolved.contains(m))
 }
 
 #[cfg(test)]

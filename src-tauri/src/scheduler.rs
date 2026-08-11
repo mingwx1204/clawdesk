@@ -61,6 +61,9 @@ pub struct SchedulerTask {
     /// 微信推送目标用户（空则不推送；填了 push_wechat 才生效）。
     #[serde(default)]
     pub wechat_to: Option<String>,
+    /// 微信推送槽位（0 = 微信1 …，默认 0）。旧数据无此字段时兼容为 0。
+    #[serde(default)]
+    pub wechat_slot: usize,
     /// 目标会话 ID（默认 `sched-<id>`，独立会话保存结果）。
     #[serde(default)]
     pub session_id: Option<String>,
@@ -167,11 +170,31 @@ fn save_tasks(inner: &Arc<SchedulerInner>) {
 }
 
 fn load_tasks(inner: &Arc<SchedulerInner>) {
-    let Some(path) = tasks_file(inner) else { return };
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(tasks) = serde_json::from_str::<Vec<SchedulerTask>>(&text) {
-            *inner.tasks.lock() = tasks;
-        }
+    let Some(path) = tasks_file(inner) else {
+        eprintln!("[SCHED] ⚠️ tasks_file 返回 None（data_dir 未初始化），任务未加载");
+        return;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<Vec<SchedulerTask>>(&text) {
+            Ok(tasks) => {
+                eprintln!("[SCHED] 已加载 {} 个定时任务: {}", tasks.len(), path.display());
+                *inner.tasks.lock() = tasks;
+            }
+            Err(e) => {
+                eprintln!("[SCHED] ⚠️ 任务文件解析失败（任务未加载）: {e}");
+                eprintln!("[SCHED] 文件内容前 200 字符: {}", trunc_str(&text, 200));
+            }
+        },
+        Err(e) => eprintln!("[SCHED] ⚠️ 任务文件读取失败: {e}"),
+    }
+}
+
+fn trunc_str(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect()
     }
 }
 
@@ -257,6 +280,7 @@ async fn run_task(app: AppHandle, task: &SchedulerTask) -> Result<String, String
 
 /// 调度主循环（setup 时 spawn；每 5 秒检查到点任务）。
 pub(crate) async fn scheduler_loop(app: AppHandle, inner: Arc<SchedulerInner>) {
+    eprintln!("[SCHED] 调度循环已启动（每 {} 秒检查一次）", TICK_INTERVAL_SECS);
     let mut ticker = tokio::time::interval(Duration::from_secs(TICK_INTERVAL_SECS));
     loop {
         ticker.tick().await;
@@ -277,12 +301,17 @@ pub(crate) async fn scheduler_loop(app: AppHandle, inner: Arc<SchedulerInner>) {
                         t.enabled = false;
                     }
                 }
-                drop_tasks_lock(&tasks);
+                // ★ 修复：显式释放锁后再持久化。
+                //   旧代码 drop_tasks_lock(&tasks) 传引用不释放锁 → save_tasks 里
+                //   重复 lock → parking_lot 同线程递归加锁 panic → 调度协程崩溃
+                //   → 定时任务永不触发（卡死）。
+                drop(tasks);
                 save_tasks(&inner);
             }
             due
         };
         for t in due {
+            eprintln!("[SCHED] 🕐 触发任务: {} ({})", t.name, t.id);
             let app2 = app.clone();
             tokio::spawn(async move {
                 let result = run_task(app2.clone(), &t).await;
@@ -299,14 +328,26 @@ pub(crate) async fn scheduler_loop(app: AppHandle, inner: Arc<SchedulerInner>) {
                                 }),
                             );
                         }
-                        // 微信推送（默认槽位 0 = 微信1，旧接口兼容）
+                        // 微信推送（指定槽位；默认 0 = 微信1，旧任务无槽位字段兼容）
                         if t.push_wechat {
                             if let Some(to) = &t.wechat_to {
                                 if !to.is_empty() {
                                     let wc = app2.state::<crate::wechat::WechatBotState>();
-                                    let inner = wc.bot(0);
-                                    crate::wechat::send_message(&inner, to, &text, None).await;
-                                    eprintln!("[SCHED] 已推送微信 {}", to);
+                                    let inner = wc.bot(t.wechat_slot);
+                                    // ★ 2026-08-12：处理 send_message 的 Result（原返回值被丢弃，失败无感知）
+                                    if let Err(e) =
+                                        crate::wechat::send_message(&inner, to, &text, None).await
+                                    {
+                                        eprintln!(
+                                            "[SCHED] 微信推送失败 slot{} -> {}: {}",
+                                            t.wechat_slot, to, e
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "[SCHED] 已推送微信 slot{} -> {}",
+                                            t.wechat_slot, to
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -327,9 +368,6 @@ pub(crate) async fn scheduler_loop(app: AppHandle, inner: Arc<SchedulerInner>) {
     }
 }
 
-// 帮助释放 tasks 锁的辅助（避免闭包内借用冲突）
-fn drop_tasks_lock(_tasks: &parking_lot::MutexGuard<'_, Vec<SchedulerTask>>) {}
-
 // ─── Tauri 命令 ───
 
 /// 列出全部定时任务。
@@ -347,6 +385,7 @@ pub fn scheduler_add(
     schedule: Schedule,
     push_wechat: Option<bool>,
     wechat_to: Option<String>,
+    wechat_slot: Option<usize>,
     session_id: Option<String>,
     notify: Option<bool>,
 ) -> Result<SchedulerTask, String> {
@@ -386,6 +425,7 @@ pub fn scheduler_add(
         last_run,
         push_wechat: push_wechat.unwrap_or(false),
         wechat_to: wechat_to.filter(|s| !s.trim().is_empty()),
+        wechat_slot: wechat_slot.unwrap_or(0).min(crate::wechat::MAX_BOTS - 1),
         session_id,
         notify: notify.unwrap_or(true),
     };

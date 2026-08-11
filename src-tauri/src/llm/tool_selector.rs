@@ -4,7 +4,12 @@
 //! token 开销巨大且模型选择精度下降。
 //!
 //! 策略：
-//! - **固定保留**：builtin / mcp / 其他非 skillhub 源（核心能力，数量少）；
+//! - **固定保留**：builtin / mcp / 其他非 skillhub 源（核心能力，数量少）——
+//!   ★ 2026-08-12 修复：builtin 工具**全部放行**（不再走 CORE_BUILTIN 子白名单）。
+//!   原白名单把 agent_subtask / web_search / knowledge_* / snapshot_* / wechat_ui_* /
+//!   browser_* / attachment_save 挡在 Agent 之外，而系统提示又要求模型"优先调用
+//!   agent_subtask"→ 模型永远调不到 → 委派策略空转。builtin 工具全部是本地注册的
+//!   核心能力，应整体暴露；只对 skillhub 技能做按需检索过滤。
 //! - **按需检索**：skillhub 技能按「用户消息 × 技能索引」n-gram 命中数打分，
 //!   每轮只暴露 top-N（默认 10），零依赖、纯 CPU、毫秒级。
 
@@ -19,37 +24,15 @@ use std::collections::HashSet;
 ///   若模型仍乱调，可调回 0 或降到 3。
 pub const DEFAULT_TOP_N: usize = 5;
 
-/// 核心内置工具白名单：32 个工具（22 内置 + 10 技能）对 DeepSeek v4-flash 负担过大，
-/// 模型会困惑导致工具调用输出坏 JSON / 复述 system prompt。只保留高频核心工具。
-const CORE_BUILTIN: &[&str] = &[
-    "terminal",
-    "file_read",
-    "file_write",
-    "list_dir",
-    "echo",
-    "get_time",
-    "analyze_image",
-    "ocr",
-    "search_text",
-    "window_minimize",
-    "window_maximize",
-    "window_get_state",
-    "window_screenshot",
-    "generate_image",
-    "git_status",
-    "calculate",
-];
-
-/// 检索式工具选择：核心内置工具（白名单）全保留，skillhub 技能按相关度取 top_n。
+/// 检索式工具选择：非 skillhub 工具（builtin/mcp/...）全保留，
+/// skillhub 技能按相关度取 top_n。
 ///
 /// 返回顺序：先固定工具（builtin/mcp/...），再命中的技能（按分数降序）。
 pub fn select_tools(defs: &[UnifiedToolDef], prompt: &str, top_n: usize) -> Vec<UnifiedToolDef> {
     let mut fixed: Vec<UnifiedToolDef> = defs
         .iter()
         .filter(|d| d.source != "skillhub")
-        // ★ 内置工具白名单：只对 builtin 源应用核心工具过滤（避免 30+ 工具让模型困惑）；
-        //   用户配置的 MCP / 其他外部工具始终保留（显式接入，不应被静默丢弃）
-        .filter(|d| d.source != "builtin" || CORE_BUILTIN.contains(&d.name.as_str()))
+        // ★ builtin 全部放行（见文件头注释）；用户配置的 MCP / 其他外部工具也始终保留
         .cloned()
         .collect();
 

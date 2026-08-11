@@ -26,11 +26,13 @@ use crate::llm::{
 };
 
 /// 子任务允许暴露的工具白名单（只读 / 安全，不包含写/终端/生图等危险能力）。
+/// ★ 2026-08-12 修复：原名单写 `builtin:read_file`/`grep_search`/`file_search`（全库不存在，
+///   且实际注册名是 `file_read`/`search_text`），导致子工具集为空、子任务全部失败。
+///   已改为真实注册的工具 id。
 const SUBTASK_SAFE_TOOLS: &[&str] = &[
-    "builtin:read_file",
+    "builtin:file_read",
     "builtin:list_dir",
-    "builtin:grep_search",
-    "builtin:file_search",
+    "builtin:search_text",
     "builtin:get_time",
     "builtin:memory_search",
     "builtin:calculate",

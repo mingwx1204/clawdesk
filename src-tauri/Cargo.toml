@@ -1,6 +1,6 @@
 [package]
 name = "clawdesk"
-version = "0.5.2"
+version = "0.7.0"
 description = "ClawDesk - Tauri 2.x desktop application"
 authors = ["ClawDesk Team"]
 edition = "2021"
@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # ── 既有依赖（全部保留）────────────────────────────────────
 tauri = { version = "2", features = ["tray-icon"] }   # tray-icon：系统托盘（关闭到托盘常驻）
+tauri-plugin-single-instance = "2"                    # 单实例锁：防止多开（双进程会导致微信重复回复）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }   # 追加 serde：harness protocol/workroom 需 DateTime serde
@@ -37,6 +38,9 @@ reqwest = { version = "0.13", default-features = false, features = [
     "gzip",
     # 刻意不含 "http2"：engine/client.rs 强制 http1_only() 修复流断开
 ] }
+# reqwest 0.13 的 WebSocket 拆分为独立 crate（Edge TTS 朗读合成用）
+reqwest-websocket = "0.6"
+sha2 = "0.10"            # Edge TTS Sec-MS-GEC 签名（SHA-256）
 # rustls-no-provider 需手动安装加密 provider（main.rs 启动时 install_default），否则构建 reqwest Client 会 panic
 rustls = { version = "0.23", features = ["ring"] }
 anyhow = "1"                       # 引擎错误传播
@@ -59,11 +63,19 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",             # LocalFree / HLOCAL
   "Win32_Security_Cryptography",  # DPAPI CryptProtectData / CryptUnprotectData
   "Win32_Storage_FileSystem",     # GetFileAttributesW / SetFileAttributesW（清除只读）
+  # ↓ 独立微信（UI 自动化）：窗口枚举/输入模拟/窗口截图
+  "Win32_UI_WindowsAndMessaging", # EnumWindows / GetWindowTextW / SetForegroundWindow
+  "Win32_UI_Input_KeyboardAndMouse", # SendInput / SetCursorPos / INPUT
+  "Win32_Graphics_Gdi",           # PrintWindow / GetDIBits / BitBlt
+  "Win32_Storage_Xps",            # PrintWindow（该 API 归类在 Storage_Xps 模块）
 ] }
 qrcode = "0.14"                    # 微信登录二维码 SVG 生成（mobile_qr_svg）
 # 微信 CDN 媒体解密（图片/文件/语音/视频：AES-128-ECB PKCS7）
 aes = "0.8"
 cipher = "0.4"
+# 微信 CDN 上传加密密钥（真随机熵源；0.2.x 已在 lock 中，无需新增解析）
+getrandom = "0.2"
+# 微信 CDN 上传加密密钥（真随机熵源；0.2.x 已在 lock 中，无需新增解析）
 # 微信发图：CDN 上传需要明文 MD5（getUploadUrl 参数）
 md-5 = "0.10"
 # ── 新增：大厂 Agent 工具链 ────────────────────────────────
@@ -78,9 +90,12 @@ scraper = "0.22"
 text-splitter = "0.18"
 # ⑤ 邮件发送（SMTP）
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+# ── 新增：虚拟机内置微信（VNC 屏幕流内嵌）────────────────────
+des = "0.8"                        # VNC 认证（DES-ECB 挑战应答）
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [profile.release]
 strip = true
 lto = true
+codegen-units = 1

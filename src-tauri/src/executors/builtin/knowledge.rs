@@ -95,8 +95,14 @@ pub fn register(registry: &ToolRegistry) -> Result<(), ToolError> {
 fn do_index(path_str: &str) -> Result<serde_json::Value, String> {
     let p = std::path::Path::new(path_str);
     let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut truncated = false;
     if p.is_dir() {
-        collect_text_files(p, &mut files)?;
+        collect_text_files(p, &mut files, 0)?;
+        // ★ 2026-08-12：数量上限截断（防超大目录一次性索引失控）
+        if files.len() > MAX_INDEX_FILES {
+            files.truncate(MAX_INDEX_FILES);
+            truncated = true;
+        }
     } else {
         files.push(p.to_path_buf());
     }
@@ -131,7 +137,20 @@ fn do_index(path_str: &str) -> Result<serde_json::Value, String> {
     }
 
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
-    Ok(json!({"indexedFiles":files.len()as u64-skipped,"skippedFiles":skipped,"addedChunks":added,"totalChunks":total,"persisted":true}))
+    let mut resp = json!({
+        "indexedFiles": files.len() as u64 - skipped,
+        "skippedFiles": skipped,
+        "addedChunks": added,
+        "totalChunks": total,
+        "persisted": true,
+    });
+    if truncated {
+        resp["note"] = json!(format!(
+            "目录文件数超过上限 {}，仅索引前 {} 个（结果可能不完整）",
+            MAX_INDEX_FILES, MAX_INDEX_FILES
+        ));
+    }
+    Ok(resp)
 }
 
 // ═══════════════════════════════════════════
@@ -226,18 +245,35 @@ fn tokenize_words(s: &str) -> Vec<String> {
     s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 2).map(|w| w.to_string()).collect()
 }
 
-fn collect_text_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+/// ★ 2026-08-12：单次索引文件数 / 递归深度上限（防超大目录遍历失控）。
+const MAX_INDEX_FILES: usize = 2000;
+const MAX_INDEX_DEPTH: u32 = 12;
+
+fn collect_text_files(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > MAX_INDEX_DEPTH || files.len() >= MAX_INDEX_FILES {
+        return Ok(());
+    }
     let text_exts = ["txt", "md", "py", "js", "ts", "jsx", "tsx", "json", "csv",
                       "html", "css", "xml", "yaml", "yml", "toml", "rs", "go", "java",
                       "c", "cpp", "h", "hpp", "vue", "svelte", "sql", "sh", "bat", "ps1"];
     for entry in std::fs::read_dir(dir).map_err(|e| format!("读取目录失败: {e}"))? {
         let entry = entry.map_err(|e| format!("读取条目失败: {e}"))?;
         let path = entry.path();
-        if path.is_dir() { let _ = collect_text_files(&path, files); }
-        else if let Some(ext) = path.extension() {
+        if path.is_dir() {
+            let _ = collect_text_files(&path, files, depth + 1);
+        } else if let Some(ext) = path.extension() {
             if text_exts.contains(&ext.to_string_lossy().to_lowercase().as_str()) {
-                if path.metadata().map(|m| m.len() < 5_000_000).unwrap_or(false) { files.push(path); }
+                if path.metadata().map(|m| m.len() < 5_000_000).unwrap_or(false) {
+                    files.push(path);
+                }
             }
+        }
+        if files.len() >= MAX_INDEX_FILES {
+            break;
         }
     }
     Ok(())

@@ -145,8 +145,14 @@ fn read_and_compress(image_path: &str) -> Result<(u32, u32, String, String), Str
 }
 
 /// 系统敏感路径检查（双保险：中间件 + 执行器内）。
+///
+/// ★ 防 junction/symlink 绕过（2026-08-12 修复）：先解析真实路径
+///   （存在的祖先 canonicalize），与 middleware 三处检查保持一致；
+///   同时检查原始字符串（POSIX 风格标记在 Windows 规范化后可能失配）。
 pub fn is_sensitive_path(p: &str) -> bool {
     let lower = p.to_lowercase();
+    let resolved = crate::middleware::sandbox::resolve_real_path(std::path::Path::new(p));
+    let lower_resolved = resolved.to_string_lossy().to_lowercase();
     let sensitive_markers = [
         "c:\\windows",
         "c:\\program files",
@@ -161,7 +167,7 @@ pub fn is_sensitive_path(p: &str) -> bool {
         "\\.ssh",
         "/.ssh/",
     ];
-    sensitive_markers.iter().any(|m| lower.contains(m))
+    sensitive_markers.iter().any(|m| lower.contains(m) || lower_resolved.contains(m))
 }
 
 #[cfg(test)]

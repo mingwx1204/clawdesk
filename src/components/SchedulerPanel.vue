@@ -19,6 +19,7 @@ interface SchedTask {
   lastRun: number;
   pushWechat: boolean;
   wechatTo?: string | null;
+  wechatSlot?: number;
   sessionId?: string | null;
   notify: boolean;
 }
@@ -49,6 +50,7 @@ const seconds = ref(3600);
 const onceAt = ref("");
 const pushWechat = ref(false);
 const wechatTo = ref("");
+const wechatSlot = ref(0);
 const notify = ref(true);
 
 let unlisten: UnlistenFn | null = null;
@@ -128,12 +130,14 @@ async function addTask() {
       schedule,
       pushWechat: pushWechat.value,
       wechatTo: wechatTo.value.trim() || undefined,
+      wechatSlot: wechatSlot.value,
       notify: notify.value,
     });
     pushLog(`📌 已添加任务「${name.value.trim()}」`);
     name.value = "";
     prompt.value = "";
     wechatTo.value = "";
+    wechatSlot.value = 0;
     formOpen.value = false;
     await refresh();
   } catch (e) {
@@ -224,7 +228,11 @@ async function triggerNow(t: SchedTask) {
                 <input type="checkbox" v-model="pushWechat" />
                 微信推送
               </label>
-              <input v-if="pushWechat" v-model="wechatTo" class="sc-input sc-md" placeholder="微信用户 ID（留空不发，可从消息日志复制）" />
+              <template v-if="pushWechat">
+                <input v-model="wechatTo" class="sc-input sc-md" placeholder="微信用户 ID（留空不发，可从消息日志复制）" />
+                <input v-model.number="wechatSlot" type="number" min="0" max="9" class="sc-input sc-sm" title="微信槽位：0=微信1 … 9=微信10" />
+                <span class="sc-unit">微信{{ wechatSlot + 1 }}</span>
+              </template>
               <label class="sc-check">
                 <input type="checkbox" v-model="notify" />
                 桌面通知
@@ -242,7 +250,7 @@ async function triggerNow(t: SchedTask) {
               <span class="sc-task-prompt">{{ t.prompt.slice(0, 80) }}{{ t.prompt.length > 80 ? "…" : "" }}</span>
               <span class="sc-task-meta">
                 上次 {{ fmtTs(t.lastRun) }}
-                <template v-if="t.pushWechat"> · 推微信</template>
+                <template v-if="t.pushWechat"> · 推微信{{ (t.wechatSlot ?? 0) + 1 }}</template>
               </span>
             </div>
             <div class="sc-task-ops">

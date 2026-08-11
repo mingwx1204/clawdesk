@@ -121,6 +121,27 @@ pub struct TurnResult {
 // 主调度循环
 // ══════════════════════════════════════════════════════════════
 
+/// SSE tool_calls 并行槽位上限（防恶意/损坏 index 导致数组扩张 OOM）。
+const MAX_TOOL_CALL_SLOTS: usize = 1000;
+/// 单条工具结果回填上限（字符）：防 file_read 等大结果撑爆上下文。
+const MAX_TOOL_RESULT_CHARS: usize = 32 * 1024;
+
+/// 工具结果截断：超限时保留头部并附加说明（原本回填即文本，直接截断不破坏 JSON 结构）。
+fn truncate_tool_result(text: String) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_TOOL_RESULT_CHARS {
+        text
+    } else {
+        let head: String = chars[..MAX_TOOL_RESULT_CHARS].iter().collect();
+        format!(
+            "{}\n\n(结果过长，已截断：共 {} 字符，仅保留前 {} 字符)",
+            head,
+            chars.len(),
+            MAX_TOOL_RESULT_CHARS
+        )
+    }
+}
+
 /// 运行一轮完整 Agent 调度循环。
 ///
 /// # 参数
@@ -203,7 +224,7 @@ pub async fn run_turn_loop(
                 let snapshot = cur.clone();
                 let started = ctx_mgr.compact_async(snapshot).await;
                 if started {
-                    let st = ctx_mgr.wait_for_compaction().await;
+                    let st = ctx_mgr.wait_for_compaction(&cancel).await;
                     match st {
                         CompactionStatus::Completed => {
                             if let Some(summary) = ctx_mgr.summary_text().await {
@@ -265,10 +286,19 @@ pub async fn run_turn_loop(
                                 .send(EngineEvent::ToolCallStart { name: name.clone() })
                                 .await;
                             // ★ 并行工具按 index 占位：确保 tool_calls[index] 存在
-                            while tool_calls.len() <= index as usize {
-                                tool_calls.push((String::new(), String::new(), String::new()));
+                            // ★ 防 OOM（2026-08-12 修复）：index 超上限（>1000）时丢弃该 delta，
+                            //   绝不扩张数组（恶意/损坏的 index=u32::MAX 会尝试分配几十亿个元素）。
+                            if index as usize >= MAX_TOOL_CALL_SLOTS {
+                                eprintln!(
+                                    "[SSE] ToolCallStart index={} 超上限（{}），丢弃该 delta",
+                                    index, MAX_TOOL_CALL_SLOTS
+                                );
+                            } else {
+                                while tool_calls.len() <= index as usize {
+                                    tool_calls.push((String::new(), String::new(), String::new()));
+                                }
+                                tool_calls[index as usize] = (id, name, String::new());
                             }
-                            tool_calls[index as usize] = (id, name, String::new());
                         }
                         SseEvent::ToolCallDelta { id, arguments, index } => {
                             // ★ BUG 修复：OpenAI 流式 tool_calls 的后续 chunk 可能无 id 但有 index。
@@ -429,6 +459,8 @@ pub async fn run_turn_loop(
 
                 // 事件 + 消息回填（★ 保持 tool_calls 原顺序，OpenAI 要求 tool 消息一一对应）
                 for (id, name, text, is_err) in results {
+                    // ★ 单轮工具结果大小限制：超 32KB 截断（防 file_read 1MB 结果直接回填撑爆上下文）
+                    let text = truncate_tool_result(text);
                     let _ = tx_event
                         .send(EngineEvent::ToolCallEnd {
                             name: name.clone(),
@@ -449,9 +481,20 @@ pub async fn run_turn_loop(
 
             // ── 终止条件 ──
             // ★ 连续失败 ≥3 次：真正终止循环（避免模型反复用坏参数调工具，污染历史）
-            if !any_tool || loop_count >= config.max_tool_calls_per_turn || consecutive_tool_failures >= 3 {
+            // ★ 2026-08-12 修复：max_tool_calls_per_turn 语义与前端"最多 15 轮工具调用"对齐 ——
+            //   按「实际工具调用总数」熔断（原实现按 LLM 请求轮数计数，与 DispatcherExecutor
+            //   按每次调用递增的 round 熔断语义不一致，会导致三套上限打架）。
+            if !any_tool
+                || used_tool_calls >= config.max_tool_calls_per_turn
+                || consecutive_tool_failures >= 3
+            {
                 if consecutive_tool_failures >= 3 {
                     eprintln!("[TL] 连续 {} 次工具失败，终止循环", consecutive_tool_failures);
+                } else if used_tool_calls >= config.max_tool_calls_per_turn {
+                    eprintln!(
+                        "[TL] 工具调用总数达上限（{}），终止循环",
+                        config.max_tool_calls_per_turn
+                    );
                 }
                 break;
             }

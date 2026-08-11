@@ -44,6 +44,10 @@ pub struct SnapEntry {
 /// **避免 set_var 修改全局环境变量导致并行测试互相污染**（项目 6 修复）。
 static ROOT_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
+/// ★ 索引全局互斥锁（2026-08-12）：保护 load_index→修改→save_index 的读-改-写原子性，
+///   防止并行工具调用（多个 file_write 并发备份）互相覆盖索引丢记录。
+static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 快照根目录：`<数据目录>/snapshots/`（或测试覆盖值）。
 pub fn snapshot_dir() -> PathBuf {
     if let Some(dir) = ROOT_OVERRIDE.read().unwrap().as_ref() {
@@ -87,7 +91,9 @@ fn save_index(entries: &[SnapEntry]) -> Result<(), String> {
 }
 
 /// 追加一条快照记录（供 file_write 备份后调用）。
+/// ★ 持锁执行 load→push→save（防并行调用丢记录）。
 pub fn record_snapshot(original: &str, snapshot_file: &str, size: u64) -> Result<(), String> {
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_index();
     entries.push(SnapEntry {
         id: format!("snap_{}", chrono::Local::now().format("%Y%m%d_%H%M%S%3f")),
@@ -103,7 +109,9 @@ pub fn record_snapshot(original: &str, snapshot_file: &str, size: u64) -> Result
 /// 容量清理：超过上限时按创建顺序删除最旧快照（文件 + 索引项）。
 ///
 /// 返回被清理的条目（供调用方回传模型，避免模型读取已失效路径）。
+/// ★ 持锁执行 load→修改→save。
 pub fn enforce_capacity(max_bytes: u64) -> Vec<SnapEntry> {
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_index();
     let mut removed = Vec::new();
     let total: u64 = entries.iter().map(|e| e.size).sum();
@@ -143,7 +151,9 @@ pub fn find_entry(id: &str) -> Option<SnapEntry> {
 }
 
 /// 移除索引中的指定条目（回滚后保留快照，便于再次回滚；删除由用户显式进行）。
+/// ★ 持锁执行 load→过滤→save。
 fn remove_entry(id: &str) {
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let entries: Vec<SnapEntry> = load_index().into_iter().filter(|e| e.id != id).collect();
     let _ = save_index(&entries);
 }

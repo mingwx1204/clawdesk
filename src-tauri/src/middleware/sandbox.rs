@@ -81,12 +81,18 @@ impl SandboxManager {
     }
 
     /// 判断路径是否在任一授权根下（含等于根自身）。
+    ///
+    /// ★ 防 junction/symlink 绕过（2026-08-12 修复）：比较前对双方做真实路径解析
+    ///   （canonicalize 存在的祖先），字符串规范化无法识别的目录链接会被还原。
     pub fn is_allowed(&self, path: &str) -> bool {
         let Some(norm) = normalize(path) else {
             return false;
         };
+        let real = resolve_real_path(&norm);
         let roots = self.roots.read().unwrap();
-        roots.iter().any(|root| is_within(&norm, root))
+        roots
+            .iter()
+            .any(|root| is_within(&real, &resolve_real_path(root)))
     }
 }
 
@@ -211,6 +217,36 @@ fn normalize(p: &str) -> Option<PathBuf> {
     Some(normalized)
 }
 
+/// 解析真实路径（防 junction/symlink 绕过）—— 对「最长存在的祖先」做 canonicalize，
+/// 不存在的尾部路径原样拼接后统一规范化；全部失败时回退 `normalize` 结果。
+///
+/// 注意：被检查路径（如工具参数中的目标文件）可能不存在，直接 canonicalize 会失败，
+/// 因此逐级向上找存在的祖先再拼接（`C:\Windows\new.txt` → canonicalize(`C:\Windows`) + `new.txt`）。
+pub fn resolve_real_path(p: &Path) -> PathBuf {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&cur) {
+            Ok(real) => {
+                let mut out = real;
+                for s in suffix.iter().rev() {
+                    out.push(s);
+                }
+                // 统一大小写/分隔符，保证与授权根（normalize 结果）比较一致
+                return normalize(&out.to_string_lossy()).unwrap_or(out);
+            }
+            Err(_) => {
+                let Some(name) = cur.file_name() else { break };
+                suffix.push(name.to_os_string());
+                if !cur.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    p.to_path_buf()
+}
+
 /// 判断 `path` 是否在 `root` 目录下（含等于）。
 fn is_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
@@ -264,6 +300,44 @@ mod tests {
         // 构造一个不可能授权的根，验证其下子路径被拒
         let fake = PathBuf::from("Z:\\definitely\\not\\allowed\\sandbox");
         assert!(!s.is_allowed(&fake.to_string_lossy()));
+    }
+
+    /// ★ junction/symlink 绕过回归测试（2026-08-12）：
+    /// 授权根内存在指向**根外**目录的 junction 时，经 junction 的路径必须被判定为根外。
+    #[test]
+    fn junction_bypass_is_blocked() {
+        let s = sandbox();
+        let base = std::env::temp_dir().join(format!("clawdesk-junc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("root"); // 授权根
+        let outside = base.join("outside"); // 根外目录（junction 目标）
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = dir.join("link");
+        // 创建 junction（Windows 目录链接；失败则跳过测试——非 Windows 无此概念）
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if created {
+            // 清空默认授权根（temp/home 等默认根会覆盖测试目录导致判定失真），只留测试根
+            for r in s.roots() {
+                s.remove_root(&r);
+            }
+            assert!(s.add_root(dir.to_str().unwrap()));
+            // 经 junction 访问根外目录：真实路径解析后应判定为根外 → 拒绝
+            let escaped = link.join("secret.txt").to_string_lossy().to_string();
+            assert!(
+                !s.is_allowed(&escaped),
+                "junction 指向根外目录，路径 `{escaped}` 不应被判定为在授权根内"
+            );
+            // 对照：根内普通路径仍放行（不被 junction 修复误伤）
+            assert!(s.is_allowed(&dir.join("normal.txt").to_string_lossy()));
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

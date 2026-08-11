@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 /**
@@ -51,6 +51,11 @@ interface AppSettings {
   opencodeWatchEndpoint: string;
   opencodeWatchApiKey: string;
   opencodeWatchIntervalSecs: number;
+  // ── ⑬ 朗读 / TTS（Edge TTS 神经网络拟人音色）──
+  ttsEnabled: boolean;
+  ttsVoice: string;
+  ttsRate: number;
+  ttsStyle: string;
 }
 
 // API Key（仅内存态，不持久化 —— 与后端安全红线一致）
@@ -145,6 +150,7 @@ onMounted(async () => {
   loadSkills();
   loadSandbox();
   loadMcp();
+  loadVoices();
   // ★ 重启后自进化设置仍为开启 → 自动重新初始化后端引擎
   //   （后端引擎是内存单例，重启即空；不重新初始化会导致手动进化报"未初始化"）
   if (settings.value?.selfEvolveEnabled) {
@@ -172,6 +178,82 @@ async function load() {
   } catch (e) {
     error.value = `加载设置失败：${String(e)}`;
   }
+}
+
+// ── 🔊 朗读设置（Edge TTS 神经网络拟人音色） ──
+interface TtsVoiceInfo {
+  id: string;
+  name: string;
+  gender: string;
+  desc: string;
+  region: string;
+  styles: string[];
+}
+
+const voices = ref<TtsVoiceInfo[]>([]);
+const previewing = ref(false);
+const previewTip = ref("");
+
+/** 当前选中音色支持的语气风格。 */
+const currentVoiceStyles = computed(() => {
+  const id = settings.value?.ttsVoice || "zh-CN-XiaoxiaoNeural";
+  return voices.value.find((v) => v.id === id)?.styles ?? [];
+});
+
+/** 语气风格中文标签。 */
+function styleLabel(style: string): string {
+  const map: Record<string, string> = {
+    cheerful: "😄 开心",
+    empathetic: "💗 温柔共情",
+    calm: "😌 平静",
+    gentle: "🌸 温和",
+    serious: "📌 严肃",
+    newscast: "📰 新闻播报",
+    sad: "😢 悲伤",
+    angry: "😠 生气",
+    excited: "🎉 兴奋",
+    fearful: "😨 害怕",
+    lyrical: "🎵 抒情",
+    "poetry-reading": "📖 诗歌朗诵",
+  };
+  return map[style] || style;
+}
+
+/** 加载音色列表。 */
+async function loadVoices(): Promise<void> {
+  try {
+    voices.value = await invoke<TtsVoiceInfo[]>("tts_list_voices");
+  } catch { /* 静默 */ }
+}
+
+/** 试听当前选中音色。 */
+async function previewVoice(): Promise<void> {
+  const s = settings.value;
+  if (!s) return;
+  previewing.value = true;
+  previewTip.value = "合成中…";
+  try {
+    const ok = await invoke<{ audioBase64: string; bytes: number; voice: string }>("tts_speak", {
+      text: "你好呀！我是你的朗读助手，听听这个音色怎么样？如果你喜欢，就在设置里选我吧。",
+      voice: s.ttsVoice || "zh-CN-XiaoxiaoNeural",
+      rate: s.ttsRate ?? 1.0,
+      style: s.ttsStyle || "",
+    });
+    const audio = new Audio("data:audio/mpeg;base64," + ok.audioBase64);
+    audio.onended = () => { previewing.value = false; previewTip.value = "✅ 试听完成"; };
+    audio.onerror = () => { previewing.value = false; previewTip.value = "❌ 播放失败（网络异常？）"; };
+    await audio.play();
+    previewTip.value = "🔊 播放中…";
+  } catch (e) {
+    previewing.value = false;
+    previewTip.value = `❌ 合成失败：${String(e)}`;
+  }
+}
+
+/** 停止试听。 */
+function stopPreview(): void {
+  previewing.value = false;
+  previewTip.value = "";
 }
 
 /** 应用深浅主题（html[data-theme]）。 */
@@ -547,17 +629,28 @@ async function readLog() {
   logSize.value = size > 0 ? `${lines.length} 行 · ${size} B` : "";
 }
 
-// ── v6：自检 / 导出（模拟） ──
+// ── v6：自检 / 导出（接入真实后端） ──
 const selfResult = ref("");
-function runSelfCheck() {
+async function runSelfCheck() {
   selfResult.value = "正在检测模型 API 连通性…";
-  setTimeout(() => {
-    selfResult.value =
-      "✅ 自检通过\n· 主模型 DeepSeek-V4：连通正常（延迟 210ms）\n· 路由层：已初始化\n· 视觉模型：已配置（deepseek-vl）\n· 绘图 API：已配置（flux-schnell）\n· 技能：87 个已注册";
-  }, 600);
+  try {
+    const items = await invoke<any[]>("self_check_run");
+    const lines = (items ?? []).map((i) => `${i.status === "ok" ? "✅" : i.status === "fail" ? "❌" : "⚠️"} ${i.name}：${i.detail ?? ""}`);
+    selfResult.value = lines.length ? lines.join("\n") : "✅ 自检通过：所有项目正常";
+  } catch (e) {
+    selfResult.value = `❌ 自检失败：${typeof e === "string" ? e : JSON.stringify(e)}`;
+  }
 }
 const exportTip = ref("");
-function exportAll() { exportTip.value = "✅ 已导出全部数据（会话 / 设置 / 快照 / 技能）到导出目录"; }
+async function exportAll() {
+  exportTip.value = "正在导出全部数据（会话 / 设置 / 快照 / 技能）…";
+  try {
+    const path = await invoke<string>("export_all");
+    exportTip.value = `✅ 已导出到：${path}`;
+  } catch (e) {
+    exportTip.value = `❌ 导出失败：${typeof e === "string" ? e : JSON.stringify(e)}`;
+  }
+}
 
 // ── 自进化系统 ──
 interface EvolveRankItem {
@@ -836,6 +929,55 @@ async function loadEvolveStatus() {
               <span class="sc-range-val">{{ Math.round((settings.uiOpacity ?? 1) * 100) }}%</span>
             </label>
             <p class="sc-desc">调低后气泡/顶栏/输入区等玻璃框变透明，露出壁纸背景（20%~100%）</p>
+
+            <hr class="sc-divider" />
+
+            <!-- ⑬ 朗读 / TTS 设置（Edge TTS 神经网络拟人音色） -->
+            <h4>🔊 朗读设置</h4>
+            <p class="sc-desc">神经网络拟人音色（微软 Edge TTS，免费无需 Key），支持语气风格，比系统语音自然得多</p>
+
+            <label class="sc-check">
+              <input type="checkbox" :checked="settings.ttsEnabled" @change="field('ttsEnabled', ($event.target as HTMLInputElement).checked)" />
+              启用 AI 朗读（输出完自动朗读，默认开启）
+            </label>
+
+            <template v-if="settings.ttsEnabled">
+              <label class="sc-label">朗读音色</label>
+              <select :value="settings.ttsVoice || 'zh-CN-XiaoxiaoNeural'" class="sc-select" @change="field('ttsVoice', ($event.target as HTMLSelectElement).value)">
+                <option v-for="v in voices" :key="v.id" :value="v.id">
+                  {{ v.name }}（{{ v.gender }} · {{ v.region }}）— {{ v.desc }}
+                </option>
+              </select>
+
+              <label class="sc-label">语气风格</label>
+              <select :value="settings.ttsStyle || '__natural__'" class="sc-select" @change="field('ttsStyle', ($event.target as HTMLSelectElement).value === '__natural__' ? '' : ($event.target as HTMLSelectElement).value)">
+                <option value="__natural__">🌿 自然（无语气）</option>
+                <option v-for="st in currentVoiceStyles" :key="st" :value="st">{{ styleLabel(st) }}</option>
+                <option v-if="!currentVoiceStyles.length" value="" disabled>该音色不支持语气风格</option>
+              </select>
+
+              <label class="sc-label">语速：{{ (settings.ttsRate ?? 1).toFixed(2) }}×</label>
+              <div class="sc-row">
+                <input
+                  type="range"
+                  min="50"
+                  max="200"
+                  step="5"
+                  :value="Math.round((settings.ttsRate ?? 1) * 100)"
+                  @change="field('ttsRate', Number(($event.target as HTMLInputElement).value) / 100)"
+                />
+                <span class="sc-range-val">{{ Math.round((settings.ttsRate ?? 1) * 100) }}%</span>
+              </div>
+              <p class="sc-desc">50% = 慢速清晰，100% = 正常，200% = 快速</p>
+
+              <div class="ops-row">
+                <button class="btn-primary" :disabled="previewing" @click="previewVoice">
+                  {{ previewing ? '试听中…' : '🎧 试听当前音色' }}
+                </button>
+                <button class="btn-primary" @click="stopPreview">⏹ 停止</button>
+              </div>
+              <p v-if="previewTip" class="sc-tip">{{ previewTip }}</p>
+            </template>
           </section>
 
           <!-- ⑤ 快照与安全配置 -->

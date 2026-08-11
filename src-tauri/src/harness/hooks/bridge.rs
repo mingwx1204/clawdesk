@@ -58,6 +58,8 @@ impl TauriPermissionBridge {
     }
 
     /// 请求权限 —— 阻塞等待用户决策，最多 60s，超时拒绝。
+    /// 保留（内部自起 ID 版本）；引擎路径统一走 request_permission_with_id。
+    #[allow(dead_code)]
     pub async fn request_permission(
         &self,
         tool_name: &str,
@@ -66,16 +68,30 @@ impl TauriPermissionBridge {
         risk_level: &str,
     ) -> bool {
         let request_id = uuid::Uuid::new_v4().to_string();
+        self.request_permission_with_id(&request_id, tool_name, tool_args, description, risk_level)
+            .await
+    }
+
+    /// 用显式 request_id 请求权限（★ 2026-08-12：确认事件与注册使用同一 ID，
+    /// 供 make_step_confirm_callback 统一 ID 用 —— 前端拿到 callId 即可应答，不再查不到）。
+    pub async fn request_permission_with_id(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        tool_args: &serde_json::Value,
+        description: &str,
+        risk_level: &str,
+    ) -> bool {
         let (tx, rx) = oneshot::channel();
 
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(request_id.clone(), tx);
+            pending.insert(request_id.to_string(), tx);
         }
 
         if let Some(emitter) = &self.on_request {
             emitter(PermissionRequest {
-                request_id: request_id.clone(),
+                request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
                 tool_args: tool_args.clone(),
                 description: description.to_string(),
@@ -84,7 +100,7 @@ impl TauriPermissionBridge {
             });
         } else {
             tracing::warn!("TauriPermissionBridge 未注入 emitter，默认拒绝");
-            self.pending.lock().await.remove(&request_id);
+            self.pending.lock().await.remove(request_id);
             return false;
         }
 
@@ -93,7 +109,7 @@ impl TauriPermissionBridge {
             Ok(Err(_)) => false,
             Err(_) => {
                 tracing::warn!("权限请求超时（拒绝）：{request_id}");
-                self.pending.lock().await.remove(&request_id);
+                self.pending.lock().await.remove(request_id);
                 false
             }
         }
@@ -138,10 +154,15 @@ pub fn make_step_confirm_callback(
             RiskLevel::High => "high".to_string(),
             RiskLevel::Normal => "normal".to_string(),
         };
+        // ★ 2026-08-12 修复：ConfirmRequired 事件与 pending 注册必须使用同一个 ID。
+        //   旧实现：事件发 _call_id（runner 生成的 uuid），而 oneshot 注册在
+        //   request_permission 内部另起的 request_id 下 → 前端用 callId 应答永远查不到。
+        //   现在由本回调统一生成 request_id，事件与注册共用之。
+        let request_id = uuid::Uuid::new_v4().to_string();
         if let Some(ref tx) = tx_event {
             // async runtime 线程内不能用 blocking_send（会 panic），用 try_send 非阻塞发送
             let _ = tx.try_send(crate::harness::core::turn_loop::EngineEvent::ConfirmRequired {
-                call_id: _call_id.to_string(),
+                call_id: request_id.clone(),
                 tool_id: tool_id.to_string(),
                 risk_level: risk_level.clone(),
                 arguments: arguments.clone(),
@@ -157,11 +178,12 @@ pub fn make_step_confirm_callback(
                 let b = bridge.clone();
                 let tool = tool_id.to_string();
                 let args = arguments.clone();
+                let rid = request_id.clone();
                 let desc = format!("工具 {tool_id} 需要权限确认");
                 let lvl = risk_level.clone();
                 crate::harness::core::turn_loop::ENGINE_RT.spawn(async move {
                     let ok = b
-                        .request_permission(&tool, &args, &desc, &lvl)
+                        .request_permission_with_id(&rid, &tool, &args, &desc, &lvl)
                         .await;
                     let _ = tx_ok.send(ok);
                 });

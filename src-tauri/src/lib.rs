@@ -12,6 +12,12 @@ mod middleware;
 mod harness;
 // ── 微信 iLink Bot 接入（旧版移植） ──
 mod wechat;
+// ── 独立微信（UI 自动化）：AI 直接操作多开的微信窗口 ──
+mod wechat_ui;
+// ── 虚拟机内置微信：VNC 屏幕流内嵌（真微信跑在虚拟机里） ──
+mod vm_vnc;
+// ── AI 生活状态模拟器（世界线：吃饭/洗澡/打游戏/睡觉…） ──
+mod living_state;
 // ── 定时任务调度器 ──
 mod scheduler;
 // ── 猜人物游戏（真实 LLM 驱动） ──
@@ -27,6 +33,135 @@ use tauri::{Emitter, Manager};
 
 /// 托盘图标句柄（退出时主动销毁，避免残留图标堆积在系统通知区域）。
 static TRAY_HANDLE: OnceLock<Mutex<Option<tauri::tray::TrayIcon>>> = OnceLock::new();
+
+/// 销毁托盘图标（触发 Shell_NotifyIcon(NIM_DELETE)）。任何退出路径都调用：
+/// 菜单"退出"、RunEvent::Exit（窗口关闭/系统注销/app.exit 等）。
+fn destroy_tray() {
+    if let Some(lock) = TRAY_HANDLE.get() {
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None; // drop → NIM_DELETE
+            eprintln!("[TRAY] 托盘图标已清理");
+        }
+    }
+}
+
+/// 启动时清理历史残留的 ClawDesk 托盘图标。
+///
+/// 背景：进程被强制结束（任务管理器 / Stop-Process -Force）时，explorer 偶尔
+/// 不会自动移除该进程的托盘图标，导致托盘区堆积大量重复图标（实测出现过
+/// 十几个"齿轮"图标）。本项目反复强杀 dev 进程时会触发。
+///
+/// 原理：枚举任务栏 Shell_TrayWnd → TrayNotifyWarn/TrayNotify 容器 → 其中的
+/// ToolbarWindow32（托盘按钮列表），逐个读取按钮 tooltip（TB_GETBUTTONTEXTW），
+/// 匹配 "ClawDesk" 的用 TB_DELETEBUTTON 删除。删除后索引重排，需原地重试。
+///
+/// 尽力而为：任何一步失败都静默跳过，不影响应用启动。
+#[cfg(target_os = "windows")]
+fn cleanup_stale_tray_icons() {
+    unsafe {
+        extern "system" {
+            fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> isize;
+            fn FindWindowExW(
+                hWndParent: isize,
+                hWndChildAfter: isize,
+                lpszClass: *const u16,
+                lpszWindow: *const u16,
+            ) -> isize;
+            fn SendMessageW(hWnd: isize, msg: u32, wParam: usize, lParam: isize) -> isize;
+        }
+        fn w(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        // Toolbar 控件消息（托盘按钮列表是标准 Toolbar）
+        const TB_BUTTONCOUNT: u32 = 0x0418;
+        const TB_GETBUTTON: u32 = 0x0417;
+        const TB_GETBUTTONTEXTW: u32 = 0x045D;
+        const TB_DELETEBUTTON: u32 = 0x0416;
+        #[repr(C)]
+        #[allow(dead_code)]
+        #[allow(non_snake_case)] // Win32 结构体字段命名（iBitmap/idCommand/fsState/fsStyle/bReserved/dwData/iString）
+        struct TBBUTTON {
+            iBitmap: i32,
+            idCommand: i32,
+            fsState: u8,
+            fsStyle: u8,
+            bReserved: [u8; 2],
+            dwData: usize,
+            iString: isize,
+        }
+
+        let shell_tray = FindWindowW(w("Shell_TrayWnd").as_ptr(), std::ptr::null());
+        if shell_tray == 0 {
+            return;
+        }
+        let mut removed = 0usize;
+        // Windows 10/11 托盘容器类名（11 上通常为 TrayNotifyWarn）
+        for container_cls in ["TrayNotifyWarn", "TrayNotify"] {
+            let mut child = 0isize;
+            loop {
+                let c = w(container_cls);
+                child = FindWindowExW(shell_tray, child, c.as_ptr(), std::ptr::null());
+                if child == 0 {
+                    break;
+                }
+                // 容器内可能有多个 Toolbar（按钮区/时钟区），逐个检查
+                let mut tb = 0isize;
+                loop {
+                    let tcls = w("ToolbarWindow32");
+                    tb = FindWindowExW(child, tb, tcls.as_ptr(), std::ptr::null());
+                    if tb == 0 {
+                        break;
+                    }
+                    let mut count = SendMessageW(tb, TB_BUTTONCOUNT, 0, 0);
+                    if count <= 0 {
+                        continue;
+                    }
+                    let mut i = 0isize;
+                    while i < count {
+                        let mut btn = TBBUTTON {
+                            iBitmap: 0,
+                            idCommand: 0,
+                            fsState: 0,
+                            fsStyle: 0,
+                            bReserved: [0; 2],
+                            dwData: 0,
+                            iString: 0,
+                        };
+                        if SendMessageW(tb, TB_GETBUTTON, i as usize, &mut btn as *mut TBBUTTON as isize)
+                            == 0
+                        {
+                            i += 1;
+                            continue;
+                        }
+                        let mut buf = [0u16; 256];
+                        let len = SendMessageW(tb, TB_GETBUTTONTEXTW, i as usize, buf.as_mut_ptr() as isize);
+                        let matched = if len > 0 {
+                            String::from_utf16_lossy(&buf[..(len as usize).min(256)])
+                                .contains("ClawDesk")
+                        } else {
+                            false
+                        };
+                        if matched {
+                            let _ = SendMessageW(tb, TB_DELETEBUTTON, i as usize, 0);
+                            removed += 1;
+                            // 删除后按钮索引重排 → 原地重试同索引
+                            count = SendMessageW(tb, TB_BUTTONCOUNT, 0, 0);
+                            if count <= 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        i += 1;
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            eprintln!("[TRAY] 已清理 {removed} 个历史残留托盘图标");
+        }
+    }
+}
 
 /// Windows 下用 Win32 API 强制移除系统标题栏（WS_CAPTION / WS_SYSMENU）。
 /// tauri 的 `set_decorations(false)` 在部分版本/环境下不真正清除窗口样式，
@@ -77,7 +212,18 @@ fn force_undecorated_win32(win: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        // ★ 单实例锁：同一时间只允许一个 ClawDesk 进程。
+        //   防止多开（双进程同时收微信 → 重复回复）；重复启动时
+        //   自动激活已有实例的窗口并退出新进程。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 第二个实例启动 → 找到主窗口并聚焦
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .manage(AppState::new())
         .manage(wechat::WechatBotState::default())
         .manage(scheduler::SchedulerState::default())
@@ -116,6 +262,9 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::settings_get_keys,
+            // ── Edge TTS 朗读（神经网络拟人音色） ──
+            commands::tts::tts_list_voices,
+            commands::tts::tts_speak,
             commands::agent_fork,
             commands::agent_checkpoint,
             commands::agent_branches,
@@ -154,11 +303,43 @@ pub fn run() {
             wechat::wechat_bot_reply,
             wechat::wechat_send_message,
             wechat::wechat_send_image,
+            wechat::wechat_send_voice,
             wechat::wechat_bot_status,
             wechat::wechat_set_persona,
             wechat::wechat_set_proactive,
+            wechat::wechat_set_bot_rules,
             wechat::wechat_history,
+            wechat::wechat_typing,
+            wechat::wechat_living_state,
+            wechat::wechat_living_context,
             wechat::mobile_qr_svg,
+            // ── 独立微信（UI 自动化）：多开微信窗口操作 ──
+            wechat_ui::wechat_ui_list_windows,
+            wechat_ui::wechat_ui_screenshot,
+            wechat_ui::wechat_ui_click,
+            wechat_ui::wechat_ui_type,
+            wechat_ui::wechat_ui_key,
+            wechat_ui::wechat_ui_scroll,
+            wechat_ui::wechat_ui_whitelist,
+            wechat_ui::wechat_ui_whitelist_get,
+            wechat_ui::wechat_ui_send,
+            wechat_ui::wechat_ui_send_enter,
+            // ── 虚拟机内置微信（VNC 内嵌屏幕流） ──
+            vm_vnc::vm_start_frame_stream,
+            vm_vnc::vm_stop_frame_stream,
+            vm_vnc::vm_connect,
+            vm_vnc::vm_disconnect,
+            vm_vnc::vm_pointer,
+            vm_vnc::vm_key,
+            vm_vnc::vm_paste,
+            vm_vnc::vm_screenshot,
+            vm_vnc::vm_status,
+            vm_vnc::vm_list_vms,
+            vm_vnc::vm_power,
+            vm_vnc::vm_ensure_running,
+            vm_vnc::vm_whitelist_set,
+            vm_vnc::vm_whitelist_get,
+            vm_vnc::vm_send,
             // ── 定时任务 ──
             scheduler::scheduler_list,
             scheduler::scheduler_add,
@@ -246,6 +427,9 @@ pub fn run() {
                 state.init_sessions_persistence(&dir.join("sessions.db"));
             }
 
+            // AI 世界线初始化：恢复出生日期 + 加载生活记忆（D:\ClawDeskData\living\）
+            crate::living_state::init();
+
             // MCP 服务器从设置加载（重启自动恢复连接并注册远端工具）
             {
                 let saved = state.settings.get().mcp_servers;
@@ -312,37 +496,11 @@ pub fn run() {
             // ── 系统托盘：关闭窗口时隐藏到托盘，后台常驻（微信/定时任务不中断）──
             // ★ 修复：每个进程使用独立托盘 ID（含 PID），dev 热重载不会堆积重复图标
             //   旧进程被杀时 Windows 检测到 hWnd 无效后自动清理僵尸图标。
-            // ★ 保险：启动时用 Win32 广播托盘刷新，强制清理历史残留的僵尸图标。
+            // ★ 修复 v2：启动前先枚举任务栏，删除 tooltip 含 "ClawDesk" 的历史残留
+            //   图标（进程被强杀时 explorer 偶尔不自动清理 → 托盘区堆积重复图标）。
             {
                 #[cfg(target_os = "windows")]
-                unsafe {
-                    // 向所有顶层窗口广播托盘刷新消息，触发系统清理失效的图标
-                    extern "system" {
-                        fn SendMessageTimeoutW(
-                            hWnd: isize,
-                            msg: u32,
-                            wParam: usize,
-                            lParam: usize,
-                            flags: u32,
-                            timeout: u32,
-                            result: *mut usize,
-                        ) -> usize;
-                    }
-                    const WM_NULL: u32 = 0x0000;
-                    const HWND_BROADCAST: isize = 0xFFFF;
-                    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-                    let mut result: usize = 0;
-                    // 消息 0x01CE = TaskbarCreated，0x0600+ 自定义；这里直接发 WM_NULL 触发 explorer 重绘托盘
-                    let _ = SendMessageTimeoutW(
-                        HWND_BROADCAST,
-                        WM_NULL,
-                        0,
-                        0,
-                        SMTO_ABORTIFHUNG,
-                        1000,
-                        &mut result,
-                    );
-                }
+                cleanup_stale_tray_icons();
 
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -366,12 +524,7 @@ pub fn run() {
                         }
                         "quit" => {
                             // ★ 退出前丢弃托盘图标（触发 NIM_DELETE），避免残留
-                            if let Some(lock) = TRAY_HANDLE.get() {
-                                if let Ok(mut guard) = lock.lock() {
-                                    *guard = None; // drop → Shell_NotifyIcon(NIM_DELETE)
-                                    eprintln!("[TRAY] 托盘图标已清理");
-                                }
-                            }
+                            destroy_tray();
                             std::thread::sleep(std::time::Duration::from_millis(100));
                             app.exit(0);
                         }
@@ -405,7 +558,16 @@ pub fn run() {
                 let _ = window.hide();
                 api.prevent_close();
             }
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        });
+
+    // ★ 修复 v2：任何退出路径（菜单退出/窗口关闭/系统注销/app.exit/被正常终止）
+    //   都销毁托盘图标，杜绝托盘区残留堆积。
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            destroy_tray();
+        }
+    });
 }

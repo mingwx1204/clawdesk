@@ -124,13 +124,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("clawdesk-logdir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // 通过环境变量覆盖 APPDATA（本模块测试串行锁内执行，无并行污染）
-        let old = std::env::var("APPDATA").ok();
-        std::env::set_var("APPDATA", &dir);
+        // ★ 用 CLAWDESK_DATA_DIR 覆盖（clawdesk_dir 优先读它；只覆盖 APPDATA
+        //   在真实数据目录 D:\ClawDeskData 存在时会写入真实目录，并行测试互相污染）
+        let old = std::env::var("CLAWDESK_DATA_DIR").ok();
+        std::env::set_var("CLAWDESK_DATA_DIR", &dir);
         let result = f();
         match old {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
+            Some(v) => std::env::set_var("CLAWDESK_DATA_DIR", v),
+            None => std::env::remove_var("CLAWDESK_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
         result

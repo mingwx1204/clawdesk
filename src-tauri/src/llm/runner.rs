@@ -185,7 +185,10 @@ pub async fn run_agent_loop(
     // 额外系统提示（如微信人设），注入到系统 prompt 末尾；None 则不注入
     extra_system_prompt: Option<&str>,
 ) -> Result<ToolLoopOutcome, String> {
-    let _ = (sandbox, resume, timeout_secs, confirms); // 引擎路径不使用，保留签名兼容
+    // ★ 2026-08-12 修复：resume / confirms 参数在引擎路径下不生效，
+    //   保留签名兼容但不再假装使用（resume 断点续跑、confirms 旧确认通道
+    //   均为遗留接口，实际确认走 PERMISSION_BRIDGE）。timeout_secs 已生效（见下）。
+    let _ = (sandbox, resume, confirms);
 
     // ── Off 模式：直通 LLM，不调用工具（保留旧行为）──
     if matches!(mode, AgentMode::Off) {
@@ -224,16 +227,18 @@ pub async fn run_agent_loop(
                 });
             }
         }
-        let resp = provider
-            .chat(
-                &[LlmMessage {
-                    role: Role::User,
-                    content: user_prompt.to_string(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }],
-                &Value::Array(vec![]),
-            )
+        // ★ 同步 HTTP 调用（ureq）放到阻塞线程，避免卡住 async runtime（2026-08-12）
+        let provider_c = provider.clone();
+        let msgs_c = vec![LlmMessage {
+            role: Role::User,
+            content: user_prompt.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let tools_c = Value::Array(vec![]);
+        let resp = tokio::task::spawn_blocking(move || provider_c.chat(&msgs_c, &tools_c))
+            .await
+            .map_err(|e| format!("模型请求线程失败: {e}"))?
             .map_err(|e| e)?;
         let usage = extract_usage(&resp);
         record_usage(sessions, session_id, &usage);
@@ -251,16 +256,18 @@ pub async fn run_agent_loop(
         if cancel.is_cancelled() {
             return Ok(agent_cancelled_outcome());
         }
-        let plan_resp = provider
-            .chat(
-                &[LlmMessage {
-                    role: Role::User,
-                    content: build_plan_prompt(user_prompt),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }],
-                &Value::Array(vec![]),
-            )
+        // ★ 同步 HTTP 调用（ureq）放到阻塞线程，避免卡住 async runtime（2026-08-12）
+        let provider_c = provider.clone();
+        let msgs_c = vec![LlmMessage {
+            role: Role::User,
+            content: build_plan_prompt(user_prompt),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let tools_c = Value::Array(vec![]);
+        let plan_resp = tokio::task::spawn_blocking(move || provider_c.chat(&msgs_c, &tools_c))
+            .await
+            .map_err(|e| format!("模型请求线程失败: {e}"))?
             .map_err(|e| e)?;
         let steps = parse_plan(&extract_text(&plan_resp));
         let plan_text = if steps.is_empty() {
@@ -340,23 +347,33 @@ pub async fn run_agent_loop(
     let mut session = sessions.get_or_create(session_id);
     // 历史清理：
     // 1. 跳过"空且无工具调用"的 assistant 消息（失败/中断残留）；
-    // 2. ★ 只保留最近 12 条（过滤后），防止失败工具循环产生的坏历史无限累积污染上下文
-    //    （坏历史 → 模型更乱 → 输出更坏参数 → 更多失败 的恶性循环）。
+    // 2. ★ token 预算截取（对齐 AstrBot 上下文管理思路）：从最近消息往前逐条累积
+    //    token 估算（字符数/3 粗估，中文≈1 token/字、英文≈4 字/token 的折中），
+    //    直到预算用尽。相比固定 12 条：短消息（微信聊天）保留更多轮，长消息
+    //    （工具输出/长文档）不撑爆上下文——微信长聊的上下文更充分且不越界。
+    //    预算默认 32K token（DeepSeek 上下文 64K/128K 的 1/2~1/4，留足回复与工具空间）。
     // 注意：带 tool_calls 的空 assistant（工具调用回合）必须保留，否则 tool 消息格式错误。
-    let mut messages: Vec<Value> = session
-        .messages
-        .iter()
-        .filter(|m| {
-            if matches!(m.role, Role::Assistant) {
-                let c = m.content.trim();
-                !c.is_empty() || m.tool_calls.is_some()
-            } else {
-                true
+    const HISTORY_TOKEN_BUDGET: usize = 32_000;
+    const MAX_HISTORY_MSGS: usize = 60; // 消息条数兜底（极端短消息场景）
+    let mut budget_used: usize = 0;
+    let mut kept: Vec<&crate::llm::LlmMessage> = Vec::new();
+    for m in session.messages.iter().rev() {
+        if matches!(m.role, Role::Assistant) {
+            let c = m.content.trim();
+            if c.is_empty() && m.tool_calls.is_none() {
+                continue; // 跳过失败/中断残留
             }
-        })
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
+        }
+        // 粗估 token 数（中文场景下字符数/3 略保守，避免超预算）
+        let est = m.content.chars().count() / 3 + 16;
+        if !kept.is_empty() && (budget_used + est > HISTORY_TOKEN_BUDGET || kept.len() >= MAX_HISTORY_MSGS)
+        {
+            break; // 已有一条以上时预算超限 → 停止收更早的消息
+        }
+        budget_used += est;
+        kept.push(m);
+    }
+    let mut messages: Vec<Value> = kept
         .into_iter()
         .rev()
         .map(|m| {
@@ -381,7 +398,7 @@ pub async fn run_agent_loop(
         .collect();
     messages.push(serde_json::json!({ "role": "user", "content": user_prompt }));
 
-    // ★ 修复：take(12) 截断可能使保留段以 tool 开头 / 前置 assistant(tool_calls) 被截掉，
+    // ★ 截断可能使保留段以 tool 开头 / 前置 assistant(tool_calls) 被截掉，
     //   导致 DeepSeek HTTP 400 "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
     //   统一清理悬空 tool 消息。
     crate::harness::engine::context::prune_dangling_tools(&mut messages);
@@ -482,133 +499,158 @@ pub async fn run_agent_loop(
     // 思考中提示只发一次，避免几十个 ThinkingDelta 各自 emit → 事件洪峰 →
     // 前端 Vue 重渲染卡顿 → tx_event 通道满 → turn_loop send().await 阻塞 → 流式读取暂停
     let mut thinking_hint_sent = false;
-    let result: Result<TurnResult, String> = loop {
-        tokio::select! {
-            ev = rx_event.recv() => {
-                match ev {
-                    Some(ev) => {
+    // ★ 思考打印节流（2026-08-12 修复）：按时间戳节流（每 200ms 最多打一次），
+    //   替代原 `len%1000 < text.len()` 的奇怪逻辑（每片 delta 都触发打印）。
+    let mut last_think_print = std::time::Instant::now();
+
+    // ★ 整体超时（2026-08-12 修复）：timeout_secs 参数此前被 `let _ =` 丢弃，
+    //   现在真正用于包裹主循环 —— 超时返回明确错误并取消引擎任务。
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(timeout_secs.max(1)),
+        async {
+            loop {
+                tokio::select! {
+                    ev = rx_event.recv() => {
                         match ev {
-                            EngineEvent::TextDelta(text) => {
-                                round_model_text.push_str(&text);
-                                progress(&AgentProgress::ModelText { round: 0, text });
-                            }
-                            EngineEvent::ThinkingDelta(text) => {
-                                // 累积思考链，不逐片发送（DeepSeek 把 reasoning 切成小块流式返回，
-                                // 逐片发送会导致前端显示成碎片）。思考中提示只发一次。
-                                thinking_text.push_str(&text);
-                                if thinking_text.len() % 1000 < text.len() || thinking_text.len() < 1000 {
-                                    println!("[THINK] 已累积 {} 字符", thinking_text.len());
+                            Some(ev) => {
+                                match ev {
+                                    EngineEvent::TextDelta(text) => {
+                                        round_model_text.push_str(&text);
+                                        progress(&AgentProgress::ModelText { round: 0, text });
+                                    }
+                                    EngineEvent::ThinkingDelta(text) => {
+                                        // 累积思考链，不逐片发送（DeepSeek 把 reasoning 切成小块流式返回，
+                                        // 逐片发送会导致前端显示成碎片）。思考中提示只发一次。
+                                        thinking_text.push_str(&text);
+                                        if last_think_print.elapsed() >= Duration::from_millis(200) {
+                                            last_think_print = std::time::Instant::now();
+                                            println!("[THINK] 已累积 {} 字符", thinking_text.len());
+                                        }
+                                        if !thinking_hint_sent {
+                                            thinking_hint_sent = true;
+                                            progress(&AgentProgress::ModelText {
+                                                round: 0,
+                                                text: "💭".into(),
+                                            });
+                                        }
+                                    }
+                                    EngineEvent::ToolCallStart { name } => {
+                                        let tool_id = crate::llm::decode_tool_name(&name);
+                                        tool_records.push(ToolCallRecord {
+                                            tool_id: tool_id.clone(),
+                                            arguments: Value::Null,
+                                            status: "running".into(),
+                                            output: Value::Null,
+                                        });
+                                        progress(&AgentProgress::ToolCall(ToolCallProgress {
+                                            round: 0,
+                                            tool_id,
+                                            arguments: Value::Null,
+                                            status: "started".into(),
+                                            output: Value::Null,
+                                        }));
+                                    }
+                                    EngineEvent::ToolCallEnd { name, result, ok } => {
+                                        let tool_id = crate::llm::decode_tool_name(&name);
+                                        if let Some(rec) = tool_records.iter_mut().rev().find(|rec| rec.tool_id == tool_id) {
+                                            rec.status = if ok { "success" } else { "error" }.into();
+                                            rec.output = serde_json::json!({ "content": result });
+                                        }
+                                        progress(&AgentProgress::ToolCall(ToolCallProgress {
+                                            round: 0,
+                                            tool_id,
+                                            arguments: Value::Null,
+                                            status: "finished".into(),
+                                            output: serde_json::json!({ "content": result }),
+                                        }));
+                                    }
+                                    EngineEvent::ConfirmRequired { call_id, tool_id, risk_level, arguments } => {
+                                        let risk = if risk_level == "high" { RiskLevel::High } else { RiskLevel::Normal };
+                                        progress(&AgentProgress::ConfirmRequired {
+                                            call_id,
+                                            tool_id,
+                                            risk_level: risk,
+                                            arguments,
+                                        });
+                                    }
+                                    EngineEvent::Status(text) => {
+                                        progress(&AgentProgress::ModelText { round: 0, text });
+                                    }
+                                    EngineEvent::Error(text) => {
+                                        progress(&AgentProgress::ModelText {
+                                            round: 0,
+                                            text: format!("[错误] {text}"),
+                                        });
+                                    }
+                                    _ => {}
                                 }
-                                if !thinking_hint_sent {
-                                    thinking_hint_sent = true;
-                                    progress(&AgentProgress::ModelText {
-                                        round: 0,
-                                        text: "💭".into(),
-                                    });
-                                }
                             }
-                            EngineEvent::ToolCallStart { name } => {
-                                let tool_id = crate::llm::decode_tool_name(&name);
-                                tool_records.push(ToolCallRecord {
-                                    tool_id: tool_id.clone(),
-                                    arguments: Value::Null,
-                                    status: "running".into(),
-                                    output: Value::Null,
-                                });
-                                progress(&AgentProgress::ToolCall(ToolCallProgress {
-                                    round: 0,
-                                    tool_id,
-                                    arguments: Value::Null,
-                                    status: "started".into(),
-                                    output: Value::Null,
-                                }));
+                            None => {
+                                // 通道关闭 = 引擎已退出
+                                break engine_handle.await.map_err(|e| format!("引擎任务失败: {e}"))?;
                             }
-                            EngineEvent::ToolCallEnd { name, result, ok } => {
-                                let tool_id = crate::llm::decode_tool_name(&name);
-                                if let Some(rec) = tool_records.iter_mut().rev().find(|rec| rec.tool_id == tool_id) {
-                                    rec.status = if ok { "success" } else { "error" }.into();
-                                    rec.output = serde_json::json!({ "content": result });
-                                }
-                                progress(&AgentProgress::ToolCall(ToolCallProgress {
-                                    round: 0,
-                                    tool_id,
-                                    arguments: Value::Null,
-                                    status: "finished".into(),
-                                    output: serde_json::json!({ "content": result }),
-                                }));
-                            }
-                            EngineEvent::ConfirmRequired { call_id, tool_id, risk_level, arguments } => {
-                                let risk = if risk_level == "high" { RiskLevel::High } else { RiskLevel::Normal };
-                                progress(&AgentProgress::ConfirmRequired {
-                                    call_id,
-                                    tool_id,
-                                    risk_level: risk,
-                                    arguments,
-                                });
-                            }
-                            EngineEvent::Status(text) => {
-                                progress(&AgentProgress::ModelText { round: 0, text });
-                            }
-                            EngineEvent::Error(text) => {
-                                progress(&AgentProgress::ModelText {
-                                    round: 0,
-                                    text: format!("[错误] {text}"),
-                                });
-                            }
-                            _ => {}
                         }
                     }
-                    None => {
-                        // 通道关闭 = 引擎已退出
+                    _ = &mut rx_done => {
+                        // 引擎已结束：排空剩余事件后退出
+                        while let Ok(ev) = rx_event.try_recv() {
+                            match ev {
+                                EngineEvent::TextDelta(text) => {
+                                    round_model_text.push_str(&text);
+                                    progress(&AgentProgress::ModelText { round: 0, text });
+                                }
+                                EngineEvent::ThinkingDelta(text) => {
+                                    thinking_text.push_str(&text);
+                                    if last_think_print.elapsed() >= Duration::from_millis(200) {
+                                        last_think_print = std::time::Instant::now();
+                                        println!("[THINK] 已累积 {} 字符", thinking_text.len());
+                                    }
+                                    if !thinking_hint_sent {
+                                        thinking_hint_sent = true;
+                                        progress(&AgentProgress::ModelText { round: 0, text: "💭".into() });
+                                    }
+                                }
+                                EngineEvent::ToolCallStart { name } => {
+                                    let tool_id = crate::llm::decode_tool_name(&name);
+                                    tool_records.push(ToolCallRecord {
+                                        tool_id: tool_id.clone(),
+                                        arguments: Value::Null,
+                                        status: "running".into(),
+                                        output: Value::Null,
+                                    });
+                                }
+                                EngineEvent::ToolCallEnd { name, result, ok } => {
+                                    let tool_id = crate::llm::decode_tool_name(&name);
+                                    if let Some(rec) = tool_records.iter_mut().rev().find(|rec| rec.tool_id == tool_id) {
+                                        rec.status = if ok { "success" } else { "error" }.into();
+                                        rec.output = serde_json::json!({ "content": result });
+                                    }
+                                }
+                                EngineEvent::Status(text) => {
+                                    progress(&AgentProgress::ModelText { round: 0, text });
+                                }
+                                EngineEvent::Error(text) => {
+                                    progress(&AgentProgress::ModelText { round: 0, text: format!("[错误] {text}") });
+                                }
+                                _ => {}
+                            }
+                        }
                         break engine_handle.await.map_err(|e| format!("引擎任务失败: {e}"))?;
                     }
                 }
             }
-            _ = &mut rx_done => {
-                // 引擎已结束：排空剩余事件后退出
-                while let Ok(ev) = rx_event.try_recv() {
-                    match ev {
-                        EngineEvent::TextDelta(text) => {
-                            round_model_text.push_str(&text);
-                            progress(&AgentProgress::ModelText { round: 0, text });
-                        }
-                        EngineEvent::ThinkingDelta(text) => {
-                            thinking_text.push_str(&text);
-                            if thinking_text.len() % 1000 < text.len() || thinking_text.len() < 1000 {
-                                println!("[THINK] 已累积 {} 字符", thinking_text.len());
-                            }
-                            if !thinking_hint_sent {
-                                thinking_hint_sent = true;
-                                progress(&AgentProgress::ModelText { round: 0, text: "💭".into() });
-                            }
-                        }
-                        EngineEvent::ToolCallStart { name } => {
-                            let tool_id = crate::llm::decode_tool_name(&name);
-                            tool_records.push(ToolCallRecord {
-                                tool_id: tool_id.clone(),
-                                arguments: Value::Null,
-                                status: "running".into(),
-                                output: Value::Null,
-                            });
-                        }
-                        EngineEvent::ToolCallEnd { name, result, ok } => {
-                            let tool_id = crate::llm::decode_tool_name(&name);
-                            if let Some(rec) = tool_records.iter_mut().rev().find(|rec| rec.tool_id == tool_id) {
-                                rec.status = if ok { "success" } else { "error" }.into();
-                                rec.output = serde_json::json!({ "content": result });
-                            }
-                        }
-                        EngineEvent::Status(text) => {
-                            progress(&AgentProgress::ModelText { round: 0, text });
-                        }
-                        EngineEvent::Error(text) => {
-                            progress(&AgentProgress::ModelText { round: 0, text: format!("[错误] {text}") });
-                        }
-                        _ => {}
-                    }
-                }
-                break engine_handle.await.map_err(|e| format!("引擎任务失败: {e}"))?;
-            }
+        },
+    )
+    .await;
+
+    let result: Result<TurnResult, String> = match outcome {
+        Ok(r) => r,
+        Err(_) => {
+            // 整体超时：取消引擎任务，返回明确错误
+            cancel_token.cancel();
+            let msg = format!("任务执行超过整体超时（{}s），已取消", timeout_secs);
+            eprintln!("[RUNNER] {msg}");
+            Err(msg)
         }
     };
 
