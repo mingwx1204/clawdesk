@@ -207,6 +207,9 @@ fn default_tts_voice() -> String { "zh-CN-XiaoxiaoNeural".into() }
 fn default_tts_rate() -> f64 { 1.0 }
 fn default_tts_style() -> String { String::new() }
 
+// ── ⑭ 《人是怎么样的》书目录（AI 的"灵魂档案"，可配置搬家） ──
+fn default_human_book_dir() -> String { r"D:\人是怎么样的".into() }
+
 /// 应用设置（五大标签页全部字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -336,6 +339,11 @@ pub struct AppSettings {
     /// 朗读语气风格（空 = 自然；如 cheerful / gentle / serious…）
     #[serde(default = "default_tts_style")]
     pub tts_style: String,
+
+    // ── ⑭ 《人是怎么样的》书目录（AI 的"灵魂档案"，可配置搬家） ──
+    /// 书根目录（含 条目/ 子目录）。默认 D:\人是怎么样的
+    #[serde(default = "default_human_book_dir")]
+    pub human_book_dir: String,
 }
 
 impl Default for AppSettings {
@@ -390,6 +398,8 @@ impl Default for AppSettings {
             tts_voice: default_tts_voice(),
             tts_rate: default_tts_rate(),
             tts_style: default_tts_style(),
+            // ⑭ 书目录
+            human_book_dir: default_human_book_dir(),
         }
     }
 }

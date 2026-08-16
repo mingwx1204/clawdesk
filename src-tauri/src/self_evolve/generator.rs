@@ -142,14 +142,6 @@ impl SkillGenerator {
         let name = skill.name.clone();
         let template = skill.template.clone();
         let desc = skill.description.clone();
-        let since = if skill.since.is_empty() {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| format!("{}", d.as_secs()))
-                .unwrap_or_else(|_| "auto".into())
-        } else {
-            skill.since.clone()
-        };
 
         // 构造 UnifiedToolDef
         let def = UnifiedToolDef::new(

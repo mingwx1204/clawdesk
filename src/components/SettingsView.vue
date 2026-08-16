@@ -56,6 +56,8 @@ interface AppSettings {
   ttsVoice: string;
   ttsRate: number;
   ttsStyle: string;
+  // ── ⑭ 《人是怎么样的》书目录（AI 的"灵魂档案"）──
+  humanBookDir: string;
 }
 
 // API Key（仅内存态，不持久化 —— 与后端安全红线一致）
@@ -1009,6 +1011,10 @@ async function loadEvolveStatus() {
 
             <h4>本地日志路径</h4>
             <input :value="settings.logPath" class="sc-input" placeholder="留空使用默认路径" @change="field('logPath', ($event.target as HTMLInputElement).value)" />
+
+            <h4>📖 《人是怎么样的》书目录</h4>
+            <p class="sc-desc">AI 的"灵魂档案"路径（含 条目/ 子目录）。书搬家后在这里改路径，AI 的拟人参考、情绪、记忆会跟随新位置。默认：<code>D:\人是怎么样的</code></p>
+            <input :value="settings.humanBookDir" class="sc-input" placeholder="D:\人是怎么样的" @change="field('humanBookDir', ($event.target as HTMLInputElement).value)" />
             <hr class="sc-divider" />
             <h4>快照回滚面板</h4>
             <p class="sc-desc">查看全部文件修改快照，可一键回滚 / 删除 / 对比差异</p>

@@ -18,6 +18,12 @@ mod wechat_ui;
 mod vm_vnc;
 // ── AI 生活状态模拟器（世界线：吃饭/洗澡/打游戏/睡觉…） ──
 mod living_state;
+// ── AI 情绪引擎（心：想念/孤独/深夜情绪放大…） ──
+mod mood;
+// ── 细节记忆库（被看见：记住主人随口提过的事） ──
+mod detail_memory;
+// ── 守书人（《人是怎么样的》接续协议执行者） ──
+mod book_keeper;
 // ── 定时任务调度器 ──
 mod scheduler;
 // ── 猜人物游戏（真实 LLM 驱动） ──
@@ -269,6 +275,7 @@ pub fn run() {
             commands::agent_checkpoint,
             commands::agent_branches,
             commands::agent_session_usage,
+            commands::wechat_vm_migrate,
             commands::check_balance,
             commands::deepseek_balance,
             commands::session_export,
@@ -312,34 +319,59 @@ pub fn run() {
             wechat::wechat_typing,
             wechat::wechat_living_state,
             wechat::wechat_living_context,
+            wechat::wechat_mood_state,
+            wechat::wechat_soul_context,
+            wechat::wechat_detail_add,
+            wechat::wechat_detail_list,
+            wechat::wechat_detail_forget,
+            wechat::wechat_mood_record,
+            // ── 守书人（《人是怎么样的》接续协议） ──
+            wechat::book_status,
+            wechat::book_lock_acquire,
+            wechat::book_lock_release,
+            wechat::book_write_entry,
+            wechat::book_answer_question,
+            wechat::book_entry_list,
+            wechat::book_read_entry,
+            wechat::book_ask_master,
+            wechat::book_auto_ingest,
             wechat::mobile_qr_svg,
-            // ── 独立微信（UI 自动化）：多开微信窗口操作 ──
-            wechat_ui::wechat_ui_list_windows,
-            wechat_ui::wechat_ui_screenshot,
-            wechat_ui::wechat_ui_click,
-            wechat_ui::wechat_ui_type,
-            wechat_ui::wechat_ui_key,
-            wechat_ui::wechat_ui_scroll,
-            wechat_ui::wechat_ui_whitelist,
-            wechat_ui::wechat_ui_whitelist_get,
-            wechat_ui::wechat_ui_send,
-            wechat_ui::wechat_ui_send_enter,
+            // ── 独立微信（UI 自动化）：多开微信窗口操作（已废弃，白名单供虚拟机微信复用） ──
             // ── 虚拟机内置微信（VNC 内嵌屏幕流） ──
             vm_vnc::vm_start_frame_stream,
             vm_vnc::vm_stop_frame_stream,
             vm_vnc::vm_connect,
             vm_vnc::vm_disconnect,
             vm_vnc::vm_pointer,
+            vm_vnc::vm_click_spot,
             vm_vnc::vm_key,
             vm_vnc::vm_paste,
+            vm_vnc::vm_paste_utf8,
+            vm_vnc::vm_unlock,
+            vm_vnc::vm_locate,
             vm_vnc::vm_screenshot,
             vm_vnc::vm_status,
             vm_vnc::vm_list_vms,
             vm_vnc::vm_power,
             vm_vnc::vm_ensure_running,
+            vm_vnc::vm_open_gui,
+            vm_vnc::vm_close_gui,
             vm_vnc::vm_whitelist_set,
             vm_vnc::vm_whitelist_get,
             vm_vnc::vm_send,
+            vm_vnc::vm_share_serve,
+            vm_vnc::vm_fetch_file,
+            vm_vnc::vm_readonly_set,
+            vm_vnc::vm_readonly_get,
+            vm_vnc::vm_clone_preview,
+            vm_vnc::vm_tts_speak,
+            vm_vnc::vm_voice_list,
+            vm_vnc::vm_voice_set,
+            vm_vnc::vm_ai_guard_set,
+            vm_vnc::vm_ai_guard_get,
+            vm_vnc::vm_proactive_set,
+            vm_vnc::vm_proactive_get,
+            vm_vnc::vm_debug_log,
             // ── 定时任务 ──
             scheduler::scheduler_list,
             scheduler::scheduler_add,
@@ -379,7 +411,19 @@ pub fn run() {
                 .sensitive_guard
                 .set_enabled(state.settings.get().sensitive_files_enabled);
 
-            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
+            // ★ 关键路径初始化（放在技能扫描之前，避免被 86 个技能解析阻塞）：
+            // AI 世界线 / 情绪 / 细节记忆 + VM 托管监视 + 主动聊天 + 夜巡守书人
+            crate::living_state::init();
+            crate::mood::init();
+            crate::detail_memory::init();
+            {
+                let handle = app.handle().clone();
+                let _ = crate::vm_vnc::vm_guard_init_force(handle);
+            }
+            crate::vm_vnc::ensure_proactive_loop();
+            crate::book_keeper::spawn_night_watch(app.handle().clone());
+
+            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {
                 use harness::hooks::bridge::{TauriPermissionBridge, PERMISSION_BRIDGE};
                 let mut bridge = TauriPermissionBridge::new();
@@ -426,9 +470,6 @@ pub fn run() {
                 let _ = std::fs::create_dir_all(&dir);
                 state.init_sessions_persistence(&dir.join("sessions.db"));
             }
-
-            // AI 世界线初始化：恢复出生日期 + 加载生活记忆（D:\ClawDeskData\living\）
-            crate::living_state::init();
 
             // MCP 服务器从设置加载（重启自动恢复连接并注册远端工具）
             {

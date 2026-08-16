@@ -202,7 +202,7 @@ fn state_table(hour: u32) -> (&'static str, &'static str, &'static [&'static str
                 "在纠结吃啥，最后泡了碗面",
             ],
         ),
-        19..=21 => (
+        20..=21 => (
             "在放松",
             "🎮",
             &[
@@ -213,7 +213,7 @@ fn state_table(hour: u32) -> (&'static str, &'static str, &'static [&'static str
                 "在听歌发呆",
             ],
         ),
-        21..=23 => (
+        22 => (
             "在洗漱/躺平",
             "🛁",
             &[
@@ -223,7 +223,7 @@ fn state_table(hour: u32) -> (&'static str, &'static str, &'static [&'static str
                 "躺在床上看搞笑视频",
             ],
         ),
-        23..=24 => (
+        23 => (
             "准备睡觉",
             "🌙",
             &[

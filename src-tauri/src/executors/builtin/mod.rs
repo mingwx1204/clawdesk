@@ -24,7 +24,6 @@ pub mod terminal;
 pub mod web_search;
 pub mod window;
 pub mod window_screenshot;
-pub mod wechat_ui;
 pub mod vm;
 
 use std::sync::Arc;
@@ -54,7 +53,6 @@ pub fn register_all(registry: &Arc<ToolRegistry>) -> Result<(), ToolError> {
     snapshot::register(registry)?;
     subtask::register(registry)?;
     web_search::register(registry)?;
-    wechat_ui::register(registry)?;
     vm::register(registry)?;
     Ok(())
 }

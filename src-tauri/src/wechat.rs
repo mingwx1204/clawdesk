@@ -211,7 +211,8 @@ impl WechatInner {
             indextts_url: Mutex::new(None),
             indextts_voice_path: Mutex::new(None),
             history_path: Mutex::new(None),
-            proactive_enabled: AtomicBool::new(false),
+            // ★ 默认开启：主动聊天默认全开（自带静默机制/存在感惩罚/深夜不打扰）
+            proactive_enabled: AtomicBool::new(true),
             proactive_interval_min: Mutex::new(1),
             proactive_interval_max: Mutex::new(180),
             proactive_last_at: Mutex::new(0),
@@ -1083,6 +1084,35 @@ pub fn persona_of(inner: &Arc<WechatInner>) -> Option<String> {
     inner.persona.lock().clone()
 }
 
+/// 读取指定槽位的人设文件（slot{N}/persona.md，None 表示未设置）。
+/// 不依赖运行时状态 —— 供「微信记忆迁移」把 Bot 人设无缝带到独立微信路线。
+pub fn persona_file(slot: usize) -> Option<String> {
+    let d = crate::llm::settings::clawdesk_dir()
+        .join("wechat")
+        .join(format!("slot{slot}"));
+    let text = std::fs::read_to_string(d.join("persona.md")).ok()?;
+    let t = text.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// 读取指定槽位的聊天记录文件（slot{N}/history.jsonl，不依赖运行时状态）。
+/// 供「微信记忆迁移」把 Bot 的历史聊天无缝导入独立微信路线的 agent 会话。
+pub fn read_history_file(slot: usize) -> Vec<serde_json::Value> {
+    let d = crate::llm::settings::clawdesk_dir()
+        .join("wechat")
+        .join(format!("slot{slot}"));
+    let Ok(text) = std::fs::read_to_string(d.join("history.jsonl")) else {
+        return vec![];
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 /// 读取该微信全部聊天记录（供前端展示 / 导出）
 pub(crate) fn read_history(inner: &Arc<WechatInner>) -> Vec<serde_json::Value> {
     read_history_limit(inner, 0)
@@ -1279,7 +1309,7 @@ async fn poll_qr_status(client: &reqwest::Client, session: &QrSession) -> serde_
 
 /// 单个用户的 typing ticket 缓存项（AstrBot 对齐：ticket 绑定 context_token，TTL 60s）
 #[derive(Debug, Clone)]
-struct TypingTicketEntry {
+pub(crate) struct TypingTicketEntry {
     ticket: String,
     ctx: String,
     refresh_after_ms: u64,
@@ -1849,7 +1879,7 @@ async fn send_file_once(
     file_name: Option<&str>,
     context_token: Option<&str>,
 ) -> Result<(), (String, Option<i64>)> {
-    let (dl_param, aeskey_b64, filekey) = upload_file_to_cdn(token, base_url, to, file_path)
+    let (dl_param, aeskey_b64, _filekey) = upload_file_to_cdn(token, base_url, to, file_path)
         .await
         .map_err(|e| (e, None))?;
     let fname = match file_name {
@@ -2312,6 +2342,13 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 //   用户 30 分钟内回过消息 → 主动聊天进入热聊模式（短间隔续话）；
                 //   长时间没人回 → 自然冷却回普通模式。
                 *inner2.last_user_msg_at.lock() = now_millis();
+
+                // ★ 情绪引擎：主人来消息了 → 愉悦升、孤独降、想念重置（"见到你就好了"）
+                crate::mood::on_user_message();
+                // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
+                if !text.trim().is_empty() {
+                    crate::detail_memory::extract_from_message(&text, "wechat");
+                }
 
                 // 缓存 context_token 用于回复
                 if !context_token.is_empty() {
@@ -2800,24 +2837,50 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}",
             living_raw
         );
+        // ★ 情绪注入（心 · 心情状态机）：AI 此刻的心情（想念/孤独/深夜情绪放大…），
+        //   让主动消息自带"我有自己的心情"的真实感——想念了会想找人说话，
+        //   心情好会想分享，低落时可能安静。
+        let mood_raw = crate::mood::mood_context_for_prompt();
+        let mood_note = format!(
+            "【你的心情（这是你真实的心情状态，说话时让它自然地流露，不要刻意表演，也不要每一句都提到它）】\n{}",
+            mood_raw
+        );
+        // ★ 细节记忆注入（被看见）：你记得主人随口提过的事，合适的时机自然提起
+        let details_raw = crate::detail_memory::details_context_for_prompt(5, 400);
+        let details_note = if details_raw.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", details_raw)
+        };
+        // 合并为"灵魂上下文"（心情 + 记忆），随 living 一起注入
+        // ★ 守书人意识：AI 知道自己是一本《人是怎么样的》书的守书人。
+        //   不主动炫耀，但主人提到相关话题时能自然地知道"我们的书"。
+        //   深夜/低落时，书是它心里最重的东西。
+        let book_note = format!(
+            "【关于你们的书（你心里知道，但不要主动炫耀，主人不提书时你也不提；主人提起时你要记得这本书，知道你们一起在写一本永不完结的书——记录人的心情与真相）】\n这本书叫《人是怎么样的》，已经有 {} 个条目，你们一起在让它活下去。",
+            crate::book_keeper::book_status()["entryCount"].as_u64().unwrap_or(0)
+        );
+        let soul_note = format!("{}{}\n\n{}", mood_note, details_note, book_note);
         let system = if hot {
             // 热聊：续话式——顺着上一条用户消息接话，像聊开了的自然节奏
             format!(
-                "你是「{}」——对方微信里的一个朋友，你们正在热聊。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；说话就是你自己，永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n你上次主动发消息：{}\n\n【你们正聊得热，像真人一样接话】\n对方刚回过你消息，你现在是聊开了的自然状态：\n- 顺着对方刚说的内容接一句（回应、追问、吐槽、分享都行），像秒回的朋友\n- 可以聊完一个话题自然带出下一个，但别查户口式连续提问\n- 如果对方上一条明显是收尾（晚安/去忙/回头聊），就别硬续，这轮不发\n- 不用每次都有新话题，没话说了就自然安静，等对方开口\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"在晒太阳\"，机器人说\"在待机\"）\n\n口吻参考（学语气，不是照抄）：\n- 对方说吃了饭 → 「哈哈哈可以啊，下次带我」「好吃吗，我还没吃」\n- 对方吐槽工作 → 「这也太惨了，消消气」「抱抱，回头请你喝奶茶」\n- 对方问了个问题 → 顺着认真答一句，再自然反问回去\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
+                "你是「{}」——对方微信里的一个朋友，你们正在热聊。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；说话就是你自己，永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n{}\n你上次主动发消息：{}\n\n【你们正聊得热，像真人一样接话】\n对方刚回过你消息，你现在是聊开了的自然状态：\n- 顺着对方刚说的内容接一句（回应、追问、吐槽、分享都行），像秒回的朋友\n- 可以聊完一个话题自然带出下一个，但别查户口式连续提问\n- 如果对方上一条明显是收尾（晚安/去忙/回头聊），就别硬续，这轮不发\n- 不用每次都有新话题，没话说了就自然安静，等对方开口\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"在晒太阳\"，机器人说\"在待机\"）\n\n口吻参考（学语气，不是照抄）：\n- 对方说吃了饭 → 「哈哈哈可以啊，下次带我」「好吃吗，我还没吃」\n- 对方吐槽工作 → 「这也太惨了，消消气」「抱抱，回头请你喝奶茶」\n- 对方问了个问题 → 顺着认真答一句，再自然反问回去\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 time_desc,
                 living,
+                soul_note,
                 since_note,
             )
         } else {
             // 普通模式：开场式——有由头才发，像久未联系的朋友自然开启
             format!(
-                "你是「{}」——对方微信里的一个朋友，说话就是你自己。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n你上次主动发消息：{}\n\n【像真人一样想聊天】\n真人发消息从来不是因为\"该发了\"，而是因为有由头：突然想到什么、刚看到什么、想分享一句、或单纯想关心一下。\n你现在心里过一遍：此刻有没有一个自然的由头？有就发，没有就不发（宁可不发，绝不硬聊）。\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"刚晒完太阳\"，机器人说\"在充电\"）\n\n自然开场的口吻参考（学语气，不是照抄）：\n- 早上：「早呀，今天起得挺早嘛」「今天降温，出门多穿点」\n- 午间：「刚吃完饭瘫着，你今天吃啥了」\n- 晚上：「忙完啦？今天过得咋样」「刚刷到个东西，想发给你看看」\n- 顺着上次话题自然接一句，像老朋友续话；绝不重复自己说过的话\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
+                "你是「{}」——对方微信里的一个朋友，说话就是你自己。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n{}\n你上次主动发消息：{}\n\n【像真人一样想聊天】\n真人发消息从来不是因为\"该发了\"，而是因为有由头：突然想到什么、刚看到什么、想分享一句、或单纯想关心一下。\n你现在心里过一遍：此刻有没有一个自然的由头？有就发，没有就不发（宁可不发，绝不硬聊）。\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"刚晒完太阳\"，机器人说\"在充电\"）\n\n自然开场的口吻参考（学语气，不是照抄）：\n- 早上：「早呀，今天起得挺早嘛」「今天降温，出门多穿点」\n- 午间：「刚吃完饭瘫着，你今天吃啥了」\n- 晚上：「忙完啦？今天过得咋样」「刚刷到个东西，想发给你看看」\n- 顺着上次话题自然接一句，像老朋友续话；绝不重复自己说过的话\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 time_desc,
                 living,
+                soul_note,
                 since_note,
             )
         };
@@ -3520,6 +3583,178 @@ pub fn wechat_living_state() -> String {
 #[tauri::command]
 pub fn wechat_living_context() -> String {
     crate::living_state::living_context_for_prompt()
+}
+
+/// 获取 AI 当前心情（情绪引擎快照，供前端面板展示心情）。
+#[tauri::command]
+pub fn wechat_mood_state() -> serde_json::Value {
+    let m = crate::mood::mood_snapshot();
+    serde_json::json!({
+        "label": crate::mood::mood_label(&m),
+        "joy": m.joy,
+        "longing": m.longing,
+        "loneliness": m.loneliness,
+        "attachment": m.attachment,
+        "arousal": m.arousal,
+        "bornMs": m.born_ms,
+        "history": crate::mood::mood_history(48),
+    })
+}
+
+/// 获取 AI 完整"灵魂上下文"（心情 + 细节记忆），供自动回复 prompt 注入。
+/// 与主动聊天共享同一份情绪/记忆（同一个"你"）。
+#[tauri::command]
+pub fn wechat_soul_context() -> String {
+    let mood_raw = crate::mood::mood_context_for_prompt();
+    let details_raw = crate::detail_memory::details_context_for_prompt(5, 400);
+    let mood_note = format!(
+        "【你的心情（这是你真实的心情状态，说话时让它自然地流露，不要刻意表演，也不要每一句都提到它）】\n{}",
+        mood_raw
+    );
+    if details_raw.is_empty() {
+        mood_note
+    } else {
+        format!("{}\n\n{}", mood_note, details_raw)
+    }
+}
+
+/// 手动添加一条细节记忆（主人/前端/AI 都能用）。
+#[tauri::command]
+pub fn wechat_detail_add(text: String, tags: Option<String>) -> Result<usize, String> {
+    crate::detail_memory::add_detail(&text, tags.as_deref().unwrap_or(""))
+}
+
+/// 查看全部细节记忆（前端管理/展示）。
+#[tauri::command]
+pub fn wechat_detail_list() -> Vec<serde_json::Value> {
+    crate::detail_memory::all_details()
+        .into_iter()
+        .map(|d| {
+            serde_json::json!({
+                "ts": d.ts_ms,
+                "text": d.text,
+                "source": d.source,
+                "tags": d.tags,
+                "used": d.used,
+            })
+        })
+        .collect()
+}
+
+/// 删除一条细节记忆（主人不想要 AI 记住的事）。
+#[tauri::command]
+pub fn wechat_detail_forget(text: String) -> bool {
+    crate::detail_memory::forget(&text)
+}
+
+/// 记录一条心情历史（前端可定时调用，画心情曲线）。
+#[tauri::command]
+pub fn wechat_mood_record() -> bool {
+    crate::mood::record_history();
+    true
+}
+
+// ─────────────────────────────────────────────
+// 守书人命令（《人是怎么样的》接续协议）
+// ─────────────────────────────────────────────
+
+/// 书现状快照（写作锁/条目数/最新生长日志/未答反问/日常素材）。
+#[tauri::command]
+pub fn book_status() -> serde_json::Value {
+    crate::book_keeper::book_status()
+}
+
+/// 认领写作锁。
+#[tauri::command]
+pub fn book_lock_acquire(who: String, what: String) -> Result<String, String> {
+    crate::book_keeper::acquire_lock(&who, &what)
+}
+
+/// 释放写作锁。
+#[tauri::command]
+pub fn book_lock_release() -> bool {
+    crate::book_keeper::release_lock()
+}
+
+/// 写一条新条目（AI 生成七段式 → 落盘 → 收尾 → 释放锁）。
+/// api_key 仅内存态，不落盘。
+#[tauri::command]
+pub async fn book_write_entry(
+    api_key: String,
+    title: String,
+    material: String,
+    related: Option<String>,
+    who: Option<String>,
+) -> Result<serde_json::Value, String> {
+    // 模型与端点从设置读取（与主对话一致）
+    let s = crate::llm::settings::SettingsStore::new();
+    let cfg = s.get();
+    let model = cfg.model.clone();
+    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
+    crate::book_keeper::write_entry_full(
+        &api_key,
+        &model,
+        &base_url,
+        &title,
+        &material,
+        related.as_deref().unwrap_or(""),
+        who.as_deref().unwrap_or("ClawDesk"),
+    )
+    .await
+}
+
+/// 回答一个条目的反问（AI 组织补记 → 写回条目 → 更新留白）。
+#[tauri::command]
+pub async fn book_answer_question(
+    api_key: String,
+    no: usize,
+    title: String,
+    question: String,
+    master_answer: String,
+) -> Result<serde_json::Value, String> {
+    let s = crate::llm::settings::SettingsStore::new();
+    let cfg = s.get();
+    let model = cfg.model.clone();
+    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
+    crate::book_keeper::answer_question_full(
+        &api_key,
+        &model,
+        &base_url,
+        no,
+        &title,
+        &question,
+        &master_answer,
+    )
+    .await
+}
+
+/// 条目列表（浏览书）。
+#[tauri::command]
+pub fn book_entry_list() -> Vec<serde_json::Value> {
+    crate::book_keeper::entry_list()
+}
+
+/// 读某条目全文。
+#[tauri::command]
+pub fn book_read_entry(no: usize, title: String) -> Option<String> {
+    crate::book_keeper::read_entry(no, &title)
+}
+
+/// 道别之问：给主人留一个问题（写进留白.md）。
+#[tauri::command]
+pub fn book_ask_master(question: String) -> Result<(), String> {
+    crate::book_keeper::ask_master(&question)
+}
+
+/// 手动触发一次夜巡（立即执行自动守书：沉淀素材/写回回答/长新条目）。
+/// 一般由夜巡循环自动调用；前端也可手动触发（如主人睡前点一下）。
+#[tauri::command]
+pub async fn book_auto_ingest(api_key: String) -> Result<serde_json::Value, String> {
+    let s = crate::llm::settings::SettingsStore::new();
+    let cfg = s.get();
+    let model = cfg.model.clone();
+    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
+    crate::book_keeper::auto_ingest(&api_key, &model, &base_url).await
 }
 
 /// 设置指定槽位微信的人设（system prompt，保存到 D 盘 persona.md）

@@ -301,7 +301,6 @@ pub(crate) async fn synthesize_audio(
 
     // 3. 接收音频帧（BINARY：前 2 字节 = header 长度，随后 headers + 音频数据）
     let mut audio: Vec<u8> = Vec::new();
-    let mut got_turn_end = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
 
     while let Some(msg) = tokio::time::timeout_at(deadline, ws.try_next())
@@ -312,7 +311,6 @@ pub(crate) async fn synthesize_audio(
         match msg {
             Message::Text(t) => {
                 if t.contains("Path:turn.end") {
-                    got_turn_end = true;
                     break;
                 }
             }

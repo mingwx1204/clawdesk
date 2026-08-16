@@ -1,6 +1,6 @@
 [package]
 name = "clawdesk"
-version = "0.7.0"
+version = "0.8.0"
 description = "ClawDesk - Tauri 2.x desktop application"
 authors = ["ClawDesk Team"]
 edition = "2021"
@@ -75,7 +75,6 @@ aes = "0.8"
 cipher = "0.4"
 # 微信 CDN 上传加密密钥（真随机熵源；0.2.x 已在 lock 中，无需新增解析）
 getrandom = "0.2"
-# 微信 CDN 上传加密密钥（真随机熵源；0.2.x 已在 lock 中，无需新增解析）
 # 微信发图：CDN 上传需要明文 MD5（getUploadUrl 参数）
 md-5 = "0.10"
 # ── 新增：大厂 Agent 工具链 ────────────────────────────────

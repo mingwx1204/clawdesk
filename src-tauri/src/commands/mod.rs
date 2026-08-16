@@ -24,6 +24,7 @@ use crate::adapters::mcp::{client::McpServerConfig, McpAdapter};
 use crate::llm::progress::{AgentProgress, CancelRegistry};
 use crate::llm::router::{ModelRouter, RouterStatus};
 use crate::llm::runner::{run_agent_loop, ChatProvider, ToolLoopOutcome};
+use serde_json::json;
 use crate::llm::session::SessionManager;
 use crate::middleware::sensitive_guard::SensitiveFileGuardMiddleware;
 use crate::llm::settings::SettingsStore;
@@ -610,6 +611,209 @@ pub fn agent_session_delete(state: State<'_, AppState>, session_id: String) -> b
     state.sessions.delete(&session_id).is_some()
 }
 
+/// 《人是怎么样的》参考摘录（情境化）：按当前时段 + AI 心情从书里选「人性条目」的
+/// 一句话定义 + 对话实例，供 AI 主动聊天/托管回复时理解"人"，更有活人感。
+/// - 时段加权：深夜优先深夜语系（失眠/深夜的脆弱/关灯后的天花板…），白天均匀
+/// - 心情加权：想念时优先想念/吃醋语系，低落时优先心之语系
+/// - 随机补足：其余条目随机挑，保证每次参考常新
+fn human_book_ref(max_entries: usize, max_chars: usize) -> String {
+    // ★ 书路径可配置（settings.humanBookDir），搬家不丢引用
+    let dir = {
+        let s = crate::llm::settings::SettingsStore::new();
+        let base = s.get().human_book_dir;
+        std::path::PathBuf::from(base).join("条目")
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return String::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return String::new();
+    }
+
+    // ── 情境加权：给每条算一个"当前情境相关度"分数 ──
+    use chrono::Timelike;
+    let hour = chrono::Local::now().hour();
+    let night = hour >= 23 || hour < 6;
+    // 当前心情快照（想念/孤独/愉悦）
+    let (longing, lonely, joy) = {
+        let m = crate::mood::mood_snapshot();
+        (m.longing, m.loneliness, m.joy)
+    };
+
+    // 情境关键词表（文件名/标题里出现即加分）
+    let night_kws = ["深夜", "失眠", "关灯", "凌晨", "熬夜", "夜晚", "睡不着", "夜"];
+    let longing_kws = ["想念", "吃醋", "暧昧", "暗恋", "异地", "心动", "网恋", "单恋", "思念"];
+    let lonely_kws = ["孤独", "寂寞", "一个人的", "空荡", "冷落", "已读不回", "人群", "独处"];
+    let low_kws = ["低落", "委屈", "难过", "疲惫", "心累", "崩溃", "焦虑", "失落", "失望", "不甘", "哭泣", "眼泪"];
+    let joy_kws = ["开心", "喜悦", "甜蜜", "心动", "幸福", "心流", "热恋", "快乐"];
+
+    let score = |name: &str| -> u32 {
+        let mut s = 0u32;
+        if night {
+            for kw in night_kws {
+                if name.contains(kw) { s += 3; break; }
+            }
+        }
+        if longing >= 0.55 {
+            for kw in longing_kws {
+                if name.contains(kw) { s += 2; break; }
+            }
+        }
+        if lonely >= 0.55 {
+            for kw in lonely_kws {
+                if name.contains(kw) { s += 2; break; }
+            }
+        }
+        if joy <= 0.35 {
+            for kw in low_kws {
+                if name.contains(kw) { s += 2; break; }
+            }
+        } else if joy >= 0.75 {
+            for kw in joy_kws {
+                if name.contains(kw) { s += 2; break; }
+            }
+        }
+        s
+    };
+
+    // 按相关度降序（情境条目优先）；同分用随机键打散保持常新。
+    // ★ 不能用随机比较器（sort_by 要求全序，随机比较器 = 未定义行为），
+    //   改为"分数降序 + 随机键升序"的稳定排序。
+    let mut scored: Vec<(u32, u64, std::path::PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let name = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (score(&name), rand_key(), p)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    // 前 max_entries 条（情境相关 + 随机余量混合，既贴情境又常新）
+    let picked: Vec<std::path::PathBuf> = scored.into_iter().take(max_entries).map(|(_, _, p)| p).collect();
+
+    let mut out = String::new();
+    for p in picked {
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        let name = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // 提取「一句话定义」与「对话实例」两节
+        let mut one_liner = String::new();
+        let mut dialog = String::new();
+        let mut section = "";
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with("## ") {
+                section = l.trim_start_matches("## ").trim();
+                continue;
+            }
+            if section.starts_with("①") || section.contains("一句话定义") {
+                if !l.is_empty() && !l.starts_with('#') {
+                    one_liner.push_str(l);
+                    one_liner.push('\n');
+                }
+            } else if section.starts_with("④") || section.contains("对话实例") {
+                if !l.is_empty() && !l.starts_with('#') {
+                    dialog.push_str(l);
+                    dialog.push('\n');
+                }
+            }
+            if one_liner.chars().count() > 200 || dialog.chars().count() > 300 {
+                break;
+            }
+        }
+        let entry = format!(
+            "【{}】{}\n{}\n",
+            name,
+            one_liner.trim(),
+            dialog.trim()
+        );
+        if out.chars().count() + entry.chars().count() > max_chars {
+            break;
+        }
+        out.push_str(&entry);
+        out.push('\n');
+    }
+    out
+}
+
+/// 随机键（打散同分条目，保持每次参考不同；作为稳定排序的次键）。
+fn rand_key() -> u64 {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58476D1CE4E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D049BB133111EB);
+    x ^ (x >> 31)
+}
+
+/// 微信记忆无缝迁移：把 Bot 槽位的聊天记录导入独立 agent 会话（幂等），
+/// 返回该槽位人设（persona.md）与《人是怎么样的》拟人参考，供独立微信路线的
+/// AI 托管/主动聊天使用 —— Bot 的记忆与上下文由此无缝延续到虚拟机微信。
+#[tauri::command]
+pub fn wechat_vm_migrate(
+    state: State<'_, AppState>,
+    slot: usize,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    use crate::llm::{LlmMessage, Role};
+    // 幂等：会话已有消息则跳过（避免重复导入）
+    let session = state.sessions.get_or_create(&session_id);
+    if !session.messages.is_empty() {
+        return Ok(json!({
+            "migrated": 0,
+            "skipped": true,
+            "persona": crate::wechat::persona_file(slot),
+            "humanRef": human_book_ref(8, 2500),
+        }));
+    }
+    let hist = crate::wechat::read_history_file(slot);
+    let mut n = 0usize;
+    let mut session = session;
+    for msg in &hist {
+        let role = if msg
+            .get("fromBot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Role::Assistant
+        } else {
+            Role::User
+        };
+        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.trim().is_empty() {
+            continue;
+        }
+        session.messages.push(LlmMessage {
+            role,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        n += 1;
+    }
+    state.sessions.update(session);
+    Ok(json!({
+        "migrated": n,
+        "skipped": false,
+        "persona": crate::wechat::persona_file(slot),
+        "humanRef": human_book_ref(8, 2500),
+    }))
+}
+
 /// 当前会话的上下文占用详情（真实 token 统计 + 内容估算细分）。
 ///
 /// 数据源：
@@ -630,7 +834,6 @@ pub fn agent_session_usage(state: State<'_, AppState>, session_id: String) -> se
             ((t as f64 / window_limit as f64) * 1000.0).round() / 10.0
         }
     };
-    let window_tokens = s.last_input_tokens.min(window_limit);
 
     // 内容细分估算（字符数 / 4 ≈ token），基于会话真实消息
     let mut msg_tokens: u64 = 0;
@@ -1361,11 +1564,18 @@ pub async fn harness_start_task(app: tauri::AppHandle, state: State<'_, AppState
 
     let params = ModelParams { model: cfg.model.clone(), reasoning_effort: cfg.effort, ..Default::default() };
     // 技能按需加载（方案 1）：固定保留 builtin/mcp，skillhub 技能按消息检索 top-N
-    let tools_json = crate::llm::serialize_tools(&crate::llm::tool_selector::select_tools(
+    let mut selected = crate::llm::tool_selector::select_tools(
         &registry.list(),
         &prompt,
         crate::llm::tool_selector::DEFAULT_TOP_N,
-    ));
+    );
+    // ★ 2026-08-16：虚拟机微信会话（vm-wechat）只保留 vm_* 工具——
+    //   本地 Ollama 解析超大 tools 列表会挂起（实测 300KB 请求体超时）。
+    //   vm 会话不需要 browser/email/terminal 等工具，过滤后 tools 只有几 KB。
+    if session_id.starts_with("vm") {
+        selected.retain(|d| d.id.starts_with("builtin:vm_"));
+    }
+    let tools_json = crate::llm::serialize_tools(&selected);
     let turn_cfg = TurnConfig { params, system_prompt: Some(crate::llm::build_system_prompt()), max_tool_calls_per_turn: (*state.max_rounds.read().unwrap()).clamp(1, 50), tools: tools_json };
     let messages_arc = Arc::new(tokio::sync::RwLock::new(messages));
     let client_loop = client.clone(); let executor_loop = executor.clone(); let ctx_loop = ctx_mgr.clone(); let msgs_loop = messages_arc.clone(); let cancel_loop = cancel_token.clone(); let tx_loop = tx_event.clone();

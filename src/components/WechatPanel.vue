@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useReplyChannel } from "../composables/useReplyChannel";
 
 /** 微信消息（与后端 WechatMessage 对应）。 */
 interface WechatMsg {
@@ -63,6 +64,7 @@ const autoReply = ref(localStorage.getItem("clawdesk_wechat_autoreply") !== "off
 const log = ref<string[]>([]);
 /** AI 生活状态（世界线：此刻在做什么，时间与真实时钟同步） */
 const livingState = ref("");
+const moodState = ref<string>("");
 
 // ── 人设编辑 ──
 const personaText = ref("");
@@ -399,6 +401,7 @@ async function saveRules() {
 function setAutoReply(v: boolean) {
   autoReply.value = v;
   localStorage.setItem("clawdesk_wechat_autoreply", v ? "on" : "off");
+  useReplyChannel().resync(); // 同步全局回复通道指示器
   pushLog(v ? "🤖 自动回复已开启（所有微信收到消息后由各自 AI 自动回复）" : "⏸ 自动回复已关闭");
 }
 
@@ -430,6 +433,11 @@ async function refreshStatus() {
   try {
     const s = await invoke<string>("wechat_living_state");
     if (s) livingState.value = s;
+  } catch { /* 静默 */ }
+  // ★ AI 当前心情（情绪引擎）：展示 AI 此刻的心情标签
+  try {
+    const m = await invoke<any>("wechat_mood_state");
+    if (m?.label) moodState.value = m.label;
   } catch { /* 静默 */ }
 }
 
@@ -668,6 +676,7 @@ async function testReply() {
             <div class="wc-row"><span>消息数</span><b>{{ cur?.messageCount ?? 0 }}</b></div>
             <div class="wc-row"><span>聊天记录</span><b>{{ cur?.historyCount ?? 0 }} 条（D 盘）</b></div>
             <div class="wc-row"><span>AI 生活状态</span><b class="wc-living">{{ livingState || "—" }}</b></div>
+            <div class="wc-row"><span>AI 心情</span><b class="wc-living">{{ moodState || "平静" }}</b></div>
             <div class="wc-row"><span>自动回复</span><b>
               <label class="wc-switch">
                 <input type="checkbox" :checked="autoReply" @change="(e: any) => setAutoReply((e.target as HTMLInputElement).checked)" />

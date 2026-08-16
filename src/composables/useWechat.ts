@@ -73,10 +73,18 @@ export function useWechatAutoReply(getApiKey: () => string) {
         if (living) livingNote = `\n\n[你的世界日常节奏（这是你所在世界的真实时间线，时间与真实时钟同步。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动——比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹。用户问你在干嘛/你最近在干嘛时按此回答）：${living}]`;
       } catch { /* 状态获取失败忽略 */ }
       // ★ 微信真人聊天风格约束（去 AI 味）：微信聊天要像真人朋友发消息，
+
+      // ★ 灵魂上下文注入（心 · 被看见）：AI 此刻的心情（想念/孤独/深夜情绪放大…）
+      //   + 记得主人随口提过的事。自动回复时让"活人感"自然流露。
+      let soulNote = "";
+      try {
+        const soul = await invoke<string>("wechat_soul_context");
+        if (soul) soulNote = `\n\n${soul}`;
+      } catch { /* 灵魂上下文获取失败忽略 */ }
       //   不是写文章——短、口语、有情绪、不解释过程。
       const styleNote = `\n\n[微信聊天铁律（必须严格遵守）：\n1. 默认回复 5~40 字，一句话说清，绝不超过 60 字；\n2. 除非用户明确要求（"写500字"/"详细说说"/"完整分析"等），否则一律像真人发微信：口语化、短句、可省略主语、偶尔语气词（嗯嗯/哈哈哈/行/好嘞）；\n3. 禁止 AI 腔：不用"首先/其次/总之/需要注意的是/总的来说"，不用"！"堆砌，不用"哦～""呢～"等做作语气；\n4. 不需要解释你怎么做到的、不需要总结性发言、不要每句都带 emoji（最多 1 个）；\n5. 对方问了复杂问题（如读文件/分析代码）时也只需给结论和关键点，别列清单；\n6. 像朋友一样接话，而不是像客服回答问题。]`;
       // 微信发来的媒体（图片/文件/语音/视频）已由后端下载解密到本地，拼入 prompt 让 AI 读取
-      let promptText = (msg.content || "") + timeNote + livingNote + styleNote;
+      let promptText = (msg.content || "") + timeNote + livingNote + soulNote + styleNote;
       const mediaNotes: string[] = [];
       if (Array.isArray(msg.images) && msg.images.length) {
         mediaNotes.push("图片：\n" + msg.images.map((p: string) => `- ${p}`).join("\n"));

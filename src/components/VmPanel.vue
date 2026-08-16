@@ -7,6 +7,7 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useReplyChannel } from "../composables/useReplyChannel";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -22,6 +23,103 @@ const pasteTip = ref("");
 const fullscreen = ref(false);
 const wlUsers = ref("");
 const wlTip = ref("");
+const readonly = ref(false);
+
+/** 读取只读模式状态。 */
+async function loadReadonly(): Promise<void> {
+  try {
+    const r = await invoke<{ readonly: boolean }>("vm_readonly_get");
+    readonly.value = !!r.readonly;
+  } catch { /* 静默 */ }
+}
+
+/** 切换只读模式（AI 只能看不能操作）。 */
+async function toggleReadonly(): Promise<void> {
+  const next = !readonly.value;
+  try {
+    await invoke("vm_readonly_set", { enabled: next });
+    readonly.value = next;
+  } catch { /* 失败保持原状态 */ }
+}
+
+/** AI 托管模式：AI 自动监视虚拟机微信新消息并回复（她的电脑，AI 自由使用）。 */
+// ★ 默认开启：虚拟机是她的家，AI 托管默认全开（用户可在面板关闭）
+const guardOn = ref(true);
+const guardTip = ref("");
+async function toggleGuard(): Promise<void> {
+  guardOn.value = !guardOn.value;
+  try {
+    await invoke("vm_ai_guard_set", { enabled: guardOn.value });
+    localStorage.setItem("clawdesk_vm_guard", guardOn.value ? "on" : "off");
+    useReplyChannel().resync(); // 同步全局回复通道指示器
+    guardTip.value = guardOn.value ? "✅ 托管已开启：AI 自动看微信新消息并回复，可自由使用这台电脑（不会破坏系统）" : "托管已关闭";
+  } catch (e) {
+    guardTip.value = `切换失败：${String(e)}`;
+  }
+}
+
+/** AI 主动聊天：定时主动找白名单对象聊天（AstrBot Cron 机制）。 */
+const proactiveOn = ref(false);
+const proactiveMin = ref(60);
+const proactiveMax = ref(180);
+const proactiveTip = ref("");
+async function toggleProactive(): Promise<void> {
+  const next = !proactiveOn.value;
+  try {
+    const r = await invoke<{ proactive: boolean }>("vm_proactive_set", {
+      enabled: next,
+      intervalMin: proactiveMin.value,
+      intervalMax: proactiveMax.value,
+    });
+    proactiveOn.value = !!r.proactive;
+    proactiveTip.value = r.proactive
+      ? `✅ 主动聊天已开启（每 ${proactiveMin.value}~${proactiveMax.value} 分钟主动找白名单的人聊天）`
+      : "主动聊天已关闭";
+  } catch (e) {
+    proactiveOn.value = !next; // 失败回滚
+    proactiveTip.value = `切换失败：${String(e)}`;
+  }
+}
+
+/** 试听克隆音色（本地 IndexTTS2 服务，女声样本）。 */
+const cloneTip = ref("");
+const voices = ref<string[]>([]);
+const curVoice = ref("");
+
+/** 加载音色列表。 */
+async function loadVoices(): Promise<void> {
+  try {
+    const r = await invoke<{ voices: string[]; current: string }>("vm_voice_list");
+    voices.value = r.voices ?? [];
+    curVoice.value = r.current ?? "";
+  } catch { /* 静默 */ }
+}
+
+/** 试听当前音色。 */
+async function previewClone(): Promise<void> {
+  cloneTip.value = "合成中（约5-20秒）…";
+  try {
+    const r = await invoke<{ audioBase64: string }>("vm_clone_preview", {});
+    const audio = new Audio("data:audio/wav;base64," + r.audioBase64);
+    audio.onended = () => { cloneTip.value = "✅ 播放完成（克隆音色）"; };
+    audio.onerror = () => { cloneTip.value = "❌ 播放失败"; };
+    await audio.play();
+    cloneTip.value = "🔊 播放中…";
+  } catch (e) {
+    cloneTip.value = `合成失败：${String(e)}`;
+  }
+}
+
+/** 切换音色（克隆参考音频）。 */
+async function setVoice(name: string): Promise<void> {
+  try {
+    const r = await invoke<{ current: string }>("vm_voice_set", { name });
+    curVoice.value = r.current;
+    cloneTip.value = `✅ 音色已切换：${r.current}`;
+  } catch (e) {
+    cloneTip.value = `切换失败：${String(e)}`;
+  }
+}
 
 /** 读取白名单。 */
 async function loadWhitelist(): Promise<void> {
@@ -62,6 +160,40 @@ async function refreshVms(): Promise<void> {
 
 /** 一键打开：启动虚拟机（如未运行）→ 等系统启动 → 自动连接屏幕。 */
 const opening = ref(false);
+/** 打开/关闭虚拟机窗口切换中（savestate 需要几秒）。 */
+const guiBusy = ref(false);
+
+/** 打开虚拟机 GUI 窗口：直接进入虚拟机操作（登录微信等）。 */
+async function openGui(): Promise<void> {
+  if (guiBusy.value) return;
+  guiBusy.value = true;
+  vmTip.value = "正在打开虚拟机窗口（保存状态并切到图形模式，约 5~15 秒）…";
+  try {
+    await invoke("vm_open_gui");
+    vmTip.value = "✅ 虚拟机窗口已打开 —— 直接在窗口里登录微信/操作。退出方式见下方说明";
+    void refreshVms();
+  } catch (e) {
+    vmTip.value = `打开窗口失败：${String(e)}`;
+  } finally {
+    guiBusy.value = false;
+  }
+}
+
+/** 回到无头模式（配合 AI 托管自动回复）。 */
+async function closeGui(): Promise<void> {
+  if (guiBusy.value) return;
+  guiBusy.value = true;
+  vmTip.value = "正在回到无头模式（保存状态并切换，虚拟机继续后台运行）…";
+  try {
+    await invoke("vm_close_gui");
+    vmTip.value = "✅ 已回到无头模式 —— 虚拟机在后台运行，可继续「连接屏幕」或开启 AI 托管";
+    void refreshVms();
+  } catch (e) {
+    vmTip.value = `切换失败：${String(e)}`;
+  } finally {
+    guiBusy.value = false;
+  }
+}
 async function openVm(): Promise<void> {
   if (opening.value) return;
   opening.value = true;
@@ -226,6 +358,10 @@ onMounted(async () => {
   void invoke("vm_start_frame_stream").catch(() => {});
   await refreshVms();
   void loadWhitelist();
+  void loadReadonly();
+  void loadVoices();
+  // ★ 默认开：key 不存在（首次启动）或 "on" 都视为开
+  guardOn.value = localStorage.getItem("clawdesk_vm_guard") !== "off";
   unlistenFrame = await listen<any>("vm://frame", (e) => {
     const p = e.payload;
     if (p?.dataUrl) {
@@ -274,6 +410,12 @@ onUnmounted(() => {
       <div class="vm-toolbar">
         <button class="vm-btn big" :disabled="opening" @click="openVm">
           {{ opening ? "⏳ 正在打开虚拟机…" : "🚀 一键打开虚拟机微信" }}
+        </button>
+        <button class="vm-btn" :disabled="guiBusy" @click="openGui" title="弹出 VirtualBox 虚拟机窗口，直接在里面操作（登录微信、手动使用）">
+          {{ guiBusy ? "⏳ 切换中…" : "🖥️ 打开虚拟机窗口" }}
+        </button>
+        <button class="vm-btn" :disabled="guiBusy" @click="closeGui" title="关闭虚拟机窗口，回到无头模式（配合 AI 托管自动回复）">
+          {{ guiBusy ? "⏳ 切换中…" : "🔙 回到无头模式" }}
         </button>
         <button v-for="v in vms" :key="v.uuid" class="vm-btn" :class="{ primary: v.running }" @click="powerVm(v.name, v.running ? 'stop' : 'start')">
           {{ v.name }}：{{ v.running ? "运行中·点此关机" : "已关机·点此启动" }}
@@ -325,10 +467,41 @@ onUnmounted(() => {
             @keydown.enter.prevent="saveWhitelist"
           />
           <button class="vm-btn primary" @click="saveWhitelist">🔒 保存白名单</button>
+          <button class="vm-btn" :class="{ primary: readonly }" @click="toggleReadonly" :title="readonly ? 'AI 只能看屏幕，不能点击/输入/发送' : 'AI 可正常操作微信'">
+            {{ readonly ? "🔒 只读模式：AI 只能看" : "🔓 操作模式：AI 可操作" }}
+          </button>
+          <button class="vm-btn" :class="{ primary: guardOn }" @click="toggleGuard" title="AI 自动监视虚拟机微信新消息并回复（她的电脑，AI 自由使用，不破坏系统即可）">
+            {{ guardOn ? "🤖 托管中：AI 自动回微信" : "🤖 开启 AI 托管" }}
+          </button>
+          <button class="vm-btn" :class="{ primary: proactiveOn }" @click="toggleProactive" title="AI 定时主动找白名单里的人聊天（随机间隔）">
+            {{ proactiveOn ? "💬 主动聊天中" : "💬 开启主动聊天" }}
+          </button>
+          <span v-if="proactiveOn" style="display:flex; gap:4px; align-items:center;">
+            <input :value="proactiveMin" type="number" min="5" max="1440" class="vm-input" style="width:56px;" @change="proactiveMin = Number(($event.target as HTMLInputElement).value) || 60; void invoke('vm_proactive_set', { enabled: true, intervalMin: proactiveMin, intervalMax: proactiveMax })" title="最短间隔（分钟）" />
+            <span class="vm-tip">~</span>
+            <input :value="proactiveMax" type="number" min="5" max="1440" class="vm-input" style="width:56px;" @change="proactiveMax = Number(($event.target as HTMLInputElement).value) || 180; void invoke('vm_proactive_set', { enabled: true, intervalMin: proactiveMin, intervalMax: proactiveMax })" title="最长间隔（分钟）" />
+            <span class="vm-tip">分钟</span>
+          </span>
+          <span class="vm-tip">{{ proactiveTip }}</span>
+          <span class="vm-tip">{{ guardTip }}</span>
+          <span style="display:flex; gap:6px; align-items:center;">
+            <span class="vm-tip">🎙️ 音色</span>
+            <select :value="curVoice" class="vm-input" style="max-width:220px;" @change="setVoice(($event.target as HTMLSelectElement).value)" title="克隆音色：把 10~30 秒清晰人声样本放到 voices 目录后刷新可选">
+              <option v-for="v in voices" :key="v" :value="v">{{ v }}</option>
+            </select>
+            <button class="vm-btn" @click="loadVoices" title="重新扫描音色目录">🔄</button>
+            <button class="vm-btn" @click="previewClone" title="用当前音色合成一句话试听">🎧 试听</button>
+            <span class="vm-tip">{{ cloneTip }}</span>
+          </span>
           <span class="vm-tip">{{ wlTip }}</span>
         </div>
         <p class="vm-hint">
           操作说明：点击画面 = 鼠标点击；先点画面获得焦点后可直接键盘输入；AI 也可通过对话（vm_screenshot / vm_click / vm_type / vm_key / vm_send）操作虚拟机里的微信。全屏模式像独立系统一样使用，点「退出全屏」随时返回。
+        </p>
+        <p class="vm-hint">
+          🖥️ 直接使用虚拟机：点「打开虚拟机窗口」→ VirtualBox 窗口弹出，像用真电脑一样登录微信/操作。<br />
+          🔙 退出虚拟机的方式（任选）：① 在虚拟机窗口点 ✕ → 选「保存状态」（推荐，秒级恢复、不关机）；② 在虚拟机里正常关机（开始菜单 → 关机）；③ 关掉窗口回到 ClawDesk，点「🔙 回到无头模式」（自动保存状态并切后台）。<br />
+          ⚠️ 不要点 VirtualBox 菜单的「强制关机/关闭电源」（Power Off），会丢失未保存数据。
         </p>
       </div>
     </div>

@@ -386,6 +386,14 @@ body { background:#0a0a0f; }
 }
 .settings-btn:hover { color:#3a2a55; border-color:rgba(10,132,255,.5); transform:rotate(60deg); box-shadow:0 4px 14px rgba(10,132,255,.2); }
 .settings-btn svg { display:block; }
+/* 回复通道切换按钮（不旋转；三态配色区分当前通道） */
+.reply-channel {
+  width:auto; padding:0 10px; border-radius:15px; font-size:11px; white-space:nowrap;
+}
+.reply-channel:hover { transform:none; }
+.reply-channel.bot { color:#10b981; border-color:rgba(16,185,129,.55); background:rgba(16,185,129,.08); }
+.reply-channel.vm { color:#8b5cf6; border-color:rgba(139,92,246,.55); background:rgba(139,92,246,.08); }
+.reply-channel.off { color:#8a7a9a; border-color:rgba(138,122,154,.4); }
 /* 微信 Bot 按钮（不旋转，带在线状态圆点） */
 .wx-btn:hover { transform:none; color:#10b981; border-color:rgba(16,185,129,.55); }
 .wx-btn { position:relative; color:#4a8a6a; }
