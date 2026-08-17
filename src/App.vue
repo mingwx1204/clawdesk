@@ -360,9 +360,13 @@ onMounted(async () => {
       return;
     }
     const now = Date.now();
-    if (now - (lastVmActivity.value || 0) < 90_000) return;
+    if (now - (lastVmActivity.value || 0) < 90_000) {
+      void invoke("vm_debug_log", { msg: "vm://activity 跳过：90s 节流内（上一回合进行中或刚结束）" }).catch(() => {});
+      return;
+    }
     lastVmActivity.value = now;
     // ★ 不传事件携带的截图（可能黑图/旧图）——AI 必须用 vm_screenshot 获取最新画面
+    void invoke("vm_debug_log", { msg: "🤖 AI 回合开始：vmMode（截图→看屏幕→思考→vm_send 回复）" }).catch(() => {});
     void handleSend(vmActivityPrompt(), undefined, undefined, {
       sessionId: vmSessionId,
       persona: vmPersona.value ?? undefined,
@@ -957,10 +961,14 @@ async function handleSend(
 function vmActivityPrompt(): string {
   return (
     "【虚拟机微信监视】屏幕可能有新动静（新消息/界面变化）。\n" +
-    "★ 任务：用 vm_screenshot 看屏幕——如果有微信新消息（尤其 iamond 发来的），用 vm_send 回复对方（自然口语化，像真人回微信）。\n" +
-    "★ 你自己看画面判断：是不是微信界面、有没有新消息、需不需要回复。画面不像微信（桌面/浏览器/锁屏）就结束；锁屏就用 vm_unlock 开锁。\n" +
-    "★ 你可以自由组合工具：vm_screenshot 看图、vm_click_spot 点击、vm_send 发消息、vm_key 按键、vm_paste_utf8 中文。操作后截图确认。\n" +
-    "★ 你是多模态的，直接看 vm_screenshot 返回的图片判断，别乱猜。" +
+    "★ 任务：用 vm_screenshot 看屏幕（返回 screenText=自动读屏结果，以它为准）——如果有微信新消息（尤其 iamond 发来的），先打开对应会话（vm_click_spot(chat1/2/3) 或搜索），再截图读到消息内容，然后用 vm_send 回复对方（自然口语化，像真人回微信）。\n" +
+    "★ 你是文本模型，看不懂图片：只信 vm_screenshot 返回的 screenText，不要用 python/ocr/terminal 自己分析截图。\n" +
+    "★ 窗口管理套路（主人教的，必须照做）：\n" +
+    "  - 屏幕被记事本/其他窗口挡住、看不清微信 → vm_key(win+d) 回桌面清场（所有窗口最小化）→ vm_key(ctrl+alt+w) 弹出微信主窗口 → vm_screenshot 确认\n" +
+    "  - ctrl+alt+w 是微信主窗口【开关】：微信不见了/不在前台按它弹出；⚠️ 微信已在前台时禁止再按（会把微信藏起来）\n" +
+    "  - 关记事本：vm_key(alt+f4)；弹出'是否保存'对话框时接 vm_key(n) 不保存\n" +
+    "  - 锁屏就用 vm_unlock 开锁。别在非微信界面干等——总有办法把微信叫回来\n" +
+    "★ 你可以自由组合工具：vm_screenshot 看屏幕、vm_click_spot 点击、vm_send 发消息、vm_key 按键、vm_paste_utf8 中文。操作后截图确认。\n" +
     (vmSoulNote.value
       ? "\n\n【你的心情与记忆（心 · 被看见：此刻的心情 + 你记得主人的事，说话时自然流露）】\n" + vmSoulNote.value
       : "") +

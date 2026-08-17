@@ -224,7 +224,7 @@ fn register_screenshot(registry: &ToolRegistry) -> Result<(), ToolError> {
     let def = UnifiedToolDef::new(
         "builtin",
         "vm_screenshot",
-        "截取虚拟机（内置真微信）当前屏幕，返回【dataUrl（缩略图，你是多模态模型可直接看画面）】+【path（完整截图文件）】。★ 截图不依赖 VNC 连接。★★ 用法：直接看 dataUrl 画面判断：是不是微信界面、有没有新消息、聊天内容是什么。操作（vm_send/vm_click_spot/vm_key）前后各截一次确认",
+        "截取虚拟机（内置真微信）当前屏幕，返回【screenText（自动读屏结果：界面文字、联系人名、聊天消息内容）】+【path（完整截图文件）】。★ 截图不依赖 VNC 连接。★★ 你是文本模型看不懂图片——screenText 就是你的眼睛，以它为准判断：是不是微信界面、有没有新消息、聊天内容。⚠️ 不要用 python/ocr/terminal 工具自己分析截图（截图已自带读屏，自己做纯属浪费回合）。操作（vm_send/vm_click_spot/vm_key）前后各截一次确认",
         vec![ToolParamDef {
             name: "unused".into(),
             param_type: "string".into(),
@@ -273,7 +273,9 @@ fn register_click(registry: &ToolRegistry) -> Result<(), ToolError> {
         Box::pin(async move {
             let x = num(&args, "x", 0);
             let y = num(&args, "y", 0);
+            // ★ 按下→110ms→松开：0ms 间隔的按下/松开可能被 VNC 服务器合并丢弃
             let r1 = crate::vm_vnc::vm_pointer(x, y, 1);
+            tokio::time::sleep(std::time::Duration::from_millis(110)).await;
             let r2 = crate::vm_vnc::vm_pointer(x, y, 0);
             match (r1, r2) {
                 (Ok(_), Ok(_)) => Ok(ToolResult::ok(json!({ "ok": true, "x": x, "y": y }))),

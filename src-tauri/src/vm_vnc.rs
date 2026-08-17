@@ -196,6 +196,8 @@ pub fn vm_ai_guard_get() -> Result<serde_json::Value, String> {
 fn guard_loop() {
     eprintln!("[VM-GUARD] guard_loop 启动");
     let mut tick: u64 = 0;
+    // ★ 红点滞留计数：角标持续存在（AI 上回合没处理掉）的连续 tick 数
+    let mut red_streak: u32 = 0;
     loop {
         std::thread::sleep(Duration::from_millis(5_000));
         tick += 1;
@@ -225,6 +227,7 @@ fn guard_loop() {
         }
         let Ok((data_url, w, h)) = vbox_screenshot_png() else {
             eprintln!("[VM-GUARD] ❌ tick={tick} 截图失败（vbox_screenshot_png），继续等待");
+            chain_log(&format!("❌ guard 截图失败 tick={tick}"));
             continue;
         };
     
@@ -283,11 +286,14 @@ fn guard_loop() {
             }
         };
         if changed || red_risen {
+            let prev_red = guard_state().lock().last_red.unwrap_or(0.0);
             if red_risen {
-                eprintln!("[VM-GUARD] 🔴 检测到红色未读红点增加（{:.4}% → {:.4}%）", {
-                    guard_state().lock().last_red.unwrap_or(0.0)
-                }, red_ratio);
+                eprintln!("[VM-GUARD] 🔴 检测到红色未读红点增加（{:.4}% → {:.4}%）", prev_red, red_ratio);
             }
+            chain_log(&format!(
+                "🔔 guard 检测到变化 changed={} 红点 {:.4}%→{:.4}%（red_risen={}）",
+                changed, prev_red, red_ratio, red_risen
+            ));
             // ★ 修复：单次变化即触发（去掉"连续两次变化"的严格要求——单条新消息
             //   气泡出现后屏幕很快稳定，旧逻辑永远等不到第二次变化，导致新消息
             //   永远不触发回复）。30 秒节流防刷屏（微信新消息/屏幕操作频率足够）。
@@ -301,14 +307,37 @@ fn guard_loop() {
                 g.last_event_at = now;
                 if let Some(app) = APP_HANDLE.get() {
                     eprintln!("[VM-GUARD] 🎯 检测到屏幕变化，emit vm://activity");
+                    chain_log("🎯 guard emit vm://activity → 交给前端 AI 回合");
                     let _ = app.emit("vm://activity", json!({ "dataUrl": data_url, "w": w, "h": h }));
                 }
+            } else {
+                chain_log("⏸️ guard 变化被 30s 节流拦下（上一事件刚发过）");
             }
             let mut g = guard_state().lock();
             g.prev_changed = false;
             g.last = Some(sample);
             g.last_red = Some(red_ratio);
         } else {
+            // ★ 红点滞留重试（2026-08-17）：未读角标一旦没被上回合处理掉，
+            //   红点基线会把它吸收成"常态"，普通通道永远不再触发——
+            //   实测 8 条未读卡死无人回的根因。这里检测：红点持续 ≥2 分钟未消除
+            //   且距上次事件 ≥5 分钟 → 强制重发 vm://activity 让 AI 再试，直到红点消失。
+            if red_ratio > 0.0008 {
+                red_streak += 1;
+            } else {
+                red_streak = 0;
+            }
+            if red_streak >= 24 && now_secs() - guard_state().lock().last_event_at >= 300 {
+                if let Some(app) = APP_HANDLE.get() {
+                    chain_log(&format!(
+                        "🔁 红点滞留 {:.2}% 已 {} tick 未消除，强制重发 vm://activity 让 AI 重试",
+                        red_ratio * 100.0, red_streak
+                    ));
+                    let _ = app.emit("vm://activity", json!({ "dataUrl": data_url, "w": w, "h": h }));
+                }
+                guard_state().lock().last_event_at = now_secs();
+                red_streak = 0;
+            }
             let mut g = guard_state().lock();
             g.prev_changed = false;
             g.last = Some(sample);
@@ -457,16 +486,20 @@ fn check_writable() -> Result<(), String> {
 }
 
 /// 前端调试日志（写 D:\AI-WeChat\vm_frontend.log）。
-#[tauri::command]
-pub fn vm_debug_log(msg: String) -> bool {
+/// ★ 全链路日志：后端关键节点统一写 D:\AI-WeChat\vm_frontend.log（与前端 vm_debug_log 同文件），
+///   脱离控制台的 GUI 进程里 eprintln 会丢失，文件日志才能事后排查。
+pub fn chain_log(msg: &str) {
     use std::io::Write;
     let path = r"D:\AI-WeChat\vm_frontend.log";
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{} {}", chrono::Local::now().format("%H:%M:%S"), msg);
-        true
-    } else {
-        false
+        let _ = writeln!(f, "{} [be] {}", chrono::Local::now().format("%H:%M:%S"), msg);
     }
+}
+
+#[tauri::command]
+pub fn vm_debug_log(msg: String) -> bool {
+    chain_log(&format!("[fe] {msg}"));
+    true
 }
 
 /// 设置/查询只读模式（true=AI 只能看不能操作）。
@@ -1060,9 +1093,28 @@ pub fn vm_disconnect() -> Result<serde_json::Value, String> {
     Ok(json!({ "disconnected": true }))
 }
 
+/// ★ 防长按保险（2026-08-17）：发送一次"全部按键松开"（mask=0）。
+///   历史 bug：PointerEvent 多发 1 字节尾巴，被服务器误读成 SetPixelFormat 开头，
+///   吞掉紧跟的"松开"事件 → 左键永远按住 → 下一次点击变成拖拽（用户看到的长按）。
+///   现在所有点击入口先强制松开一次，双保险。
+fn force_pointer_release() {
+    if let Ok(mut g) = lock_core() {
+        if let Some(core) = g.as_mut() {
+            if core.connected {
+                let cx = (core.width / 2) as u16;
+                let cy = (core.height / 2) as u16;
+                // RFB PointerEvent 精确 6 字节：[5, mask, xHi, xLo, yHi, yLo]
+                let msg: [u8; 6] = [5, 0, (cx >> 8) as u8, (cx & 0xFF) as u8, (cy >> 8) as u8, (cy & 0xFF) as u8];
+                let _ = core.stream.write_all(&msg);
+            }
+        }
+    }
+}
+
 /// 鼠标事件（坐标相对屏幕；buttons: 1=左键按下, 2=中键, 4=右键, 0=松开）。
 #[tauri::command]
 pub fn vm_pointer(x: u16, y: u16, buttons: u8) -> Result<serde_json::Value, String> {
+    chain_log(&format!("🖱️ vm_pointer({x},{y}) buttons={buttons}"));
     check_writable()?;
     ensure_vnc_connected()?;
     let mut g = lock_core()?;
@@ -1070,13 +1122,9 @@ pub fn vm_pointer(x: u16, y: u16, buttons: u8) -> Result<serde_json::Value, Stri
     if !core.connected {
         return Err("VNC 未连接".into());
     }
-    let mut msg = [0u8; 7];
-    msg[0] = 5;
-    msg[1] = buttons;
-    msg[2] = (x >> 8) as u8;
-    msg[3] = (x & 0xFF) as u8;
-    msg[4] = (y >> 8) as u8;
-    msg[5] = (y & 0xFF) as u8;
+    // ★ 修复：RFB PointerEvent 协议是 6 字节，之前发 7 字节（多一个 0x00 尾巴），
+    //   服务器把它当 SetPixelFormat 开头吞掉后续事件 → 间歇性丢"松开"→ 长按/拖拽。
+    let msg: [u8; 6] = [5, buttons, (x >> 8) as u8, (x & 0xFF) as u8, (y >> 8) as u8, (y & 0xFF) as u8];
     core.stream
         .write_all(&msg)
         .map_err(|e| format!("发送鼠标事件失败: {e}"))?;
@@ -1167,22 +1215,25 @@ pub fn vm_click_spot(spot: String) -> Result<serde_json::Value, String> {
     };
     let x = (w * fx) as u16;
     let y = (h * fy) as u16;
-    // 按下 + 松开（单击）
-    let mut msg = [0u8; 7];
-    msg[0] = 5;
-    msg[1] = 1; // 按下
-    msg[2] = (x >> 8) as u8;
-    msg[3] = (x & 0xFF) as u8;
-    msg[4] = (y >> 8) as u8;
-    msg[5] = (y & 0xFF) as u8;
+    chain_log(&format!("🖱️ vm_click_spot({s}) → ({x},{y})"));
+    // ★ 双保险：先强制松开一切按键（防历史长按残留），再点击
+    force_pointer_release();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    // 按下 + 松开（单击）——RFB PointerEvent 精确 6 字节（之前 7 字节尾巴会吞事件）
+    let press: [u8; 6] = [5, 1, (x >> 8) as u8, (x & 0xFF) as u8, (y >> 8) as u8, (y & 0xFF) as u8];
     core.stream
-        .write_all(&msg)
+        .write_all(&press)
         .map_err(|e| format!("发送点击失败: {e}"))?;
     std::thread::sleep(std::time::Duration::from_millis(120));
-    msg[1] = 0; // 松开
-    core.stream
-        .write_all(&msg)
-        .map_err(|e| format!("发送点击松开失败: {e}"))?;
+    let release: [u8; 6] = [5, 0, (x >> 8) as u8, (x & 0xFF) as u8, (y >> 8) as u8, (y & 0xFF) as u8];
+    if let Err(e) = core.stream.write_all(&release) {
+        // 松开失败必须重试一次：丢了它 = 左键永远按住
+        chain_log(&format!("⚠️ click_spot 松开写入失败（{e}），重试"));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        core.stream
+            .write_all(&release)
+            .map_err(|e| format!("发送点击松开失败: {e}"))?;
+    }
     Ok(json!({ "ok": true, "spot": s, "x": x, "y": y }))
 }
 
@@ -1195,15 +1246,31 @@ pub fn vm_click_spot(spot: String) -> Result<serde_json::Value, String> {
 ///   面板/guard 用 vbox_screenshot_png 原图不受影响。
 #[tauri::command]
 pub async fn vm_screenshot() -> Result<serde_json::Value, String> {
-    let (path, data_url, w, h) = vbox_screenshot_ai()?;
-    // ★★ 2026-08-16 简化：主模型已切换为本地 qwen3.5:9b（多模态），
-    //   直接返回图片给它自己看——不再调 OCR/视觉描述（去掉复杂逻辑 + 不再弹 cmd 窗口）。
+    let (path, data_url, w, h, full_path) = vbox_screenshot_ai()?;
+    // ★★ 2026-08-17 接线：主模型是 deepseek-v4-flash（纯文本 API），看不懂 dataUrl 图片，
+    //   之前只返回图片导致模型疯狂用 python/OCR 自救浪费 15 轮工具预算（读屏焦虑）。
+    //   现在截图自动带读屏结果：优先 Windows OCR（快而准，用全尺寸图），
+    //   失败降级 qwen2.5vl 场景描述。screenText 就是她的眼睛。
+    let ocr_src = if std::path::Path::new(&full_path).exists() { full_path.clone() } else { path.clone() };
+    let screen_text = match local_ocr_text(&ocr_src).await {
+        Ok(t) => format!("[Windows OCR 读屏]\n{t}"),
+        Err(e1) => match local_vision_ocr(&ocr_src).await {
+            Ok(t) => format!("[本地视觉读屏（OCR失败: {e1}）]\n{t}"),
+            Err(e2) => format!("[读屏失败 OCR: {e1} | 视觉: {e2}——请稍后再试一次 vm_screenshot]"),
+        },
+    };
+    chain_log(&format!(
+        "📸 vm_screenshot 完成，读屏 {} 字符：{}",
+        screen_text.chars().count(),
+        screen_text.chars().take(150).collect::<String>().replace('\n', " / ")
+    ));
     Ok(json!({
         "path": path,
         "dataUrl": data_url,
         "width": w,
         "height": h,
-        "note": "当前虚拟机屏幕截图（dataUrl=缩略图，你可直接查看画面；path=完整截图文件路径）。",
+        "screenText": screen_text,
+        "note": "当前虚拟机屏幕截图。screenText=自动读屏结果，你以 screenText 为准判断界面和消息内容；path=完整截图文件路径。",
     }))
 }
 
@@ -1227,7 +1294,7 @@ async fn local_ocr_text(image_path: &str) -> Result<String, String> {
 /// AI 用截图：VBox 截图 → 缩小（最长边 640）→ JPEG q68 → 保存到附件目录，
 /// 返回 (文件路径, 缩略图 base64, 宽, 高)。
 /// 独立实现，不动 vbox_screenshot_png（面板/guard 需要原图）。
-fn vbox_screenshot_ai() -> Result<(String, String, u32, u32), String> {
+fn vbox_screenshot_ai() -> Result<(String, String, u32, u32, String), String> {
     let _busy = VboxBusy::try_acquire().ok_or("VBox 忙（正在切换虚拟机模式），跳过本次截图")?;
     let exe = "C:/Program Files/Oracle/VirtualBox/VBoxManage.exe";
     let tmp = vm_data_dir().join(format!("vm_shot_ai_{:?}.png", std::thread::current().id()));
@@ -1265,14 +1332,26 @@ fn vbox_screenshot_ai() -> Result<(String, String, u32, u32), String> {
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
     let out_path = dir.join(format!("vm_shot_{stamp}.jpg"));
     std::fs::write(&out_path, &jpg).map_err(|e| format!("保存截图失败: {e}"))?;
+    // ★ 2026-08-17：同时保存全尺寸 PNG——640px JPEG 太糊，Windows OCR 读出乱码，
+    //   OCR/视觉必须用原图（实测全图 OCR 干净准确，缩图全是"辶丿噁"类乱码）。
+    let full_path = dir.join(format!("vm_shot_{stamp}_full.png"));
+    let _ = std::fs::write(&full_path, &bytes); // 失败不阻断（降级用缩图）
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg);
-    Ok((out_path.to_string_lossy().to_string(), format!("data:image/jpeg;base64,{b64}"), w, h))
+    Ok((
+        out_path.to_string_lossy().to_string(),
+        format!("data:image/jpeg;base64,{b64}"),
+        w,
+        h,
+        full_path.to_string_lossy().to_string(),
+    ))
 }
 
 /// ★ 本地视觉识别（Ollama qwen2.5vl:3b）：把截图发给本地视觉模型，返回屏幕文字描述。
 /// 2026-08-16 新增：替代云端 analyze_image——本地推理快、稳、免费，AI 直接读到文字。
 /// 失败时返回 Err（调用方降级为仅路径提示）。
 async fn local_vision_ocr(image_path: &str) -> Result<String, String> {
+    let _t0 = std::time::Instant::now();
+    chain_log("👁️ 本地视觉开始：截图发给 qwen2.5vl:3b 读屏幕…");
     // 读取图片并 base64（JPEG 已缩小，约 30~60KB）
     let bytes = std::fs::read(image_path).map_err(|e| format!("读取截图失败: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -1291,15 +1370,26 @@ async fn local_vision_ocr(image_path: &str) -> Result<String, String> {
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("本地视觉服务连接失败（Ollama 未运行?）: {e}"))?;
+        .map_err(|e| {
+            chain_log(&format!("❌ 本地视觉连接失败: {e}"));
+            format!("本地视觉服务连接失败（Ollama 未运行?）: {e}")
+        })?;
     if !resp.status().is_success() {
+        chain_log(&format!("❌ 本地视觉 HTTP {}", resp.status()));
         return Err(format!("本地视觉服务 HTTP {}", resp.status()));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| format!("解析视觉响应失败: {e}"))?;
     let text = v.get("response").and_then(|r| r.as_str()).unwrap_or("").trim().to_string();
     if text.is_empty() {
+        chain_log("❌ 本地视觉返回空结果");
         return Err("本地视觉返回空结果".into());
     }
+    chain_log(&format!(
+        "✅ 本地视觉完成（{:.1}s，{}字符）：{}",
+        _t0.elapsed().as_secs_f64(),
+        text.chars().count(),
+        text.chars().take(120).collect::<String>()
+    ));
     Ok(text)
 }
 
@@ -1457,6 +1547,10 @@ pub fn vm_whitelist_get() -> Result<serde_json::Value, String> {
 /// 强制白名单校验：to 必须在 vm_whitelist_set 设置的白名单内。
 #[tauri::command]
 pub fn vm_send(to: String, text: String) -> Result<serde_json::Value, String> {
+    chain_log(&format!(
+        "📤 vm_send 开始: to={to} text=「{}」",
+        text.chars().take(60).collect::<String>()
+    ));
     check_writable()?;
     if text.trim().is_empty() {
         return Err("消息内容为空".into());
@@ -1468,6 +1562,7 @@ pub fn vm_send(to: String, text: String) -> Result<serde_json::Value, String> {
     // 白名单校验
     let list = crate::wechat_ui::whitelist_of("vm");
     if list.is_empty() {
+        chain_log("❌ vm_send 白名单为空（vm_whitelist_set 未设置）");
         return Err("未设置可聊天对象（vm_whitelist_set）——AI 不允许发送消息".into());
     }
     let to_lower = to.to_lowercase();
@@ -1800,6 +1895,7 @@ pub fn parse_keysym(key: &str) -> Option<u32> {
 
 /// 发送带修饰键的组合键（如 ctrl+f、shift+enter）。
 pub fn press_combo(key: &str) -> Result<(), String> {
+    chain_log(&format!("⌨️ press_combo({key})"));
     let lower = key.trim().to_lowercase();
     let parts: Vec<&str> = lower.split('+').collect();
     let main = parts.last().copied().unwrap_or("");
@@ -1840,6 +1936,7 @@ pub fn paste_and_send(text: &str) -> Result<(), String> {
 ///   现在：ASCII（<0x80）用标准 keysym（=ASCII 码，等价真实键盘），
 ///   非 ASCII 用 Unicode keysym（0x01000000+码点，仅记事本等标准控件认）。
 pub fn type_unicode(text: &str) -> Result<(), String> {
+    chain_log(&format!("⌨️ type_unicode: 「{}」", text.chars().take(40).collect::<String>()));
     for ch in text.chars() {
         let cp = ch as u32;
         let ks = if cp < 0x80 { cp } else { 0x0100_0000 + cp };
@@ -1856,6 +1953,11 @@ pub fn type_unicode(text: &str) -> Result<(), String> {
 ///   关记事本 → 微信输入框 Ctrl+V 粘贴即正确中文。
 #[tauri::command]
 pub fn vm_paste_utf8(text: String) -> Result<serde_json::Value, String> {
+    chain_log(&format!(
+        "📋 vm_paste_utf8: 「{}」（{}字符，经记事本中转入剪贴板）",
+        text.chars().take(40).collect::<String>(),
+        text.chars().count()
+    ));
     check_writable()?;
     ensure_vnc_connected()?;
     set_clipboard_utf8(&text)?;
@@ -1885,8 +1987,12 @@ pub fn vm_unlock() -> Result<serde_json::Value, String> {
 /// 提示词用英文效果最佳。
 #[tauri::command]
 pub async fn vm_locate(target: String) -> Result<serde_json::Value, String> {
-    let (path, _data_url, w, h) = vbox_screenshot_ai()?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取截图失败: {e}"))?;
+    let _t0 = std::time::Instant::now();
+    chain_log(&format!("🎯 vm_locate 开始: target={target}"));
+    let (path, _data_url, w, h, full_path) = vbox_screenshot_ai()?;
+    // 全尺寸图定位更准（缩图会丢小目标）
+    let locate_src = if std::path::Path::new(&full_path).exists() { full_path } else { path };
+    let bytes = std::fs::read(&locate_src).map_err(|e| format!("读取截图失败: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     // 提示词：英文定位模板（第 6 节：Locate the {phrase}）
     let prompt = format!("Locate the {} in the screenshot. Output only the bounding box.", target.trim());
@@ -1925,6 +2031,7 @@ pub async fn vm_locate(target: String) -> Result<serde_json::Value, String> {
             .collect()
     };
     if nums.len() < 4 {
+        chain_log(&format!("❌ vm_locate 无坐标框（{:.1}s，返回: {}）", _t0.elapsed().as_secs_f64(), text));
         return Err(format!("LocateAnything 未返回坐标框（返回: {text}）。请换个描述试试，英文效果最好。"));
     }
     // 0-1000 归一化 → 屏幕像素（LocateAnything 的 x 对应宽、y 对应高）
@@ -1935,6 +2042,10 @@ pub async fn vm_locate(target: String) -> Result<serde_json::Value, String> {
     let y2 = px(nums[3], h);
     let cx = (x1 + x2) / 2;
     let cy = (y1 + y2) / 2;
+    chain_log(&format!(
+        "✅ vm_locate 成功（{:.1}s）: box=({x1},{y1})-({x2},{y2}) center=({cx},{cy})",
+        _t0.elapsed().as_secs_f64()
+    ));
     Ok(json!({
         "ok": true,
         "target": target,
