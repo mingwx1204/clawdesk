@@ -699,7 +699,7 @@ impl Default for ModelRegistry {
             },
             ModelInfo {
                 id: "deepseek-v4-flash".to_string(),
-                provider: ProviderKind::Ollama,
+                provider: ProviderKind::Llamacpp,
                 aliases: vec![],
                 supports_tools: true,
                 supports_reasoning: true,
@@ -1162,7 +1162,7 @@ impl ModelRegistry {
     /// Resolves a user-requested model name to a concrete [`ModelInfo`].
     ///
     /// Resolution follows this priority order:
-    /// 1. If the provider is Ollama, the requested name is used as-is (to
+    /// 1. If the provider is Llamacpp, the requested name is used as-is (to
     ///    support arbitrary local model tags like `qwen2.5-coder:7b`).
     /// 2. If a `provider_hint` is given, search for a model matching that
     ///    provider whose id or alias matches the request (case-insensitive).
@@ -1180,12 +1180,12 @@ impl ModelRegistry {
 
         if let Some(name) = requested {
             fallback_chain.push(format!("requested:{name}"));
-            if provider_hint == Some(ProviderKind::Ollama) {
+            if provider_hint == Some(ProviderKind::Llamacpp) {
                 return ModelResolution {
                     requested: Some(name.to_string()),
                     resolved: ModelInfo {
                         id: name.trim().to_string(),
-                        provider: ProviderKind::Ollama,
+                        provider: ProviderKind::Llamacpp,
                         aliases: Vec::new(),
                         supports_tools: true,
                         supports_reasoning: false,
@@ -2188,21 +2188,21 @@ mod tests {
     }
 
     #[test]
-    fn ollama_default_uses_small_local_model_id() {
+    fn llamacpp_default_uses_small_local_model_id() {
         let registry = ModelRegistry::default();
-        let resolved = registry.resolve(None, Some(ProviderKind::Ollama));
+        let resolved = registry.resolve(None, Some(ProviderKind::Llamacpp));
 
-        assert_eq!(resolved.resolved.provider, ProviderKind::Ollama);
+        assert_eq!(resolved.resolved.provider, ProviderKind::Llamacpp);
         assert_eq!(resolved.resolved.id, "deepseek-v4-flash");
         assert!(resolved.resolved.supports_reasoning);
     }
 
     #[test]
-    fn ollama_requested_model_tag_is_preserved() {
+    fn llamacpp_requested_model_tag_is_preserved() {
         let registry = ModelRegistry::default();
-        let resolved = registry.resolve(Some("qwen2.5-coder:7b"), Some(ProviderKind::Ollama));
+        let resolved = registry.resolve(Some("qwen2.5-coder:7b"), Some(ProviderKind::Llamacpp));
 
-        assert_eq!(resolved.resolved.provider, ProviderKind::Ollama);
+        assert_eq!(resolved.resolved.provider, ProviderKind::Llamacpp);
         assert_eq!(resolved.resolved.id, "qwen2.5-coder:7b");
         assert!(!resolved.used_fallback);
     }

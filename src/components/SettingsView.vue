@@ -47,10 +47,6 @@ interface AppSettings {
   selfEvolveModel: string;
   selfEvolveAuto: boolean;
   selfEvolveThreshold: number;
-  opencodeWatchEnabled: boolean;
-  opencodeWatchEndpoint: string;
-  opencodeWatchApiKey: string;
-  opencodeWatchIntervalSecs: number;
   // ── ⑬ 朗读 / TTS（Edge TTS 神经网络拟人音色）──
   ttsEnabled: boolean;
   ttsVoice: string;
@@ -817,16 +813,6 @@ async function loadEvolveStatus() {
               <span v-if="keysSavedTip" style="color:#4caf50;font-size:12px">{{ keysSavedTip }}</span>
             </div>
 
-            <h4>🔄 opencode 网关自动回切</h4>
-            <p class="sc-desc">持续检测 opencode 网关是否恢复（如遇宕机返回 500），恢复后自动把主/视觉模型端点与 Key 切回 opencode，并自动关闭本开关。检测间隔 {{ settings.opencodeWatchIntervalSecs || 120 }} 秒。</p>
-            <label class="sc-check">
-              <input type="checkbox" :checked="settings.opencodeWatchEnabled" @change="field('opencodeWatchEnabled', ($event.target as HTMLInputElement).checked)" />
-              启用持续检测（当前 opencode 网关未恢复时建议开启）
-            </label>
-            <label class="sc-label">opencode 端点</label>
-            <input :value="settings.opencodeWatchEndpoint" class="sc-input" @change="field('opencodeWatchEndpoint', ($event.target as HTMLInputElement).value)" />
-            <label class="sc-label">opencode API Key（恢复后自动填入主/视觉 Key）</label>
-            <input :value="settings.opencodeWatchApiKey" type="password" class="sc-input" placeholder="sk-KnQr..." @change="field('opencodeWatchApiKey', ($event.target as HTMLInputElement).value)" />
           </section>
 
           <!-- ② Agent 智能体参数 -->

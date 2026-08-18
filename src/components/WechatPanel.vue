@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useReplyChannel } from "../composables/useReplyChannel";
 
 /** 微信消息（与后端 WechatMessage 对应）。 */
 interface WechatMsg {
@@ -46,9 +45,9 @@ const emit = defineEmits<{ close: [] }>();
 
 // ── 账号列表状态 ──
 const bots = ref<BotStatus[]>([]);
-/** 当前选中槽位（localStorage 记忆，重启后恢复上次查看的微信） */
-const curSlot = ref(Number(localStorage.getItem("clawdesk_wechat_slot") || 0));
-const cur = computed(() => bots.value.find((b) => b.slot === curSlot.value));
+/** 当前微信槽位（单 Bot 固定为 0） */
+const curSlot = ref(0);
+const cur = computed(() => bots.value.find((b) => b.slot === curSlot.value) ?? bots.value[0]);
 
 // ── 当前槽位登录状态 ──
 const qrcodeUrl = ref("");
@@ -283,8 +282,6 @@ async function genQrSvg(text: string): Promise<string> {
 /** 切换当前选中的微信槽位 */
 function selectSlot(slot: number) {
   curSlot.value = slot;
-  // ★ 记住选中槽位：重启后恢复上次查看的微信
-  localStorage.setItem("clawdesk_wechat_slot", String(slot));
   qrState.value = "idle";
   qrcodeUrl.value = "";
   qrSvg.value = "";
@@ -304,14 +301,7 @@ function selectSlot(slot: number) {
 
 onMounted(async () => {
   await refreshStatus();
-  // 恢复上次选中的槽位（localStorage 记忆）；无效则选第一个已登录的，否则 0
-  const saved = curSlot.value;
-  if (saved >= 0 && saved < bots.value.length) {
-    selectSlot(saved);
-  } else {
-    const logged = bots.value.find((b) => b.loggedIn);
-    selectSlot(logged ? logged.slot : 0);
-  }
+  selectSlot(0);
   statusTimer.value = window.setInterval(refreshStatus, 5000);
   // 内置聊天界面：每 5 秒同步一次聊天记录（新消息自动出现）
   chatTimer.value = window.setInterval(() => void reloadChats(), 5000);
@@ -401,7 +391,6 @@ async function saveRules() {
 function setAutoReply(v: boolean) {
   autoReply.value = v;
   localStorage.setItem("clawdesk_wechat_autoreply", v ? "on" : "off");
-  useReplyChannel().resync(); // 同步全局回复通道指示器
   pushLog(v ? "🤖 自动回复已开启（所有微信收到消息后由各自 AI 自动回复）" : "⏸ 自动回复已关闭");
 }
 
@@ -448,7 +437,7 @@ async function startQr() {
     qrcodeUrl.value = r.qrcodeUrl;
     qrSvg.value = await genQrSvg(r.qrcodeUrl);
     qrState.value = "wait";
-    pushLog(`📱 微信${curSlot.value + 1} 二维码已生成，请用手机微信扫码`);
+    pushLog(`📱 微信 二维码已生成，请用手机微信扫码`);
     startPoll();
   } catch (e) {
     pushLog(`获取二维码失败: ${e}`);
@@ -530,7 +519,7 @@ async function submitVerifyCode() {
 async function startBot() {
   try {
     await invoke("wechat_bot_start", { config: {}, slot: curSlot.value });
-    pushLog(`🚀 微信${curSlot.value + 1} Bot 已启动，长轮询接收消息中…`);
+    pushLog(`🚀 微信 Bot 已启动，长轮询接收消息中…`);
   } catch (e) {
     pushLog(`启动失败: ${e}`);
   }
@@ -540,7 +529,7 @@ async function startBot() {
 async function stopBot() {
   try {
     await invoke("wechat_bot_stop", { slot: curSlot.value });
-    pushLog(`⏹ 微信${curSlot.value + 1} Bot 已停止`);
+    pushLog(`⏹ 微信 Bot 已停止`);
   } catch (e) {
     pushLog(`停止失败: ${e}`);
   }
@@ -550,7 +539,7 @@ async function stopBot() {
 async function logout() {
   try {
     await invoke("wechat_logout", { slot: curSlot.value });
-    pushLog(`👋 已登出微信${curSlot.value + 1}`);
+    pushLog(`👋 已登出微信`);
     qrcodeUrl.value = "";
     qrSvg.value = "";
     qrState.value = "idle";
@@ -567,7 +556,7 @@ async function clearMemory() {
   try {
     const ok = await invoke<boolean>("agent_session_delete", { sessionId: sid });
     if (ok) {
-      pushLog(`🧹 已清除 微信${curSlot.value + 1} 的 AI 记忆（会话 ${sid}）`);
+      pushLog(`🧹 已清除 微信 的 AI 记忆（会话 ${sid}）`);
     } else {
       pushLog(`⚠️ 该微信暂无记忆可清除（${sid} 不存在），AI 将从空白开始`);
     }
@@ -584,7 +573,7 @@ async function savePersona() {
     await invoke("wechat_set_persona", { slot: curSlot.value, persona: personaText.value });
     personaSaved.value = true;
     personaDirty.value = false; // 保存成功 = 恢复同步，轮询可继续回填
-    pushLog(`✅ 微信${curSlot.value + 1} 人设已保存（${personaText.value.length} 字）`);
+    pushLog(`✅ 微信 人设已保存（${personaText.value.length} 字）`);
     setTimeout(() => { personaSaved.value = false; }, 2000);
     await refreshStatus();
   } catch (e) {
@@ -652,21 +641,6 @@ async function testReply() {
         <button class="wc-close" @click="emit('close')">✕</button>
       </div>
 
-      <!-- 账号列表（微信1 ~ 微信10，每个独立登录/人设/会话） -->
-      <div class="wc-slots">
-        <button
-          v-for="b in bots"
-          :key="b.slot"
-          class="wc-slot"
-          :class="{ active: curSlot === b.slot }"
-          @click="selectSlot(b.slot)"
-        >
-          <span class="wc-slot-dot" :class="b.connected ? 'on' : b.loggedIn ? 'idle' : ''"></span>
-          {{ b.name }}
-          <span v-if="b.personaLen > 0" class="wc-slot-persona" title="已设置人设">🧬</span>
-        </button>
-      </div>
-
       <div class="wc-body">
         <!-- 左：登录 / 控制 / 人设 -->
         <div class="wc-left">
@@ -690,7 +664,7 @@ async function testReply() {
             <template v-if="qrState === 'idle' || qrState === 'loading'">
               <div class="wc-qr-placeholder">
                 <span v-if="qrState === 'loading'">获取二维码中…</span>
-                <span v-else>用手机微信扫码登录（微信{{ curSlot + 1 }}）</span>
+                <span v-else>用手机微信扫码登录</span>
               </div>
               <button class="wc-btn wc-primary" @click="startQr" :disabled="qrState === 'loading'">获取登录二维码</button>
             </template>
@@ -857,7 +831,7 @@ async function testReply() {
         <div class="wc-mid">
           <!-- 未登录：先扫码登录该内置微信 -->
           <div v-if="!cur?.loggedIn" class="wc-mid-login">
-            <div class="wc-log-title">📱 登录内置微信（微信{{ curSlot + 1 }}）</div>
+            <div class="wc-log-title">📱 登录内置微信</div>
             <p class="wc-login-desc">
               用手机微信<b>扫码登录</b>（建议用专用小号），该账号将完全在 ClawDesk 内运行，
               不影响电脑上正常使用的微信。
@@ -886,7 +860,7 @@ async function testReply() {
               </button>
               <button v-if="qrState === 'wait' || qrState === 'scaned'" class="wc-btn" @click="refreshQr">刷新二维码</button>
             </div>
-            <p class="wc-login-tip">提示：顶部「微信1 ~ 微信10」是 10 个互不影响的独立账号，可分别扫码登录不同的微信号。</p>
+            <p class="wc-login-tip">提示：用手机微信扫码登录后，该账号即成为 ClawDesk 的内置微信（不占用你电脑上的微信）。</p>
           </div>
 
           <!-- 已登录：会话列表 + 聊天窗 -->

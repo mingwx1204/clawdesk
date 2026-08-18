@@ -221,8 +221,8 @@ export interface AppSettings {
     defaultSteps: number;
     defaultCfg: number;
   };
-  /** Ollama 本地模型配置 */
-  ollama: {
+  /** llama.cpp 本地模型配置（llama-server 的 OpenAI 兼容端点，默认 http://127.0.0.1:8080/v1） */
+  llamacpp: {
     enabled: boolean;
     baseUrl: string;
     defaultModel: string;

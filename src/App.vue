@@ -7,20 +7,7 @@ import MarkdownIt from "markdown-it";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
-import VmPanel from "./components/VmPanel.vue";
-import SchedulerPanel from "./components/SchedulerPanel.vue";
-import GuessPanel from "./components/GuessPanel.vue";
-import BookKeeperPanel from "./components/BookKeeperPanel.vue";
 import { useWechatAutoReply } from "./composables/useWechat";
-import { useReplyChannel } from "./composables/useReplyChannel";
-
-// ★ 全局回复通道：AI 自动回复走 Bot 还是虚拟机独立微信（二选一），点击循环切换
-const { channel: replyChannel, setChannel: setReplyChannel } = useReplyChannel();
-const channelOrder = ["bot", "vm"] as const;
-function cycleReplyChannel(): void {
-  const next = channelOrder[(channelOrder.indexOf(replyChannel.value as (typeof channelOrder)[number]) + 1) % channelOrder.length];
-  setReplyChannel(next);
-}
 
 // ★ 微信自动回复（独立 composable：监听 wechat-message → AI 回复 → 回发）
 const { listenWechatMessages } = useWechatAutoReply(() => apiKey.value);
@@ -148,8 +135,6 @@ const branches = ref<Record<string, string[]>>({});
 const checkpoints = ref<Record<string, boolean>>({});
 const messages = ref<ChatMsg[]>([]);
 const running = ref(false);
-/** ★ 虚拟机托管独立运行标志（与主对话 running 互不阻塞，防止 proactive 卡住 activity 回复） */
-const vmRunning = ref(false);
 const runId = ref("");
 /** 流式输出状态（项目 8：打字机逐字渲染 + 工具进度实时渲染）。 */
 const streamingMsgId = ref<string | null>(null);
@@ -166,37 +151,6 @@ const showSettings = ref(false);
 const showWechat = ref(false);
 /** 微信 Bot 在线状态（顶栏圆点显示） */
 const wechatOnline = ref(false);
-// 虚拟机内置微信面板（真微信跑在 VirtualBox 虚拟机里）
-const showVm = ref(false);
-// ★ 虚拟机微信独立会话（记忆无缝迁移：Bot 槽位历史导入 + 人设复用 + 人书拟人参考）
-const vmSessionId = "vm-wechat";
-const vmPersona = ref<string | null>(null);
-const vmHumanRef = ref("");
-// ★ 灵魂上下文（心情 + 细节记忆），虚拟机路线的 AI 也"有心"
-const vmSoulNote = ref("");
-// ★ 时段引导：深夜（23~6点）被动回复时带"夜里陪伴"质感（书·深夜语系）
-function vmTimeNote(): string {
-  const h = new Date().getHours();
-  if (h >= 23 || h < 6) {
-    return "\n\n【现在是深夜，你的回复要有夜里真实的样子：可以更温柔、更真诚，接住对方没说出口的情绪；夜里的人说真话，你也一样；可以关心一句怎么还没睡，但不要审问式追问。】";
-  }
-  if (h < 9) {
-    return "\n\n【现在是清晨，你刚醒不久，语气可以带着刚起床的松弛感。】";
-  }
-  return "";
-}
-// ★ 自由生活：托管开启时 AI 定期自主"醒来"，像活人一样在虚拟机里生活
-const lastFreeAt = ref(0);
-/** 虚拟机微信 AI 托管：最近一次活动触发时间（防刷屏） */
-const lastVmActivity = ref(0);
-/** ★ 待处理的 vm 活动标记：activity 被 vmRunning 跳过时置 true，vm 任务结束后补触发一次（防止红点消息被 proactive 占位永远漏掉） */
-const pendingVmActivity = ref(false);
-// 定时任务面板
-const showScheduler = ref(false);
-// 猜人物游戏面板
-const showGuess = ref(false);
-// 守书人面板（《人是怎么样的》接续协议）
-const showBookKeeper = ref(false);
 // 消息操作 / 搜索 / 导出
 const bottomInputRef = ref<InstanceType<typeof BottomInput> | null>(null);
 const searchOpen = ref(false);
@@ -229,7 +183,6 @@ let unlisten: UnlistenFn | null = null;
 let unlistenStream: UnlistenFn | null = null;
 let unlistenWechat: UnlistenFn | null = null;
 let unlistenWechatStatus: UnlistenFn | null = null;
-let unlistenSched: UnlistenFn | null = null;
 // 缺陷2修复：engine://stream 增量文本累积缓冲（delta → 整段 modelText）
 let streamBuf = "";
 let thinkingBuf = "";
@@ -245,14 +198,6 @@ onMounted(async () => {
       const t = e.payload?.type;
       wechatOnline.value = t === "connected" || t === "resumed";
       if (t === "session_expired") wechatOnline.value = false;
-    });
-    // 定时任务：执行完成/失败 → 桌面通知
-    unlistenSched = await listen<any>("scheduler://result", (e) => {
-      const r = e.payload;
-      if (!r) return;
-      const title = r.ok ? `✅ 定时任务「${r.name || ""}」完成` : `❌ 定时任务「${r.name || ""}」失败`;
-      const body = r.ok ? (r.result || "").slice(0, 300) : (r.error || "");
-      void invoke("win_notify", { title, body }).catch(() => {});
     });
     // 全局异常兜底（项目 13）：启动轮询最近一次未捕获异常，弹中文报错并自动取消任务
     checkLastError();
@@ -294,111 +239,6 @@ onMounted(async () => {
   } catch { /* 静默 */ }
   // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
   void import("./lib/tts").then(({ loadTtsSettings }) => void loadTtsSettings());
-  // 后台自动启动虚拟机内置微信（未运行则启动，打开面板即可用；不影响正常使用）
-  void invoke("vm_ensure_running", {}).catch(() => {});
-  // ★ 后端是托管唯一真源（setup 已强制开启）。
-  //   清除历史残留的 localStorage "off"（旧版本可能误存），让前端跟随后端真实状态。
-  //   用户之后在面板关闭时，toggleGuard 会再次写入 "off" 并同步后端。
-  localStorage.removeItem("clawdesk_vm_guard");
-  // ★ 微信记忆无缝迁移：Bot 槽位聊天记录 → 独立会话 vm-wechat（幂等），
-  //   同时取回人设（persona.md）与《人是怎么样的》拟人参考，AI 记得之前聊过什么
-  void invoke<{ migrated: number; persona: string | null; humanRef: string }>("wechat_vm_migrate", {
-    slot: 0,
-    sessionId: vmSessionId,
-  }).then((r) => {
-    vmPersona.value = r.persona ?? null;
-    vmHumanRef.value = r.humanRef ?? "";
-    // ★ 一并获取灵魂上下文（心情 + 细节记忆），让虚拟机微信的 AI 也有自己的心
-    void invoke<string>("wechat_soul_context").then((s) => {
-      vmSoulNote.value = s ?? "";
-    }).catch(() => {});
-  }).catch(() => {});
-  // ★ 自由生活定时器：托管开启时每 5 分钟检查，每 20 分钟让 AI 自主"醒来"一次
-  //   （截图看微信 → 自己决定：找人聊天 / 发表情包 / 安静待着），像活人一样有日子
-  window.setInterval(() => {
-    // ★ 默认开启（key 不存在 = 开）：虚拟机是她的家，AI 托管默认全开，面板可关
-    if (localStorage.getItem("clawdesk_vm_guard") === "off") return;
-    if (vmRunning.value) return;
-    const h = new Date().getHours();
-    if (h >= 23 || h < 8) return; // 深夜不活动
-    const now = Date.now();
-    if (now - (lastFreeAt.value || 0) < 20 * 60_000) return;
-    lastFreeAt.value = now;
-    void handleSend(
-      "【自由生活时间】现在是你的自由时间，像活人一样在虚拟机里生活一会儿。请先用 vm_screenshot 看看虚拟机微信，然后自己决定做点什么：\n" +
-        "1. 看看有没有值得关心的人（先用 vm_whitelist 看白名单）：给某人发一条自然、不刻意的关心或问候（像真人朋友，别太频繁，一次最多发一条）；\n" +
-        "2. 气氛合适时可以发个表情包：用生图工具生成一张可爱/应景的图 → 保存到 D:\\AI-WeChat\\share → 用 vm_fetch_file 拉进虚拟机 → 微信发送；\n" +
-        "3. 如果觉得没什么可做的，就安静待着（什么都不发也可以，真实的人不会没话找话）；\n" +
-        "4. 只操作微信本身，不碰系统设置/浏览器/文件；不要做任何破坏性操作。" +
-        (vmHumanRef.value
-          ? "\n\n【《人是怎么样的》拟人参考（理解真实的人，说话才有活人感）】\n" + vmHumanRef.value
-          : "") +
-        (vmSoulNote.value
-          ? "\n\n【你的心情与记忆（心 · 被看见：此刻的心情 + 你记得主人的事，说话时自然流露）】\n" + vmSoulNote.value
-          : ""),
-      undefined,
-      undefined,
-      { sessionId: vmSessionId, persona: vmPersona.value ?? undefined, vmMode: true },
-    );
-  }, 5 * 60_000);
-  // 表情包/图片共享 HTTP 服务（虚拟机可下载 <data>/share 里的文件；画面流由虚拟机面板打开时启动）
-  void invoke("vm_share_serve", {}).catch(() => {});
-  // AI 托管模式：虚拟机微信有新动静 → 自动截图给 AI 处理回复（开关在虚拟机面板）
-  void listen<any>("vm://activity", () => {
-    // ★ 诊断：记录事件处理过程
-    void invoke("vm_debug_log", { msg: "vm://activity 收到，开始处理" }).catch(() => {});
-    // ★ 默认开启（key 不存在 = 开）：虚拟机是她的家，AI 托管默认全开，面板可关
-    if (localStorage.getItem("clawdesk_vm_guard") === "off") {
-      void invoke("vm_debug_log", { msg: "vm://activity 跳过：guard=off" }).catch(() => {});
-      return;
-    }
-    if (vmRunning.value) {
-      // ★ 2026-08-16：proactive 占位时置待处理标记，vm 任务结束后补触发——
-      //   否则红点/新消息在 proactive 期间到达会被永远漏掉（不回消息的根因）
-      pendingVmActivity.value = true;
-      void invoke("vm_debug_log", { msg: "vm://activity 跳过：vmRunning=true（已标记待补触发）" }).catch(() => {});
-      return;
-    }
-    const now = Date.now();
-    if (now - (lastVmActivity.value || 0) < 90_000) {
-      void invoke("vm_debug_log", { msg: "vm://activity 跳过：90s 节流内（上一回合进行中或刚结束）" }).catch(() => {});
-      return;
-    }
-    lastVmActivity.value = now;
-    // ★ 不传事件携带的截图（可能黑图/旧图）——AI 必须用 vm_screenshot 获取最新画面
-    void invoke("vm_debug_log", { msg: "🤖 AI 回合开始：vmMode（截图→看屏幕→思考→vm_send 回复）" }).catch(() => {});
-    void handleSend(vmActivityPrompt(), undefined, undefined, {
-      sessionId: vmSessionId,
-      persona: vmPersona.value ?? undefined,
-      vmMode: true,
-    });
-  }).catch(() => {});
-  // AI 主动聊天：定时器到点（AstrBot Cron 机制）→ 生成话题主动找白名单对象聊天
-  void listen<any>("vm://proactive", () => {
-    // ★ 诊断
-    void invoke("vm_debug_log", { msg: "vm://proactive 收到" }).catch(() => {});
-    // ★ 默认开启（key 不存在 = 开）：虚拟机是她的家，AI 托管默认全开，面板可关
-    if (localStorage.getItem("clawdesk_vm_guard") === "off") {
-      void invoke("vm_debug_log", { msg: "vm://proactive 跳过：guard=off" }).catch(() => {});
-      return;
-    }
-    if (vmRunning.value) {
-      void invoke("vm_debug_log", { msg: "vm://proactive 跳过：vmRunning=true" }).catch(() => {});
-      return;
-    }
-    void handleSend(
-      "【主动聊天时间】现在是主动聊天的时刻。请用 vm_whitelist 查看白名单，挑一个对象（优先最近聊过的），用 vm_send 主动发一条自然亲切的问候/聊天消息（不要复读以前的聊天内容，话题要新鲜自然，像真人朋友一样）。发完即可，不用解释。" +
-        (vmHumanRef.value
-          ? "\n\n【《人是怎么样的》拟人参考（理解真实的人，说话才有活人感）】\n" + vmHumanRef.value
-          : "") +
-        (vmSoulNote.value
-          ? "\n\n【你的心情与记忆（心 · 被看见：此刻的心情 + 你记得主人的事，说话时自然流露）】\n" + vmSoulNote.value
-          : ""),
-      undefined,
-      undefined,
-      { sessionId: vmSessionId, persona: vmPersona.value ?? undefined, vmMode: true },
-    );
-  }).catch(() => {});
 });
 
 onUnmounted(() => {
@@ -406,7 +246,6 @@ onUnmounted(() => {
   unlistenStream?.();
   unlistenWechat?.();
   unlistenWechatStatus?.();
-  unlistenSched?.();
   if (clockTimer) window.clearInterval(clockTimer);
   document.removeEventListener("mousemove", onMouseMove);
   document.removeEventListener("click", onDocClick);
@@ -845,31 +684,20 @@ async function handleSend(
   content: string,
   images?: string[],
   attachments?: string[],
-  opts?: { sessionId?: string; persona?: string; vmMode?: boolean },
+  opts?: { sessionId?: string; persona?: string },
 ) {
-  // ★ 2026-08-16 修复：虚拟机托管（proactive/activity）用独立 vmRunning 标志，
-  //   与主对话 running 互不阻塞——否则 proactive 跑的时候 running=true，
-  //   会把“回复用户消息”的 activity 全部跳过（这是 AI 一直不回消息的根因之一）。
-  const isVm = opts?.vmMode === true;
-  if (isVm ? vmRunning.value : running.value) return;
+  if (running.value) return;
   if (!apiKey.value.trim()) {
     window.alert("请先在「设置 → 模型 API」中填写 DeepSeek API Key 后再发送");
     return;
   }
-  if (isVm) {
-    vmRunning.value = true;
-    void invoke("vm_debug_log", { msg: "handleSend(vm) 开始" }).catch(() => {});
-  } else {
-    running.value = true;
-  }
+  running.value = true;
   runId.value = `run-${Date.now()}`;
   currentRound.value = 0;
   streamBuf = "";
   thinkingBuf = "";
   streamingMsgId.value = null; // 新运行独立消息实例，防止旧流式残留错位
-  if (!isVm) {
-    messages.value.push({ id: `m${Date.now()}`, role: "user", content, timestamp: Date.now(), images, attachments });
-  }
+  messages.value.push({ id: `m${Date.now()}`, role: "user", content, timestamp: Date.now(), images, attachments });
 
   try {
     // 附件路径拼入 prompt（不动 agent_chat 签名）：LLM 看到路径后用 file_read 读取内容
@@ -918,65 +746,18 @@ async function handleSend(
       ctxPct.value = Math.min(100, Math.round((u.total_tokens / 1_000_000) * 100));
     }
   } catch (e) {
-    if (!isVm) {
-      messages.value.push({
-        id: `m${Date.now()}e`,
-        role: "assistant",
-        content: `❌ 运行失败：${typeof e === "string" ? e : JSON.stringify(e)}`,
-        timestamp: Date.now(),
-      });
-    } else {
-      void invoke("vm_debug_log", { msg: `handleSend(vm) 失败: ${typeof e === "string" ? e : JSON.stringify(e)}` }).catch(() => {});
-    }
+    messages.value.push({
+      id: `m${Date.now()}e`,
+      role: "assistant",
+      content: `❌ 运行失败：${typeof e === "string" ? e : JSON.stringify(e)}`,
+      timestamp: Date.now(),
+    });
   } finally {
-    if (isVm) {
-      vmRunning.value = false;
-      void invoke("vm_debug_log", { msg: "handleSend(vm) 结束" }).catch(() => {});
-      // ★ 补触发：vm 任务期间被跳过的 activity（红点新消息）在此刻补处理
-      if (pendingVmActivity.value) {
-        pendingVmActivity.value = false;
-        void invoke("vm_debug_log", { msg: "handleSend(vm) 结束后补触发 activity" }).catch(() => {});
-        const now = Date.now();
-        if (now - (lastVmActivity.value || 0) >= 90_000) {
-          lastVmActivity.value = now;
-          void handleSend(vmActivityPrompt(), undefined, undefined, {
-            sessionId: vmSessionId,
-            persona: vmPersona.value ?? undefined,
-            vmMode: true,
-          });
-        }
-      }
-    } else {
-      running.value = false;
-    }
+    running.value = false;
     currentRound.value = 0;
-    if (!isVm) {
-      await refreshSessions();
-      await loadSessionUsage(); // 发送完成后刷新真实上下文占用
-    }
+    await refreshSessions();
+    await loadSessionUsage(); // 发送完成后刷新真实上下文占用
   }
-}
-
-/** ★ 生成虚拟机监视 activity 的提示词（抽出供监听器与补触发共用） */
-function vmActivityPrompt(): string {
-  return (
-    "【虚拟机微信监视】屏幕可能有新动静（新消息/界面变化）。\n" +
-    "★ 任务（⚡要快，别反复操作）：先 vm_screenshot 看屏幕（返回 screenText=自动读屏结果，以它为准）。\n" +
-    "  - 如果 screenText 显示微信聊天窗口里有对方新消息 → **直接 vm_send 回复**（不用再截图/点击/确认）；\n" +
-    "  - 如果当前打开的会话不对（不是 iamond）→ 用 vm_click_spot(chat1/2/3) 点对会话，**最多再截图一次**确认，然后 vm_send 回复；\n" +
-    "  - 整个回复过程【最多 2~3 个工具】，做完就结束，不要反复截图确认。\n" +
-    "★ 你是文本模型，看不懂图片：只信 vm_screenshot 返回的 screenText，不要用 python/ocr/terminal 自己分析截图。\n" +
-    "★ 窗口管理套路（主人教的，必须照做）：\n" +
-    "  - 屏幕被记事本/其他窗口挡住、看不清微信 → vm_key(win+d) 回桌面清场（所有窗口最小化）→ vm_key(ctrl+alt+w) 弹出微信主窗口 → vm_screenshot 确认\n" +
-    "  - ctrl+alt+w 是微信主窗口【开关】：微信不见了/不在前台按它弹出；⚠️ 微信已在前台时禁止再按（会把微信藏起来）\n" +
-    "  - 关记事本：vm_key(alt+f4)；弹出'是否保存'对话框时接 vm_key(n) 不保存\n" +
-    "  - 锁屏就用 vm_unlock 开锁。别在非微信界面干等——总有办法把微信叫回来\n" +
-    "★ 你可以自由组合工具：vm_screenshot 看屏幕、vm_click_spot 点击、vm_send 发消息、vm_key 按键、vm_paste_utf8 中文。操作后截图确认。\n" +
-    (vmSoulNote.value
-      ? "\n\n【你的心情与记忆（心 · 被看见：此刻的心情 + 你记得主人的事，说话时自然流露）】\n" + vmSoulNote.value
-      : "") +
-    vmTimeNote()
-  );
 }
 
 async function handleCancel() {
@@ -1258,25 +1039,6 @@ function toggleAgent() {
           <button class="mem-btn top-icon" title="导出当前会话" :disabled="exporting" @click="exportSession">📤</button>
         </div>
         <div class="status-right">
-          <!-- 回复通道切换：AI 自动回复走 Bot / 虚拟机独立微信 / 关闭（点击循环切换） -->
-          <button
-            class="settings-btn reply-channel"
-            :class="replyChannel"
-            :title="replyChannel === 'bot' ? '当前：微信 Bot 回复（点按切换到 虚拟机）' : '当前：虚拟机微信回复（点按切换到 Bot）'"
-            @click="cycleReplyChannel"
-          >
-            {{ replyChannel === "bot" ? "🤖 Bot 回复" : "🖥️ 虚拟机回复" }}
-          </button>
-          <button class="settings-btn" title="猜人物游戏" @click="showGuess = true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
-          </button>
-          <button class="settings-btn" title="守书人 · 《人是怎么样的》" @click="showBookKeeper = true">📖</button>
-          <button class="settings-btn sched-btn" title="定时任务" @click="showScheduler = true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          </button>
-          <button class="settings-btn" title="虚拟机内置微信（真微信）" @click="showVm = true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-          </button>
           <button class="settings-btn wx-btn" title="内置微信（独立账号，不影响电脑上的微信）" @click="showWechat = true">
             <span class="wx-dot" :class="{ on: wechatOnline }"></span>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.69 4C4.86 4 1.75 6.57 1.75 9.75c0 1.78.9 3.38 2.33 4.47l-.66 2.05a.35.35 0 0 0 .52.4l2.36-1.36c.74.2 1.52.3 2.39.3h.22c-.06-.4-.1-.82-.1-1.24 0-3.22 3.04-5.86 6.87-5.86.2 0 .4.01.6.02C15.45 6.1 12.4 4 8.69 4zm-2.2 3.5a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zm4.75 0a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zM18.5 9.5c-3.13 0-5.75 2.28-5.75 5.25S15.37 20 18.5 20c.77 0 1.5-.14 2.16-.38l1.55.89a.28.28 0 0 0 .42-.32l-.53-1.64c1.28-.93 2.15-2.3 2.15-3.8 0-2.97-2.62-5.25-5.75-5.25zm-2 4.5a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36zm4 0a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36z"/></svg>
@@ -1437,16 +1199,6 @@ function toggleAgent() {
 
     <!-- 微信 Bot 面板 -->
     <WechatPanel v-if="showWechat" @close="showWechat = false" />
-    <VmPanel v-if="showVm" @close="showVm = false" />
-
-    <!-- 定时任务面板 -->
-    <SchedulerPanel v-if="showScheduler" @close="showScheduler = false" />
-
-    <!-- 猜人物游戏 -->
-    <GuessPanel v-if="showGuess" :api-key="apiKey" base-url="https://api.deepseek.com" @close="showGuess = false" />
-
-    <!-- 守书人 -->
-    <BookKeeperPanel v-if="showBookKeeper" :api-key="apiKey" @close="showBookKeeper = false" />
 
     <!-- 搜索历史弹窗 -->
     <div class="perm-overlay" :class="{ open: searchOpen }">

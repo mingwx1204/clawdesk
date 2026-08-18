@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::core::tool::def::{ToolParamDef, UnifiedToolDef};
-use crate::core::tool::error::ToolError;
+use crate::core::tool::error::{ToolError, ToolErrorKind};
 use crate::core::tool::registry::{ToolHandler, ToolRegistry};
 use crate::core::tool::result::ToolResult;
 
@@ -60,7 +60,9 @@ pub fn register_from_dir(registry: &Arc<ToolRegistry>, dir: &Path) -> Result<usi
             Ok(text) => match serde_json::from_str::<SkillDef>(&text) {
                 Ok(skill) => {
                     if let Err(e) = register_skill(registry, &skill) {
-                        eprintln!("[SKILLHUB] 技能 `{}` 注册失败: {}", skill.name, e);
+                        if e.kind != ToolErrorKind::AlreadyRegistered {
+                            eprintln!("[SKILLHUB] 技能 `{}` 注册失败: {}", skill.name, e);
+                        }
                     } else {
                         registered += 1;
                     }
@@ -76,7 +78,9 @@ pub fn register_from_dir(registry: &Arc<ToolRegistry>, dir: &Path) -> Result<usi
         match parse_skill_md(path) {
             Ok(Some(skill)) => {
                 if let Err(e) = register_skill(registry, &skill) {
-                    eprintln!("[SKILLHUB] 技能 `{}` 注册失败: {}", skill.name, e);
+                    if e.kind != ToolErrorKind::AlreadyRegistered {
+                        eprintln!("[SKILLHUB] 技能 `{}` 注册失败: {}", skill.name, e);
+                    }
                 } else {
                     registered += 1;
                 }
@@ -134,7 +138,11 @@ fn collect_skill_files(dir: &Path, json: &mut Vec<PathBuf>, md: &mut Vec<PathBuf
         } else if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
             if name == "SKILL.md" {
                 md.push(p);
-            } else if p.extension().and_then(|e| e.to_str()) == Some("json") {
+            } else if depth == 0 && p.extension().and_then(|e| e.to_str()) == Some("json") {
+                // 原生 SkillDef JSON 只放在技能目录顶层（skills/*.json）。
+                // 嵌套目录里的是 skillhub 安装格式（_meta.json / skill.json /
+                // package.json / data/*.json 等），其技能由 SKILL.md 解析，
+                // 这里不再误扫，避免启动日志刷屏「missing field name」。
                 json.push(p);
             }
         }

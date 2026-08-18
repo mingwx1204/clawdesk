@@ -1,0 +1,20 @@
+# 统一行尾为 LF，杜绝 CRLF/LF 混杂导致的整文件脏 diff
+* text=auto eol=lf
+
+# 二进制文件不转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.zip binary
+*.wav binary
+*.mp3 binary
+*.flac binary
+*.m4a binary
+*.db binary
+*.sqlite binary
+*.gguf binary

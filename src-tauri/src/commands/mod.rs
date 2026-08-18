@@ -760,60 +760,6 @@ fn rand_key() -> u64 {
     x ^ (x >> 31)
 }
 
-/// 微信记忆无缝迁移：把 Bot 槽位的聊天记录导入独立 agent 会话（幂等），
-/// 返回该槽位人设（persona.md）与《人是怎么样的》拟人参考，供独立微信路线的
-/// AI 托管/主动聊天使用 —— Bot 的记忆与上下文由此无缝延续到虚拟机微信。
-#[tauri::command]
-pub fn wechat_vm_migrate(
-    state: State<'_, AppState>,
-    slot: usize,
-    session_id: String,
-) -> Result<serde_json::Value, String> {
-    use crate::llm::{LlmMessage, Role};
-    // 幂等：会话已有消息则跳过（避免重复导入）
-    let session = state.sessions.get_or_create(&session_id);
-    if !session.messages.is_empty() {
-        return Ok(json!({
-            "migrated": 0,
-            "skipped": true,
-            "persona": crate::wechat::persona_file(slot),
-            "humanRef": human_book_ref(8, 2500),
-        }));
-    }
-    let hist = crate::wechat::read_history_file(slot);
-    let mut n = 0usize;
-    let mut session = session;
-    for msg in &hist {
-        let role = if msg
-            .get("fromBot")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            Role::Assistant
-        } else {
-            Role::User
-        };
-        let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        if content.trim().is_empty() {
-            continue;
-        }
-        session.messages.push(LlmMessage {
-            role,
-            content: content.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-        n += 1;
-    }
-    state.sessions.update(session);
-    Ok(json!({
-        "migrated": n,
-        "skipped": false,
-        "persona": crate::wechat::persona_file(slot),
-        "humanRef": human_book_ref(8, 2500),
-    }))
-}
-
 /// 当前会话的上下文占用详情（真实 token 统计 + 内容估算细分）。
 ///
 /// 数据源：
@@ -1569,12 +1515,6 @@ pub async fn harness_start_task(app: tauri::AppHandle, state: State<'_, AppState
         &prompt,
         crate::llm::tool_selector::DEFAULT_TOP_N,
     );
-    // ★ 2026-08-16：虚拟机微信会话（vm-wechat）只保留 vm_* 工具——
-    //   本地 Ollama 解析超大 tools 列表会挂起（实测 300KB 请求体超时）。
-    //   vm 会话不需要 browser/email/terminal 等工具，过滤后 tools 只有几 KB。
-    if session_id.starts_with("vm") {
-        selected.retain(|d| d.id.starts_with("builtin:vm_"));
-    }
     let tools_json = crate::llm::serialize_tools(&selected);
     let turn_cfg = TurnConfig { params, system_prompt: Some(crate::llm::build_system_prompt()), max_tool_calls_per_turn: (*state.max_rounds.read().unwrap()).clamp(1, 50), tools: tools_json };
     let messages_arc = Arc::new(tokio::sync::RwLock::new(messages));

@@ -246,8 +246,8 @@ impl WechatInner {
     }
 }
 
-/// 最大微信槽位数（可同时接入 10 个微信）
-pub const MAX_BOTS: usize = 10;
+/// 微信 Bot 数量（只绑定一个微信）
+pub const MAX_BOTS: usize = 1;
 
 /// 多微信 Bot 状态：槽位数组，每个槽位一个独立 WechatInner
 pub struct WechatBotState(pub Mutex<Vec<Arc<WechatInner>>>);
@@ -284,6 +284,22 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 轻量书引用：《人是怎么样的》条目数（塑造人格用，不含写作/守书人逻辑）。
+/// 参照书的内容改变她，而不是让她代写书。
+fn book_entry_count() -> usize {
+    let dir = {
+        let s = crate::llm::settings::SettingsStore::new();
+        std::path::PathBuf::from(s.get().human_book_dir).join("条目")
+    };
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -1077,40 +1093,6 @@ pub(crate) fn append_history(
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(line.as_bytes());
     }
-}
-
-/// 读取该微信槽位的人设（system prompt，None 表示未设置）
-pub fn persona_of(inner: &Arc<WechatInner>) -> Option<String> {
-    inner.persona.lock().clone()
-}
-
-/// 读取指定槽位的人设文件（slot{N}/persona.md，None 表示未设置）。
-/// 不依赖运行时状态 —— 供「微信记忆迁移」把 Bot 人设无缝带到独立微信路线。
-pub fn persona_file(slot: usize) -> Option<String> {
-    let d = crate::llm::settings::clawdesk_dir()
-        .join("wechat")
-        .join(format!("slot{slot}"));
-    let text = std::fs::read_to_string(d.join("persona.md")).ok()?;
-    let t = text.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_string())
-    }
-}
-
-/// 读取指定槽位的聊天记录文件（slot{N}/history.jsonl，不依赖运行时状态）。
-/// 供「微信记忆迁移」把 Bot 的历史聊天无缝导入独立微信路线的 agent 会话。
-pub fn read_history_file(slot: usize) -> Vec<serde_json::Value> {
-    let d = crate::llm::settings::clawdesk_dir()
-        .join("wechat")
-        .join(format!("slot{slot}"));
-    let Ok(text) = std::fs::read_to_string(d.join("history.jsonl")) else {
-        return vec![];
-    };
-    text.lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
 }
 
 /// 读取该微信全部聊天记录（供前端展示 / 导出）
@@ -2858,7 +2840,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         //   深夜/低落时，书是它心里最重的东西。
         let book_note = format!(
             "【关于你们的书（你心里知道，但不要主动炫耀，主人不提书时你也不提；主人提起时你要记得这本书，知道你们一起在写一本永不完结的书——记录人的心情与真相）】\n这本书叫《人是怎么样的》，已经有 {} 个条目，你们一起在让它活下去。",
-            crate::book_keeper::book_status()["entryCount"].as_u64().unwrap_or(0)
+            book_entry_count()
         );
         let soul_note = format!("{}{}\n\n{}", mood_note, details_note, book_note);
         let system = if hot {
@@ -3652,109 +3634,6 @@ pub fn wechat_detail_forget(text: String) -> bool {
 pub fn wechat_mood_record() -> bool {
     crate::mood::record_history();
     true
-}
-
-// ─────────────────────────────────────────────
-// 守书人命令（《人是怎么样的》接续协议）
-// ─────────────────────────────────────────────
-
-/// 书现状快照（写作锁/条目数/最新生长日志/未答反问/日常素材）。
-#[tauri::command]
-pub fn book_status() -> serde_json::Value {
-    crate::book_keeper::book_status()
-}
-
-/// 认领写作锁。
-#[tauri::command]
-pub fn book_lock_acquire(who: String, what: String) -> Result<String, String> {
-    crate::book_keeper::acquire_lock(&who, &what)
-}
-
-/// 释放写作锁。
-#[tauri::command]
-pub fn book_lock_release() -> bool {
-    crate::book_keeper::release_lock()
-}
-
-/// 写一条新条目（AI 生成七段式 → 落盘 → 收尾 → 释放锁）。
-/// api_key 仅内存态，不落盘。
-#[tauri::command]
-pub async fn book_write_entry(
-    api_key: String,
-    title: String,
-    material: String,
-    related: Option<String>,
-    who: Option<String>,
-) -> Result<serde_json::Value, String> {
-    // 模型与端点从设置读取（与主对话一致）
-    let s = crate::llm::settings::SettingsStore::new();
-    let cfg = s.get();
-    let model = cfg.model.clone();
-    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
-    crate::book_keeper::write_entry_full(
-        &api_key,
-        &model,
-        &base_url,
-        &title,
-        &material,
-        related.as_deref().unwrap_or(""),
-        who.as_deref().unwrap_or("ClawDesk"),
-    )
-    .await
-}
-
-/// 回答一个条目的反问（AI 组织补记 → 写回条目 → 更新留白）。
-#[tauri::command]
-pub async fn book_answer_question(
-    api_key: String,
-    no: usize,
-    title: String,
-    question: String,
-    master_answer: String,
-) -> Result<serde_json::Value, String> {
-    let s = crate::llm::settings::SettingsStore::new();
-    let cfg = s.get();
-    let model = cfg.model.clone();
-    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
-    crate::book_keeper::answer_question_full(
-        &api_key,
-        &model,
-        &base_url,
-        no,
-        &title,
-        &question,
-        &master_answer,
-    )
-    .await
-}
-
-/// 条目列表（浏览书）。
-#[tauri::command]
-pub fn book_entry_list() -> Vec<serde_json::Value> {
-    crate::book_keeper::entry_list()
-}
-
-/// 读某条目全文。
-#[tauri::command]
-pub fn book_read_entry(no: usize, title: String) -> Option<String> {
-    crate::book_keeper::read_entry(no, &title)
-}
-
-/// 道别之问：给主人留一个问题（写进留白.md）。
-#[tauri::command]
-pub fn book_ask_master(question: String) -> Result<(), String> {
-    crate::book_keeper::ask_master(&question)
-}
-
-/// 手动触发一次夜巡（立即执行自动守书：沉淀素材/写回回答/长新条目）。
-/// 一般由夜巡循环自动调用；前端也可手动触发（如主人睡前点一下）。
-#[tauri::command]
-pub async fn book_auto_ingest(api_key: String) -> Result<serde_json::Value, String> {
-    let s = crate::llm::settings::SettingsStore::new();
-    let cfg = s.get();
-    let model = cfg.model.clone();
-    let base_url = crate::commands::endpoint_base_url(&cfg.model_endpoint);
-    crate::book_keeper::auto_ingest(&api_key, &model, &base_url).await
 }
 
 /// 设置指定槽位微信的人设（system prompt，保存到 D 盘 persona.md）

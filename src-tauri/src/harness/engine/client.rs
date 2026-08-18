@@ -107,7 +107,7 @@ impl LlmClient {
             http,
             api_key: Arc::new(api_key),
             base_url: base_url.trim_end_matches('/').to_string(),
-            // ★ 2026-08-16 调大：本地 Ollama qwen3.5:9b 首次加载/推理慢（25s+），
+            // ★ 2026-08-16 调大：本地 llama.cpp 模型首次加载/推理慢（25s+），
             //   45s 会超时报"SSE 响应头未返回"。
             open_timeout: Duration::from_secs(150),
             idle_timeout: Duration::from_secs(300),
