@@ -666,7 +666,7 @@ async fn process_media_item(
             .ok()
             .and_then(|r| r.ok());
             if let Some(extract_dir) = extracted {
-                eprintln!("[wechat] 压缩包 {} 已解压到: {}", fname, extract_dir.display());
+                crate::llm::logging::debug("wechat", &format!("压缩包 {} 已解压到: {}", fname, extract_dir.display()));
                 return Some((
                     extract_dir.to_string_lossy().to_string(),
                     WechatMediaKind::File,
@@ -989,7 +989,7 @@ fn load_proactive(inner: &Arc<WechatInner>) {
     //   否则「自动（最近聊过的人）」重启后 target 为 None，主动聊天永不触发
     if inner.proactive_target.lock().as_deref().map(|t| t.is_empty()).unwrap_or(true) {
         if let Some(peer) = last_history_peer(inner) {
-            eprintln!("[wechat] slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer);
+            crate::llm::logging::debug("wechat", &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer));
             *inner.proactive_target.lock() = Some(peer);
         }
     }
@@ -1400,9 +1400,9 @@ async fn notify_start(inner: &Arc<WechatInner>) -> bool {
         Ok(r) => {
             let status = r.status();
             let text = r.text().await.unwrap_or_default();
-            eprintln!(
-                "[wechat] notifyStart status={status} body={}",
-                trunc_chars(&text, 200)
+            crate::llm::logging::debug(
+                "wechat",
+                &format!("notifyStart status={status} body={}", trunc_chars(&text, 200))
             );
             if !status.is_success() {
                 return false;
@@ -1411,9 +1411,9 @@ async fn notify_start(inner: &Arc<WechatInner>) -> bool {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 let ret = v["ret"].as_i64().unwrap_or(0);
                 if ret != 0 {
-                    eprintln!(
-                        "[wechat] notifyStart ret={ret} errmsg={}",
-                        v["errmsg"].as_str().unwrap_or("")
+                    crate::llm::logging::debug(
+                        "wechat",
+                        &format!("notifyStart ret={ret} errmsg={}", v["errmsg"].as_str().unwrap_or(""))
                     );
                     return false;
                 }
@@ -1457,7 +1457,7 @@ async fn send_message_once(
         .map_err(|e| (format!("发送微信消息失败: {e}"), None))?;
     let status = resp.status();
     let text_resp = resp.text().await.unwrap_or_default();
-    eprintln!("[wechat] sendmessage status={status}");
+    crate::llm::logging::debug("wechat", &format!("sendmessage status={status}"));
     if !status.is_success() {
         return Err((
             format!(
@@ -1698,8 +1698,15 @@ async fn send_image_once(
             "context_token": context_token.unwrap_or(""),
         }
     });
-    eprintln!("[wechat] sendimage to={} filekey={} ctx={}", to, filekey,
-        if context_token.unwrap_or("").is_empty() { "NONE" } else { "YES" });
+    crate::llm::logging::debug(
+        "wechat",
+        &format!(
+            "sendimage to={} filekey={} ctx={}",
+            to,
+            filekey,
+            if context_token.unwrap_or("").is_empty() { "NONE" } else { "YES" }
+        ),
+    );
     crate::llm::logging::debug("wechat", &format!("发送图片消息 to={} file={}", to, image_path));
     let resp = client
         .post(format!("{base_url}/ilink/bot/sendmessage"))
@@ -1949,7 +1956,7 @@ pub async fn wechat_send_voice(
                 match crate::commands::tts::synthesize_audio_indextts(&text, &p, &url).await {
                     Ok(a) => a,
                     Err(e) => {
-                        eprintln!("[wechat] IndexTTS2 合成失败（回退 Edge TTS）: {e}");
+                        crate::llm::logging::debug("wechat", &format!("IndexTTS2 合成失败（回退 Edge TTS）: {e}"));
                         crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                             .await
                             .map_err(|e2| format!("语音合成失败: {e2}"))?
@@ -1957,7 +1964,7 @@ pub async fn wechat_send_voice(
                 }
             }
             _ => {
-                eprintln!("[wechat] 未配置 IndexTTS2 参考音频，回退 Edge TTS");
+                crate::llm::logging::debug("wechat", &format!("未配置 IndexTTS2 参考音频，回退 Edge TTS"));
                 crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                     .await
                     .map_err(|e| format!("语音合成失败: {e}"))?
@@ -1971,7 +1978,7 @@ pub async fn wechat_send_voice(
                 match crate::commands::tts::synthesize_audio_cosyvoice(&text, &v, &k).await {
                     Ok(a) => a,
                     Err(e) => {
-                        eprintln!("[wechat] CosyVoice 合成失败（回退 Edge TTS）: {e}");
+                        crate::llm::logging::debug("wechat", &format!("CosyVoice 合成失败（回退 Edge TTS）: {e}"));
                         crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                             .await
                             .map_err(|e2| format!("语音合成失败: {e2}"))?
@@ -1979,7 +1986,7 @@ pub async fn wechat_send_voice(
                 }
             }
             _ => {
-                eprintln!("[wechat] 未配置 CosyVoice API Key，回退 Edge TTS");
+                crate::llm::logging::debug("wechat", &format!("未配置 CosyVoice API Key，回退 Edge TTS"));
                 crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                     .await
                     .map_err(|e| format!("语音合成失败: {e}"))?
@@ -2006,7 +2013,7 @@ pub async fn wechat_send_voice(
     let ctx = inner.context_map.lock().get(&to_user).cloned();
     send_file(&inner, &to_user, &path.to_string_lossy(), Some(&fname), ctx.as_deref()).await?;
     append_history(&inner, &to_user, &to_user, &text, "voice", true, false);
-    eprintln!("[wechat] slot{} 语音回复已发送 to={} voice={} bytes={}", inner.slot, to_user, voice_id, audio.len());
+    crate::llm::logging::debug("wechat", &format!("slot{} 语音回复已发送 to={} voice={} bytes={}", inner.slot, to_user, voice_id, audio.len()));
     Ok(())
 }
 
@@ -2185,11 +2192,14 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 // ★ 聊天白名单（只和指定的人聊天）：白名单非空时，名单外的
                 //   用户消息直接忽略（不自动回复、不进入最近聊天、不主动找）
                 if !inner2.is_allowed(&from) {
-                    eprintln!(
-                        "[wechat] slot{} 白名单拦截: from={}（该微信只与 {} 位指定用户聊天）",
-                        inner2.slot,
-                        from,
-                        inner2.allowed_users.lock().len()
+                    crate::llm::logging::debug(
+                        "wechat",
+                        &format!(
+                            "slot{} 白名单拦截: from={}（该微信只与 {} 位指定用户聊天）",
+                            inner2.slot,
+                            from,
+                            inner2.allowed_users.lock().len()
+                        )
                     );
                     continue;
                 }
@@ -2210,9 +2220,9 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 {
                     let mut seen = inner2.last_msg_ids.lock();
                     if seen.contains(&msg_id) {
-                        eprintln!(
-                            "[wechat] slot{} 跳过重复消息 msg_id={} from={}",
-                            inner2.slot, msg_id, from
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!("slot{} 跳过重复消息 msg_id={} from={}", inner2.slot, msg_id, from)
                         );
                         continue;
                     }
@@ -2308,12 +2318,15 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                         }
                     }
                 }
-                eprintln!(
-                    "[wechat] received msg from={} ctx={} text={} media={}",
-                    from,
-                    if context_token.is_empty() { "NONE" } else { "YES" },
-                    trunc_chars(&text, 50),
-                    images.len() + attachments.len()
+                crate::llm::logging::debug(
+                    "wechat",
+                    &format!(
+                        "received msg from={} ctx={} text={} media={}",
+                        from,
+                        if context_token.is_empty() { "NONE" } else { "YES" },
+                        trunc_chars(&text, 50),
+                        images.len() + attachments.len()
+                    )
                 );
                 if text.trim().is_empty() && images.is_empty() && attachments.is_empty() {
                     continue;
@@ -2634,7 +2647,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                 // ★ 修复：目标为空时从聊天记录恢复最近聊过的人，并真正写入
                 //   inner.proactive_target（旧实现只判断不写，导致"已恢复"却永远无目标空转）
                 if let Some(peer) = last_history_peer(&inner) {
-                    eprintln!("[wechat] slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer);
+                    crate::llm::logging::debug("wechat", &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer));
                     *inner.proactive_target.lock() = Some(peer.clone());
                     peer
                 } else {
@@ -2656,7 +2669,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         use chrono::Timelike;
         let hour = chrono::Local::now().hour();
         if hour < 8 || hour >= 23 {
-            eprintln!("[wechat] slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour);
+            crate::llm::logging::debug("wechat", &format!("slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour));
             crate::llm::logging::debug(
                 "wechat",
                 &format!("slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour),
@@ -2807,16 +2820,16 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                     .filter(|c| !c.api_key.is_empty());
                 match fallback {
                     Some(c) => {
-                        eprintln!(
-                            "[wechat] slot{} 引擎配置从设置兜底恢复: model={}",
-                            inner.slot, c.model
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!("slot{} 引擎配置从设置兜底恢复: model={}", inner.slot, c.model)
                         );
                         c
                     }
                     None => {
-                        eprintln!(
-                            "[wechat] slot{} 引擎未配置（设置中也无 Key），跳过主动聊天",
-                            inner.slot
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!("slot{} 引擎未配置（设置中也无 Key），跳过主动聊天", inner.slot)
                         );
                         wait_secs = proactive_wait_secs(&inner);
                         continue;
@@ -2983,12 +2996,15 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         }
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
                         wait_secs = proactive_wait_secs(&inner);
-                        eprintln!(
-                            "[wechat] slot{} 主动聊天已发送 to={} text={} 下次等待 {} 分钟",
-                            inner.slot,
-                            target,
-                            trunc_chars(&text, 60),
-                            wait_secs / 60
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!(
+                                "slot{} 主动聊天已发送 to={} text={} 下次等待 {} 分钟",
+                                inner.slot,
+                                target,
+                                trunc_chars(&text, 60),
+                                wait_secs / 60
+                            )
                         );
                         let _ = app.emit(
                             "wechat-bot-status",
@@ -3049,7 +3065,7 @@ pub async fn auto_resume(app: AppHandle, state: &WechatBotState) {
         start_getupdates_loop(&inner, app.clone()).await;
         // 每个已登录微信都启动主动聊天循环（8:00~23:00 才会真正发送；防重入）
         ensure_proactive_loop(&inner, app.clone());
-        eprintln!("[wechat] slot{} 自动续连已恢复（已保存的登录凭据）", inner.slot);
+        crate::llm::logging::debug("wechat", &format!("slot{} 自动续连已恢复（已保存的登录凭据）", inner.slot));
         let _ = app.emit(
             "wechat-bot-status",
             serde_json::json!({ "type": "connected", "resumed": true, "slot": inner.slot }),
@@ -3447,7 +3463,7 @@ pub async fn wechat_bot_reply(
     // ★ 去重检查：同一 msg_id 已处理过（已回复）→ 直接返回，防前端重复调用导致重复回复。
     //   发送成功后才把 msg_id 记入去重环（发送失败可重试，不占去重位）
     if !msg_id.is_empty() && inner.last_msg_ids.lock().contains(&msg_id) {
-        eprintln!("[wechat] slot{} 跳过重复回复 msg_id={}", inner.slot, msg_id);
+        crate::llm::logging::debug("wechat", &format!("slot{} 跳过重复回复 msg_id={}", inner.slot, msg_id));
         return Ok(());
     }
     // ★ 判断用户是否明确要求字数/长文：查该用户最近一条消息内容。
