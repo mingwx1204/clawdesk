@@ -20,6 +20,10 @@ mod mood;
 mod detail_memory;
 // ── 自进化系统（AI 自动学习生成技能） ──
 mod self_evolve;
+// ── 生命叙事（睡前巩固 + 梦境 · 一生的故事线） ──
+mod life_narrative;
+// ── 主观关系叙事（我们之间的故事 · 关系记忆） ──
+mod relationship;
 
 use commands::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -339,6 +343,8 @@ pub fn run() {
             crate::living_state::init();
             crate::mood::init();
             crate::detail_memory::init();
+    crate::life_narrative::init();
+    crate::relationship::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {

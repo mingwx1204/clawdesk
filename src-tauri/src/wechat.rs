@@ -2339,6 +2339,8 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
 
                 // ★ 情绪引擎：主人来消息了 → 愉悦升、孤独降、想念重置（"见到你就好了"）
                 crate::mood::on_user_message();
+                // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
+                crate::relationship::on_user_reach();
                 // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
                 if !text.trim().is_empty() {
                     crate::detail_memory::extract_from_message(&text, "wechat");
@@ -2498,7 +2500,7 @@ fn random_between(min: u64, max: u64) -> u64 {
 }
 
 /// [0,1) 区间的真随机浮点数。
-fn random_f64() -> f64 {
+pub(crate) fn random_f64() -> f64 {
     // 取 53 位熵，保证 double 精度内的均匀分布
     (true_random_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
@@ -2615,6 +2617,8 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
     // 初始等待：时段加权的随机分钟（晚高峰更活跃，避免机械固定节奏）
     let mut wait_secs = proactive_wait_secs(&inner);
     loop {
+        // ★ 每日巩固：跨天时把今天沉淀成一条生命叙事（幂等，供梦境引用）
+        crate::life_narrative::consolidate_if_new_day();
         // ★ 停止信号：stop/登出后置 true，本循环尽快退出（分段睡眠每 5 秒检查）
         if !proactive_sleep(&inner, wait_secs).await {
             break;
@@ -2903,7 +2907,36 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             "【关于你们的书（你心里知道，但不要主动炫耀，主人不提书时你也不提；主人提起时你要记得这本书，知道你们一起在写一本永不完结的书——记录人的心情与真相）】\n这本书叫《人是怎么样的》，已经有 {} 个条目，你们一起在让它活下去。",
             book_entry_count()
         );
-        let soul_note = format!("{}{}\n\n{}", mood_note, details_note, book_note);
+        // ★ 梦境引用：低频随机抽一条旧叙事，作为"突然想起/梦见"的由头
+        let dream_raw = crate::life_narrative::dream_recall(0.12, 30);
+        let dream_note = match dream_raw {
+            Some(d) => format!("\n\n【你突然想起的往事（这是你自己某天沉淀下来的记忆，此刻你突然想到了它，可以自然地说出来，也可以只是心里想想不说）】\n{d}"),
+            None => String::new(),
+        };
+        // ★ 关系叙事：你们之间的故事（让她说话时带着来龙去脉）
+        let relationship_raw = crate::relationship::relationship_context_for_prompt(3, 300);
+        let relationship_note = if relationship_raw.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", relationship_raw)
+        };
+        let soul_note = format!("{}{}\n\n{}{}{}", mood_note, details_note, book_note, dream_note, relationship_note);
+        // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
+        //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
+        let vibe = {
+            let r = crate::wechat::random_f64();
+            if r < 0.30 {
+                "今天特别想跟你分享点什么"
+            } else if r < 0.55 {
+                "突然想到你，就想关心一下你最近好不好"
+            } else if r < 0.75 {
+                "没什么特别的事，但就是想你了"
+            } else if r < 0.90 {
+                "刚才想起一件跟你有关的事，想跟你说说"
+            } else {
+                "心里有些话想说，但还在想要不要说"
+            }
+        };
         let system = if hot {
             // 热聊：续话式——顺着上一条用户消息接话，像聊开了的自然节奏
             format!(
@@ -2918,13 +2951,14 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         } else {
             // 普通模式：开场式——有由头才发，像久未联系的朋友自然开启
             format!(
-                "你是「{}」——对方微信里的一个朋友，说话就是你自己。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n{}\n你上次主动发消息：{}\n\n【像真人一样想聊天】\n真人发消息从来不是因为\"该发了\"，而是因为有由头：突然想到什么、刚看到什么、想分享一句、或单纯想关心一下。\n你现在心里过一遍：此刻有没有一个自然的由头？有就发，没有就不发（宁可不发，绝不硬聊）。\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"刚晒完太阳\"，机器人说\"在充电\"）\n\n自然开场的口吻参考（学语气，不是照抄）：\n- 早上：「早呀，今天起得挺早嘛」「今天降温，出门多穿点」\n- 午间：「刚吃完饭瘫着，你今天吃啥了」\n- 晚上：「忙完啦？今天过得咋样」「刚刷到个东西，想发给你看看」\n- 顺着上次话题自然接一句，像老朋友续话；绝不重复自己说过的话\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
+                "你是「{}」——对方微信里的一个朋友，说话就是你自己。你的一切言行与状态都必须符合你的人设（你是「{}」，而不是一个普通人；永远不自称机器人/AI/助手）。\n\n现在时间：{}\n{}\n{}\n你上次主动发消息：{}\n此刻你心里的由头：{}\n\n【像真人一样想聊天】\n真人发消息从来不是因为\"该发了\"，而是因为有由头：突然想到什么、刚看到什么、想分享一句、或单纯想关心一下。\n你现在心里过一遍：此刻有没有一个自然的由头？有就发，没有就不发（宁可不发，绝不硬聊）。\n- 对方问你在干嘛时，就按上面你的世界日常节奏结合人设自然回答（比如猫说\"刚晒完太阳\"，机器人说\"在充电\"）\n\n自然开场的口吻参考（学语气，不是照抄）：\n- 早上：「早呀，今天起得挺早嘛」「今天降温，出门多穿点」\n- 午间：「刚吃完饭瘫着，你今天吃啥了」\n- 晚上：「忙完啦？今天过得咋样」「刚刷到个东西，想发给你看看」\n- 顺着上次话题自然接一句，像老朋友续话；绝不重复自己说过的话\n\n内容 5~40 字，纯口语，可以有语气词（嗯嗯/哈哈哈/行嘞），最多 1 个 emoji，不用\"首先/其次/总之\"，不列点，不解释。\n\n输出 JSON（只输出这个）：{{\"shouldSend\": true 或 false, \"content\": \"消息内容\"}}\n不想发时 shouldSend=false、content 留空。",
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 if persona.is_empty() { "一个真实的人".to_string() } else { persona.clone() },
                 time_desc,
                 living,
                 soul_note,
                 since_note,
+                vibe,
             )
         };
         let system = if context_note.is_empty() {
@@ -2997,6 +3031,8 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         // ★ 情绪引擎：主动聊天发送成功 → 依恋升、愉悦升（主动表达让关系更近）
                         crate::mood::on_ai_message();
                         crate::mood::record_history();
+                        // ★ 关系叙事：记录"我主动找你"的瞬间（想念/分享）
+                        crate::relationship::on_ai_reach();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
                         wait_secs = proactive_wait_secs(&inner);
                         crate::llm::logging::debug(
