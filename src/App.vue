@@ -3,54 +3,19 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import MarkdownIt from "markdown-it";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
 import { useWechatAutoReply } from "./composables/useWechat";
+import { renderMd, escapeHtml } from "./utils/markdown";
+import { fmtTs, fmtArgs, fmtOutput, hasArgs, isTerminal, termInfo, hasToolDetail, toolSummary } from "./utils/messageFormat";
+import type { ChatMsg, ToolCallInfo } from "./types/message";
 
 // ★ 微信自动回复（独立 composable：监听 wechat-message → AI 回复 → 回发）
 const { listenWechatMessages } = useWechatAutoReply(() => apiKey.value);
 
-// Markdown 渲染（html:false 安全模式：不解析原始 HTML，仅渲染 Markdown 语法）
-const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
-// ★ 放行 data:image 协议：允许 AI 回答里 ![图](data:image/png;base64,...) 直接渲染成图片
-//（markdown-it v15 类型未声明 validateLink，运行时直接赋值）
-(md as unknown as { validateLink: (url: string) => boolean }).validateLink = (url: string) =>
-  /^(https?:\/\/|data:image\/|mailto:|#)/i.test(url);
-// ★ 渲染缓存：流式期间每条消息 content 变化时才重算，避免全列表重复渲染 Markdown
-const mdCache = new Map<string, string>();
-function renderMd(text: string): string {
-  if (mdCache.size > 400) mdCache.clear();
-  const cached = mdCache.get(text);
-  if (cached !== undefined) return cached;
-  let out: string;
-  try {
-    out = md.render(text ?? "");
-  } catch {
-    out = text ?? "";
-  }
-  mdCache.set(text, out);
-  return out;
-}
-// 用户消息转义（纯文本，防 XSS）
-function escapeHtml(text: string): string {
-  return (text ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// 代码块渲染：带语言标签 + 复制按钮（点击走全局委托，兼容 Tauri CSP）
-md.renderer.rules.fence = (tokens, idx) => {
-  const token = tokens[idx];
-  const lang = (token.info || "").trim().split(/\s+/)[0] || "";
-  const content = token.content || "";
-  const head = `<div class="code-head"><span class="code-lang">${escapeHtml(lang) || "code"}</span><button class="code-copy">复制</button></div>`;
-  const code = `<pre class="code-pre"><code>${escapeHtml(content)}</code></pre>`;
-  return `<div class="code-block">${head}${code}</div>`;
-};
+// Markdown 渲染与代码块复制逻辑已拆至 ./utils/markdown（renderMd/escapeHtml/fence）。
+// onDocClick 保留在此（需访问 openImageViewer）。
 
 /** 代码块复制（全局 click 委托）。 */
 function onDocClick(e: MouseEvent) {
@@ -104,26 +69,7 @@ function onDocKeydown(e: KeyboardEvent) {
  * 底部：输入栏（支持图片粘贴/拖拽/上传）+ 状态栏（API Key）
  */
 
-interface ChatMsg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: number;
-  thinking?: string; // 思考链（可折叠显示）
-  thinkingOpen?: boolean;
-  toolCalls?: ToolCallInfo[];
-  images?: string[]; // dataUrl 预览
-  attachments?: string[]; // 附件文件绝对路径（非图片，任意文件）
-}
-
-interface ToolCallInfo {
-  toolId: string;
-  arguments: unknown;
-  status: "running" | "success" | "error" | "danger";
-  output?: unknown;
-  error?: string;
-  open?: boolean; // 输出详情是否展开（默认收起；运行中自动展开）
-}
+// ChatMsg / ToolCallInfo 类型已拆至 ./types/message（供消息区/工具卡复用）
 
 const apiKey = ref("");
 // ★ 安全修复：不再硬编码 Key。通过 DPAPI 加密持久化（重启自动恢复），
@@ -903,91 +849,8 @@ function onKeysSaved(keys: { main?: string }) {
   if (keys.main) apiKey.value = keys.main;
 }
 
-// ── v6：工具卡 / 消息辅助 ──
-function fmtTs(ts: number): string {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
-}
-function fmtArgs(a: unknown): string {
-  let s: string;
-  try {
-    s = typeof a === "string" ? a : JSON.stringify(a);
-  } catch {
-    s = String(a);
-  }
-  // ★ 超长参数截断，防止命令行刷屏
-  if (s.length > 300) {
-    return s.slice(0, 300) + " …";
-  }
-  return s;
-}
-function fmtOutput(o: unknown): string {
-  let s: string;
-  try {
-    s = typeof o === "string" ? o : JSON.stringify(o);
-  } catch {
-    s = String(o);
-  }
-  // ★ 超长输出（如大 base64）截断显示，防止刷屏
-  if (s.length > 1000) {
-    return s.slice(0, 1000) + " …（内容过长，已截断显示）";
-  }
-  return s;
-}
+// 工具卡 / 消息辅助函数已拆至 ./utils/messageFormat（fmtTs/fmtArgs/fmtOutput/isTerminal/termInfo/hasArgs/hasToolDetail/toolSummary）
 
-// ── 终端卡片（builtin:terminal 在对话区以真实终端窗口渲染）──
-function isTerminal(tc: ToolCallInfo): boolean {
-  return tc.toolId.toLowerCase().includes("terminal");
-}
-function termInfo(tc: ToolCallInfo): { exitCode: number | null; stdout: string; stderr: string; cmd: string } {
-  let exitCode: number | null = null;
-  let stdout = "";
-  let stderr = "";
-  const o = tc.output;
-  if (o && typeof o === "object") {
-    const obj = o as Record<string, unknown>;
-    if (typeof obj.exitCode === "number") exitCode = obj.exitCode;
-    if (typeof obj.stdout === "string") stdout = obj.stdout;
-    if (typeof obj.stderr === "string") stderr = obj.stderr;
-  } else if (typeof o === "string") {
-    stdout = o;
-  }
-  let cmd = "";
-  const a = tc.arguments;
-  if (a && typeof a === "object") {
-    const c = (a as Record<string, unknown>).command;
-    if (typeof c === "string") cmd = c;
-  } else if (typeof a === "string") {
-    try {
-      const p = JSON.parse(a);
-      if (p && typeof p.command === "string") cmd = p.command;
-    } catch {
-      cmd = a;
-    }
-  }
-  return { exitCode, stdout, stderr, cmd };
-}
-function hasArgs(a: unknown): boolean {
-  if (a == null) return false;
-  if (typeof a === "string") return a.trim().length > 0;
-  if (typeof a === "object") return Object.keys(a as object).length > 0;
-  return true;
-}
-function hasToolDetail(tc: ToolCallInfo): boolean {
-  if (tc.output || tc.error) return true;
-  if (isTerminal(tc)) {
-    const ti = termInfo(tc);
-    return !!(ti.cmd || ti.stdout || ti.stderr || ti.exitCode !== null);
-  }
-  return hasArgs(tc.arguments);
-}
-function toolSummary(tc: ToolCallInfo): string {
-  if (isTerminal(tc)) return termInfo(tc).cmd || "(无命令)";
-  return fmtArgs(tc.arguments);
-}
 function toggleAgent() {
   agentOn.value = !agentOn.value;
   const m = currentMode.value === "off" ? "yolo" : currentMode.value;
