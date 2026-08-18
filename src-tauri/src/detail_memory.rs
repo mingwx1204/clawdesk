@@ -166,31 +166,40 @@ pub fn all_details() -> Vec<DetailMemory> {
 
 /// 删除一条细节（按文本精确匹配）。
 pub fn forget(text: &str) -> bool {
-    let mut g = details().lock().unwrap_or_else(|e| e.into_inner());
-    let before = g.len();
-    g.retain(|d| d.text != text);
-    let removed = before - g.len();
+    let removed = {
+        let mut g = details().lock().unwrap_or_else(|e| e.into_inner());
+        let before = g.len();
+        g.retain(|d| d.text != text);
+        before - g.len()
+    };
     if removed > 0 {
-        // 重写整个文件（删除场景低频，可接受）
-        let path = details_file();
-        let _ = std::fs::create_dir_all(details_dir());
-        if let Ok(mut f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path) {
-            for d in g.iter() {
-                if let Ok(json) = serde_json::to_string(d) {
-                    let _ = writeln!(f, "{json}");
-                }
-            }
-        }
+        // 复用 flush_disk 全量重写（删除场景低频，可接受）
+        flush_disk();
     }
     removed > 0
 }
 
-/// 标记一条细节被引用过（AI 提起时调用，影响遗忘权重）。
-#[allow(dead_code)] // 供后续阶段（被看见引用追踪）
+/// 标记一条细节被想起过（AI 注入 prompt 时调用，影响遗忘权重）。
+/// 只改内存，批量落盘由调用方随后调用「flush_disk」统一处理（避免高频重写文件）。
 pub fn mark_used(text: &str) {
     let mut g = details().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(d) = g.iter_mut().find(|d| d.text == text) {
         d.used += 1;
+    }
+}
+
+/// 全量重写落盘（内存里的 used 累加 → 写回 details.jsonl）。
+/// 由 details_context_for_prompt 在注入后调用一次；删除场景也复用（低频可接受）。
+fn flush_disk() {
+    let g = details().lock().unwrap_or_else(|e| e.into_inner());
+    let path = details_file();
+    let _ = std::fs::create_dir_all(details_dir());
+    if let Ok(mut f) = OpenOptions::new().create(true).truncate(true).write(true).open(&path) {
+        for d in g.iter() {
+            if let Ok(json) = serde_json::to_string(d) {
+                let _ = writeln!(f, "{json}");
+            }
+        }
     }
 }
 
@@ -201,8 +210,14 @@ pub fn details_context_for_prompt(recent_max: usize, max_chars: usize) -> String
     if all.is_empty() {
         return String::new();
     }
+    // ══ 遗忘曲线 ══
+    // 排序：被想起次数 used 降序优先（重要的忘不掉），used 相同时按时间从新到旧
+    // （长期未被想起的旧细节 used 低 → 沉底 → 最终被 200 条上限淘汰，像真人慢慢淡忘）。
+    let mut ranked: Vec<DetailMemory> = all;
+    ranked.sort_by(|a, b| b.used.cmp(&a.used).then(b.ts_ms.cmp(&a.ts_ms)));
     let mut parts: Vec<String> = Vec::new();
-    for d in all.iter().take(recent_max) {
+    let mut used_bumped: Vec<String> = Vec::new();
+    for d in ranked.iter().take(recent_max) {
         let when = chrono::DateTime::from_timestamp((d.ts_ms / 1000) as i64, 0)
             .map(|dt| {
                 let dt = dt.with_timezone(&Local);
@@ -222,10 +237,17 @@ pub fn details_context_for_prompt(recent_max: usize, max_chars: usize) -> String
             break;
         }
         parts.push(line);
+        used_bumped.push(d.text.clone());
     }
     if parts.is_empty() {
         return String::new();
     }
+    // 被选中注入的细节「又被想起来一次」→ used+1（正反馈：AI 反复想起的细节逐渐固化）
+    for t in used_bumped {
+        mark_used(&t);
+    }
+    // 一次性落盘 used 累加（避免每条细节各重写一次文件）
+    flush_disk();
     format!("【你记得的关于主人的事（被看见：这些是他随口提过、你放在心上的。自然聊天时可以提起，但不要一口气全说出来，像真人一样在合适的时机提到）】
 {}", parts.join("
 "))
@@ -278,6 +300,35 @@ mod tests {
         remember("主人喜欢喝美式", "test", "饮品");
         assert!(forget("主人喜欢喝美式"));
         assert!(all_details().is_empty());
+    }
+
+    #[test]
+    fn forgetting_curve_prefers_used_details() {
+        let _g = lock();
+        details().lock().unwrap().clear();
+        // 旧的但反复想起过的细节（used 高）
+        remember("主人不吃香菜", "test", "食物,忌口");
+        remember("主人喜欢喝美式", "test", "饮品");
+        // 手动标记前一调为被想起过 3 次
+        for _ in 0..3 {
+            mark_used("主人不吃香菜");
+        }
+        // 只取 1 条：应选中 used 更高的「香菜」，而非更新的「美式」
+        let ctx = details_context_for_prompt(1, 400);
+        assert!(ctx.contains("香菜"), "遗忘曲线应优先想起 used 高的细节，got: {ctx}");
+        assert!(!ctx.contains("美式"), "used 低的新细节应沉底，got: {ctx}");
+    }
+
+    #[test]
+    fn context_injection_bumps_used_and_persists() {
+        let _g = lock();
+        details().lock().unwrap().clear();
+        remember("主人养了一只猫", "test", "宠物");
+        let before = all_details()[0].used;
+        // 注入一次 prompt → used +1 并落盘
+        let _ = details_context_for_prompt(5, 400);
+        let after = all_details()[0].used;
+        assert_eq!(after, before + 1, "注入 prompt 应把 used +1");
     }
 }
 
