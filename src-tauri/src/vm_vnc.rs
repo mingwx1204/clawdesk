@@ -1264,9 +1264,11 @@ pub async fn vm_screenshot() -> Result<serde_json::Value, String> {
         screen_text.chars().count(),
         screen_text.chars().take(150).collect::<String>().replace('\n', " / ")
     ));
+    // ★ 2026-08-17 修复：不返回 dataUrl（图片 base64 太大，纯文本模型看不懂还导致
+    //   工具结果被 LLM 截断——AI 看不到全部 screenText）。只返回 screenText + path。
+    let _ = data_url;
     Ok(json!({
         "path": path,
-        "dataUrl": data_url,
         "width": w,
         "height": h,
         "screenText": screen_text,
@@ -1575,13 +1577,17 @@ pub fn vm_send(to: String, text: String) -> Result<serde_json::Value, String> {
     //     且已打开目标联系人的聊天窗口（AI 自己用 vm_click_spot(chatN) 或搜索打开）。
     //   ★ 中文输入：type_unicode 直接打字（ASCII 标准 keysym 有效；中文尝试 Unicode keysym，
     //     若输入法在中文模式可上屏；否则 AI 可用 vm_paste_utf8 兜底）。
-    // 1. 点击输入框聚焦
+    // 1. 中文输入：记事本中转剪贴板（★ type_unicode 打中文微信不认，消息发不出去；
+    //    记事本中转把中文正确放进剪贴板，再 Ctrl+V 粘贴）
+    set_clipboard_utf8(&text)?;
+    crate::wechat_ui::wait_ms(800);
+    // 2. 重新聚焦微信输入框（记事本关闭后焦点可能丢失）
     let _ = vm_click_spot("input".to_string());
     crate::wechat_ui::wait_ms(800);
-    // 2. 打字
-    type_unicode(&text)?;
+    // 3. 粘贴
+    press_combo("ctrl+v")?;
     crate::wechat_ui::wait_ms(800);
-    // 3. 回车发送（微信 PC 端 Enter 发送）
+    // 4. 回车发送（微信 PC 端 Enter 发送）
     press_combo("enter")?;
     Ok(json!({
         "ok": true,

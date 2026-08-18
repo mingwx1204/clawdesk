@@ -961,7 +961,10 @@ async function handleSend(
 function vmActivityPrompt(): string {
   return (
     "【虚拟机微信监视】屏幕可能有新动静（新消息/界面变化）。\n" +
-    "★ 任务：用 vm_screenshot 看屏幕（返回 screenText=自动读屏结果，以它为准）——如果有微信新消息（尤其 iamond 发来的），先打开对应会话（vm_click_spot(chat1/2/3) 或搜索），再截图读到消息内容，然后用 vm_send 回复对方（自然口语化，像真人回微信）。\n" +
+    "★ 任务（⚡要快，别反复操作）：先 vm_screenshot 看屏幕（返回 screenText=自动读屏结果，以它为准）。\n" +
+    "  - 如果 screenText 显示微信聊天窗口里有对方新消息 → **直接 vm_send 回复**（不用再截图/点击/确认）；\n" +
+    "  - 如果当前打开的会话不对（不是 iamond）→ 用 vm_click_spot(chat1/2/3) 点对会话，**最多再截图一次**确认，然后 vm_send 回复；\n" +
+    "  - 整个回复过程【最多 2~3 个工具】，做完就结束，不要反复截图确认。\n" +
     "★ 你是文本模型，看不懂图片：只信 vm_screenshot 返回的 screenText，不要用 python/ocr/terminal 自己分析截图。\n" +
     "★ 窗口管理套路（主人教的，必须照做）：\n" +
     "  - 屏幕被记事本/其他窗口挡住、看不清微信 → vm_key(win+d) 回桌面清场（所有窗口最小化）→ vm_key(ctrl+alt+w) 弹出微信主窗口 → vm_screenshot 确认\n" +

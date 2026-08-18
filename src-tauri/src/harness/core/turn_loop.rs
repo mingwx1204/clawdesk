@@ -47,11 +47,13 @@ pub static ENGINE_RT: std::sync::LazyLock<tokio::runtime::Runtime> =
 // ══════════════════════════════════════════════════════════════
 
 /// 单轮调度总超时（看门狗级别）。
-pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(600);
+/// ★ 2026-08-17 调大：本地视觉/OCR + 工具多轮操作耗时，600s 不够（AI 处理被 300s 取消）
+pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(900);
 /// 单个工具执行超时。
-pub const TOOL_EXEC_TIMEOUT: Duration = Duration::from_secs(480);
+pub const TOOL_EXEC_TIMEOUT: Duration = Duration::from_secs(600);
 /// SSE 单块空闲超时。
-pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// ★ 2026-08-17 调大：opencode 思考/生成可能停顿 60s+，300s 会误杀
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// 心跳刷新间隔。
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// 心跳停滞判定阈值。
