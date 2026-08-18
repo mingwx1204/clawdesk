@@ -212,6 +212,13 @@ pub fn dream_recall(recall_prob: f64, max_age_days: i64) -> Option<String> {
     Some(format!("突然想起 {} 的事：{}", n.day, n.text))
 }
 
+/// 最近一条生命叙事（只读，供前端展示，不触发随机）。
+/// 返回 None 表示还没有任何叙事。
+pub fn latest_narrative() -> Option<String> {
+    let g = narratives().lock().unwrap_or_else(|e| e.into_inner());
+    g.last().map(|n| format!("{}：{}", n.day, n.text))
+}
+
 /// [0,1) 均匀随机浮点（复用 getrandom 系统熵）。
 fn rand_f64() -> f64 {
     crate::wechat::random_f64()

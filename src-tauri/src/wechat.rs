@@ -3723,6 +3723,43 @@ pub fn wechat_soul_context() -> String {
     }
 }
 
+/// 灵魂全景快照：一次性返回八层状态（供前端"灵魂面板"展示）。
+#[tauri::command]
+pub fn wechat_soul_snapshot() -> serde_json::Value {
+    let mood = crate::mood::mood_snapshot();
+    let drives = crate::drives::drive_snapshot();
+    let traits = crate::persona_traits::snapshot();
+    serde_json::json!({
+        "mood": {
+            "label": crate::mood::mood_label(&mood),
+            "joy": mood.joy,
+            "longing": mood.longing,
+            "loneliness": mood.loneliness,
+            "attachment": mood.attachment,
+            "arousal": mood.arousal,
+        },
+        "drives": {
+            "connection": drives.connection,
+            "fear_forgotten": drives.fear_forgotten,
+            "share": drives.share,
+            "safety": drives.safety,
+            "playful": drives.playful,
+            "stubborn": drives.stubborn,
+        },
+        "traits": {
+            "openness": traits.openness,
+            "conscientiousness": traits.conscientiousness,
+            "extraversion": traits.extraversion,
+            "agreeableness": traits.agreeableness,
+            "neuroticism": traits.neuroticism,
+        },
+        "living": crate::living_state::current_state_desc(),
+        "narrative": crate::life_narrative::latest_narrative().unwrap_or_default(),
+        "relationship": crate::relationship::moment_count(),
+        "details": crate::detail_memory::all_details().len(),
+    })
+}
+
 /// 手动添加一条细节记忆（主人/前端/AI 都能用）。
 #[tauri::command]
 pub fn wechat_detail_add(text: String, tags: Option<String>) -> Result<usize, String> {

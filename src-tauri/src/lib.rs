@@ -315,6 +315,7 @@ pub fn run() {
             wechat::wechat_living_context,
             wechat::wechat_mood_state,
             wechat::wechat_soul_context,
+    wechat::wechat_soul_snapshot,
             wechat::wechat_detail_add,
             wechat::wechat_detail_list,
             wechat::wechat_detail_forget,

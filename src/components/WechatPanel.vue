@@ -64,6 +64,9 @@ const log = ref<string[]>([]);
 /** AI 生活状态（世界线：此刻在做什么，时间与真实时钟同步） */
 const livingState = ref("");
 const moodState = ref<string>("");
+/** 灵魂全景快照（八层状态，供"灵魂面板"展示） */
+const soulSnap = ref<any>(null);
+const soulOpen = ref(false);
 
 // ── 人设编辑 ──
 const personaText = ref("");
@@ -428,6 +431,10 @@ async function refreshStatus() {
     const m = await invoke<any>("wechat_mood_state");
     if (m?.label) moodState.value = m.label;
   } catch { /* 静默 */ }
+  // ★ 灵魂全景：一次性拉取八层状态
+  try {
+    soulSnap.value = await invoke<any>("wechat_soul_snapshot");
+  } catch { /* 静默 */ }
 }
 
 async function startQr() {
@@ -651,6 +658,48 @@ async function testReply() {
             <div class="wc-row"><span>聊天记录</span><b>{{ cur?.historyCount ?? 0 }} 条（D 盘）</b></div>
             <div class="wc-row"><span>AI 生活状态</span><b class="wc-living">{{ livingState || "—" }}</b></div>
             <div class="wc-row"><span>AI 心情</span><b class="wc-living">{{ moodState || "平静" }}</b></div>
+            <hr class="wc-split" />
+            <!-- ★ 灵魂面板（折叠展开） -->
+            <div class="wc-soul" v-if="soulSnap">
+              <button class="wc-soul-toggle" @click="soulOpen = !soulOpen">{{ soulOpen ? '▾' : '▸' }} 💗 灵魂面板</button>
+              <div v-show="soulOpen" class="wc-soul-body">
+                <!-- OCEAN 人格底色 -->
+                <div class="wc-soul-card">
+                  <div class="wc-soul-title">🧬 人格底色（OCEAN）</div>
+                  <div class="wc-bar-row"><span>开放</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.openness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>尽责</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.conscientiousness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>外向</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.extraversion*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>宜人</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.traits.agreeableness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>神经</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.traits.neuroticism*100)+'%'}"></span></span></div>
+                </div>
+                <!-- 驱动力 -->
+                <div class="wc-soul-card">
+                  <div class="wc-soul-title">🔥 此刻内在劲</div>
+                  <div class="wc-bar-row"><span>渴望联结</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.drives.connection*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>怕被遗忘</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.drives.fear_forgotten*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>分享欲</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.drives.share*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>安全感</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.drives.safety*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>顽皮</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-fun" :style="{width: (soulSnap.drives.playful*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>小执拗</span><span class="wc-bar"><span :style="{width: (soulSnap.drives.stubborn*100)+'%', fontSize:'80%',color:'#999'}">{{ soulSnap.drives.stubborn > 0.2 ? '今天有点小脾气' : '—' }}</span></span></div>
+                </div>
+                <!-- 情绪 -->
+                <div class="wc-soul-card">
+                  <div class="wc-soul-title">💫 情绪（{{ soulSnap.mood.label }}）</div>
+                  <div class="wc-bar-row"><span>愉悦</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-fun" :style="{width: (soulSnap.mood.joy*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>想念</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.mood.longing*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>孤独</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.mood.loneliness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>依恋</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.mood.attachment*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>强度</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.mood.arousal*100)+'%'}"></span></span></div>
+                </div>
+                <!-- 生活 / 叙事 / 关系 / 记忆 -->
+                <div class="wc-soul-card">
+                  <div class="wc-soul-title">🌱 生活 · 记忆</div>
+                  <div class="wc-soul-text">{{ soulSnap.living }}</div>
+                  <div v-if="soulSnap.narrative" class="wc-soul-text" style="color:#999;margin-top:4px">📖 {{ soulSnap.narrative }}</div>
+                  <div class="wc-soul-text" style="margin-top:4px">💞 关系记忆 {{ soulSnap.relationship }} 条 · 📌 细节记忆 {{ soulSnap.details }} 条</div>
+                </div>
+              </div>
+            </div>
             <div class="wc-row"><span>自动回复</span><b>
               <label class="wc-switch">
                 <input type="checkbox" :checked="autoReply" @change="(e: any) => setAutoReply((e.target as HTMLInputElement).checked)" />
@@ -1429,4 +1478,72 @@ async function testReply() {
   outline: none;
 }
 .wc-num-input:focus { border-color: #3b82f6; }
+
+/* ── 灵魂面板 ── */
+.wc-split { border: none; border-top: 1px solid #2c3a55; margin: 8px 0; }
+.wc-soul { margin: 4px 0; }
+.wc-soul-toggle {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: #f0b7d0;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 0;
+  text-align: left;
+}
+.wc-soul-toggle:hover { color: #f5c9dc; }
+.wc-soul-body {
+  margin-top: 6px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+.wc-soul-card {
+  background: #1a2236;
+  border: 1px solid #2c3a55;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.wc-soul-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a8b6d4;
+  margin-bottom: 6px;
+}
+.wc-soul-text {
+  font-size: 11px;
+  color: #cfd9ec;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.wc-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+  font-size: 10px;
+  color: #8b99b8;
+}
+.wc-bar-row > span:first-child {
+  flex: 0 0 52px;
+  text-align: right;
+}
+.wc-bar {
+  flex: 1;
+  height: 8px;
+  background: #0e1424;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.wc-bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #4f7cff, #7aa0ff);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+.wc-bar-fill.wc-bar-warm { background: linear-gradient(90deg, #ff7aa8, #ff9ec0); }
+.wc-bar-fill.wc-bar-sens { background: linear-gradient(90deg, #8b7aff, #b3a8ff); }
+.wc-bar-fill.wc-bar-fun { background: linear-gradient(90deg, #ffb34f, #ffcf7a); }
 </style>
