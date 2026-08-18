@@ -270,7 +270,6 @@ pub fn on_user_message() {
 }
 
 /// AI 主动发了消息：依恋小升（主动表达会让关系更近）。
-#[allow(dead_code)] // 供后续阶段（自由生活/主动聊天）调用
 pub fn on_ai_message() {
     let mut m = mood().lock().unwrap_or_else(|e| e.into_inner());
     m.attachment = (m.attachment + 0.008).min(1.0);

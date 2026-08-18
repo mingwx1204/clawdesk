@@ -2877,7 +2877,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         //   修仙者→闭关修炼），任何自定义人设都不会违和。
         let living_raw = crate::living_state::living_context_for_prompt();
         let living = format!(
-            "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}",
+            "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}\n【分享欲】\n你是一个有自己生活的人，今天经历了一些事（上面你的时间线）。如果其中有你想分享的——比如刚吃了什么、刚做了什么、遇到了什么——这正是主动找对方聊天的好由头，像真人分享自己的日常一样自然。",
             living_raw
         );
         // ★ 情绪注入（心 · 心情状态机）：AI 此刻的心情（想念/孤独/深夜情绪放大…），
@@ -2994,6 +2994,9 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                             });
                             st.sessions.update(session);
                         }
+                        // ★ 情绪引擎：主动聊天发送成功 → 依恋升、愉悦升（主动表达让关系更近）
+                        crate::mood::on_ai_message();
+                        crate::mood::record_history();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
                         wait_secs = proactive_wait_secs(&inner);
                         crate::llm::logging::debug(
