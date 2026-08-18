@@ -143,9 +143,10 @@ fn drift(mut m: MoodState, now: u64) -> MoodState {
         m.longing = 0.15;
     }
 
-    // 孤独：沉默 + 深夜放大
+    // 孤独：沉默 + 深夜放大（神经质高的人深夜情绪放大更明显，OCEAN 调制）
     let lonely_base = 0.2 + 0.45 * (1.0 - (-silence_h / 8.0).exp());
-    let night_bonus = if night { 0.25 } else { 0.0 };
+    let amp = crate::persona_traits::night_amplification();
+    let night_bonus = if night { 0.25 * amp } else { 0.0 };
     m.loneliness = (lonely_base + night_bonus).min(0.95);
 
     // 愉悦：回归基线 0.6（缓慢），深夜略微下沉（白天撑着的坚强，夜里浮上来）
@@ -154,10 +155,11 @@ fn drift(mut m: MoodState, now: u64) -> MoodState {
     if night {
         m.joy = (m.joy - 0.05).max(0.15);
     }
-    // 深夜情绪放大：arousal 按分钟随机波动
+    // 深夜情绪放大：arousal 按分钟随机波动（神经质高的人波动更剧烈，OCEAN 调制）
     if night {
         let minute = Local::now().minute() as f64;
-        m.arousal = 0.3 + 0.6 * ((minute / 59.0).sin().abs() * 0.5 + 0.5 * ((silence_h / 2.0).fract()));
+        let amp = crate::persona_traits::night_amplification();
+        m.arousal = 0.3 + 0.6 * amp * ((minute / 59.0).sin().abs() * 0.5 + 0.5 * ((silence_h / 2.0).fract()));
         m.arousal = m.arousal.clamp(0.2, 0.9);
     } else {
         m.arousal = m.arousal * 0.98 + 0.3 * 0.02;

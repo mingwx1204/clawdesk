@@ -26,6 +26,8 @@ mod life_narrative;
 mod relationship;
 // ── 驱动力层（内在动机 · 人格涌现的源头，借鉴 OpenHer） ──
 mod drives;
+// ── 人格底座（OCEAN 大五人格 · 心理学锚点，借鉴 character-sim） ──
+mod persona_traits;
 
 use commands::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -348,6 +350,7 @@ pub fn run() {
     crate::life_narrative::init();
     crate::relationship::init();
     crate::drives::init();
+    crate::persona_traits::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {

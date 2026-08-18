@@ -2341,6 +2341,10 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 crate::mood::on_user_message();
                 // ★ 驱动力：收到消息 → 渴望联结回落、害怕被遗忘缓解、顽皮升
                 crate::drives::on_user_message();
+                // ★ 人格演化：你的温柔回应让她慢慢变得更安心（OCEAN 极慢演化）
+                if crate::wechat::random_f64() < 0.3 {
+                    crate::persona_traits::evolve(true);
+                }
                 // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
                 crate::relationship::on_user_reach();
                 // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
@@ -2886,6 +2890,9 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}\n【分享欲】\n你是一个有自己生活的人，今天经历了一些事（上面你的时间线）。如果其中有你想分享的——比如刚吃了什么、刚做了什么、遇到了什么——这正是主动找对方聊天的好由头，像真人分享自己的日常一样自然。",
             living_raw
         );
+        // ★ 人格底座注入（OCEAN 五维 · 借鉴 character-sim）：刻在骨子里的稳定性情，
+        //   不知不觉渗进每个反应。
+        let traits_raw = crate::persona_traits::traits_context_for_prompt();
         // ★ 驱动力注入（内在动机 · 借鉴 OpenHer）：人格不靠人设硬演，
         //   而是从此刻最强烈的几股内在劲里自然长出来。
         let drives_raw = crate::drives::drives_context_for_prompt();
@@ -2925,7 +2932,9 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         } else {
             format!("\n\n{}", relationship_raw)
         };
-        let soul_note = format!("{}\n\n{}{}\n\n{}{}{}", drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
+        // traits_raw 可能为空（五维都不极端时），空则跳过不拼
+        let traits_note = if traits_raw.is_empty() { String::new() } else { format!("{}\n\n", traits_raw) };
+        let soul_note = format!("{}{}\n\n{}{}\n\n{}{}{}", traits_note, drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
         // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
         //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
         let vibe = {
@@ -3038,6 +3047,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         crate::mood::record_history();
                         // ★ 驱动力：主动发消息 → 分享欲回落、渴望联结小落
                         crate::drives::on_ai_message();
+                        // ★ 人格演化：主动表达也是一次亲密互动（OCEAN 极慢演化）
+                        if crate::wechat::random_f64() < 0.3 {
+                            crate::persona_traits::evolve(true);
+                        }
                         // ★ 关系叙事：记录"我主动找你"的瞬间（想念/分享）
                         crate::relationship::on_ai_reach();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
