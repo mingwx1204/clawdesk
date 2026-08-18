@@ -2440,7 +2440,7 @@ fn time_desc_now() -> String {
     )
 }
 
-/// 真随机：基于系统时间纳秒 + 原子计数混合的伪随机数（足够打散主动聊天时机，无需加密级随机）
+/// 伪随机：基于系统时间纳秒 + 原子计数混合（仅作为真随机失败时的兜底，不再是主动聊天的熵源）。
 fn pseudo_rand() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering as AtOrd};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2458,12 +2458,42 @@ fn pseudo_rand() -> u64 {
     x ^ (x >> 31)
 }
 
-/// [min, max] 闭区间内取随机整数
-fn rand_between(min: u64, max: u64) -> u64 {
+/// 系统级真随机 u64（getrandom 熵源）。
+/// 真随机用于主动聊天间隔，避免伪随机被系统时间/计数器规律预测。
+/// 极低概率失败时回退到伪随机，保证功能可用。
+fn true_random_u64() -> u64 {
+    let mut buf = [0u8; 8];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        return u64::from_le_bytes(buf);
+    }
+    pseudo_rand()
+}
+
+/// [min, max] 闭区间内取真随机整数。
+fn random_between(min: u64, max: u64) -> u64 {
     if max <= min {
         return min;
     }
-    min + pseudo_rand() % (max - min + 1)
+    // 拒绝采样去掉模偏差，保证区间内均匀分布
+    let span = max - min + 1;
+    loop {
+        let v = true_random_u64();
+        let threshold = u64::MAX - (u64::MAX % span);
+        if v <= threshold {
+            return min + v % span;
+        }
+    }
+}
+
+/// [0,1) 区间的真随机浮点数。
+fn random_f64() -> f64 {
+    // 取 53 位熵，保证 double 精度内的均匀分布
+    (true_random_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// 舍弃的真随机 [min,max] 整数别名，保留旧调用点兼容（语义同 random_between）。
+fn rand_between(min: u64, max: u64) -> u64 {
+    random_between(min, max)
 }
 
 /// 热聊检测：用户最近 HOT_WINDOW 分钟内回过消息 → 热聊中。
@@ -2474,37 +2504,56 @@ fn is_hot_chat(inner: &Arc<WechatInner>) -> bool {
     last > 0 && now_millis().saturating_sub(last) <= HOT_WINDOW_MS
 }
 
-/// 主动聊天的间隔等待（秒）：按时段加权，模拟真人的活跃分布。
-/// - 晚高峰（18~22 点）最活跃 → 间隔缩短（2.5×）
-/// - 早高峰（8~9 点）1.5× / 午间（12~13 点）1.2×
-/// - 其余时段按用户配置的随机区间原样
-/// 保底 min/2 分钟，避免间隔过密连发。
-/// ★ 热聊模式（用户 30 分钟内回过消息）：2~6 分钟短间隔，像真人聊开了的节奏；
-///   冷场后自动回到用户配置的区间。
+/// 主动聊天的间隔等待（秒）：真随机泊松分布，模拟真人随性发起聊天的节奏。
+/// ★ 真随机熵源：getrandom 系统熵（非伪随机），间隔不可预测、无规律可循。
+/// ★ 泊松分布（Poisson）：真人消息间隔大多靠近均值、偶尔短偶尔长，拒绝机械均匀。
+/// ★ 时段活跃度：晚高峰（18~22）λ 缩短最活跃，早/午轻微加速，深夜（23~08）静默。
+/// ★ 热聊模式（30 分钟内用户回过）：切到 2~6 分钟短 λ 泊松，聊开了的续话节奏。
+/// ★ 返回秒级间隔，proactive_loop 用分段睡眠等待，边等边响应停止信号。
 fn proactive_wait_secs(inner: &Arc<WechatInner>) -> u64 {
-    if is_hot_chat(inner) {
-        // ★ 热聊间隔取 max(配置min, 2分钟) ~ max(配置min, 6分钟)，
-        //   不绕过用户配置的下限（用户要求更慢时热聊也必须尊重）
-        let min_cfg = *inner.proactive_interval_min.lock();
-        return rand_between(min_cfg.max(2), min_cfg.max(6)) * 60;
+    use chrono::Timelike;
+    let hour = chrono::Local::now().hour();
+    if hour < 8 || hour >= 23 {
+        return random_between(30, 60) * 60;
     }
     let min = *inner.proactive_interval_min.lock();
     let max = *inner.proactive_interval_max.lock();
-    let wait = rand_between(min, max) * 60;
-    use chrono::Timelike;
-    let hour = chrono::Local::now().hour();
+    if is_hot_chat(inner) {
+        let lo = min.max(2);
+        let hi = min.max(6).max(lo + 1);
+        let lambda = ((lo + hi) as f64) / 2.0;
+        return poisson_sample(lambda).clamp(lo, hi) * 60;
+    }
     let activity = match hour {
-        8..=9 => 1.5,
-        12..=13 => 1.2,
-        18..=22 => 2.5,
+        8..=9 => 0.5,
+        12..=13 => 0.7,
+        18..=22 => 0.3,
         _ => 1.0,
     };
-    if activity <= 1.0 {
-        return wait;
+    let eff_min = ((min as f64) * activity).max(1.0) as u64;
+    let eff_max = ((max as f64) * activity).max((eff_min as f64) + 1.0) as u64;
+    let lambda = ((eff_min + eff_max) as f64) / 2.0;
+    let wait = poisson_sample(lambda).clamp(eff_min, eff_max) * 60;
+    wait.max(60).min(24 * 3600)
+}
+
+fn poisson_sample(lambda: f64) -> u64 {
+    if lambda <= 0.0 {
+        return 0;
     }
-    let scaled = (wait as f64 / activity) as u64;
-    let floor = (min.max(1) * 30) as u64; // 至少 min/2 分钟
-    scaled.max(floor)
+    let cutoff = (-lambda).exp();
+    let mut k: u64 = 0;
+    let mut p = 1.0;
+    loop {
+        k += 1;
+        p *= random_f64();
+        if p <= cutoff {
+            return k - 1;
+        }
+        if k > 10_000 {
+            return k;
+        }
+    }
 }
 
 /// 从可能包含说明文字的输出中提取第一个 JSON 对象（{...}）。
