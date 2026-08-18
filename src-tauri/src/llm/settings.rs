@@ -196,10 +196,6 @@ fn default_max_tool_rounds() -> usize { 15 }
 fn default_font_size() -> u32 { 14 }
 fn default_self_evolve_model() -> String { "deepseek-chat".into() }
 fn default_evolve_threshold() -> f64 { 0.6 }
-fn default_opencode_watch_endpoint() -> String {
-    "https://opencode.ai/zen/go/v1/chat/completions".into()
-}
-fn default_opencode_watch_interval() -> u64 { 120 }
 
 // ── ⑬ 朗读 / TTS 设置（Edge TTS 神经网络拟人音色） ──
 fn default_tts_enabled() -> bool { true }
@@ -309,23 +305,6 @@ pub struct AppSettings {
     #[serde(default = "default_evolve_threshold")]
     pub self_evolve_threshold: f64,
 
-    // ── ⑫ opencode 网关自动回切 ──
-    /// 是否启用：持续检测 opencode 网关，恢复后自动把主/视觉模型切回 opencode
-    #[serde(default)]
-    pub opencode_watch_enabled: bool,
-    /// 检测的 opencode 完整端点（回切时作为 modelEndpoint / visionEndpoint）
-    #[serde(default = "default_opencode_watch_endpoint")]
-    pub opencode_watch_endpoint: String,
-    /// 回切时使用的主/视觉 API Key（opencode key；DPAPI 加密存储，不落明文）
-    // 说明：opencode_watch_api_key 已从 AppSettings 移除并迁入 ApiKeys.opencode_watch，
-    // 旧 settings.json 中的 opencodeWatchApiKey 字段在 SettingsStore::new 时迁移到
-    // keys.enc（DPAPI），并在下次保存 settings.json 时自动清除明文。
-    #[serde(default, skip)]
-    pub opencode_watch_api_key: String,
-    /// 检测间隔（秒）
-    #[serde(default = "default_opencode_watch_interval")]
-    pub opencode_watch_interval_secs: u64,
-
     // ── ⑬ 朗读 / TTS 设置（Edge TTS 神经网络拟人音色） ──
     /// 是否启用 AI 朗读（输出完自动朗读）
     #[serde(default = "default_tts_enabled")]
@@ -389,10 +368,6 @@ impl Default for AppSettings {
             self_evolve_model: "deepseek-chat".into(),
             self_evolve_auto: false,
             self_evolve_threshold: 0.6,
-            opencode_watch_enabled: false,
-            opencode_watch_endpoint: default_opencode_watch_endpoint(),
-            opencode_watch_api_key: String::new(),
-            opencode_watch_interval_secs: default_opencode_watch_interval(),
             // ⑬ 朗读 / TTS
             tts_enabled: default_tts_enabled(),
             tts_voice: default_tts_voice(),
@@ -465,9 +440,6 @@ pub struct ApiKeys {
     pub main: String,
     pub vision: String,
     pub image: String,
-    /// opencode 网关回切用 Key（同样 DPAPI 加密，不落 settings.json 明文）
-    #[serde(default)]
-    pub opencode_watch: String,
 }
 
 /// 共享设置容器：AppState 持有，运行时可改，每轮推理读取。
@@ -517,21 +489,6 @@ impl SettingsStore {
                 eprintln!("[SETTINGS] 已从加密文件恢复 API Key（{} 字节）",
                     enc.main.len().min(4));
                 keys = enc;
-            }
-        }
-        // ★ 旧版本迁移：settings.json 中残留的明文 opencodeWatchApiKey
-        //   迁入加密 keys.enc（此后 settings.json 不再包含该明文）。
-        if keys.opencode_watch.is_empty() {
-            if let Ok(text) = std::fs::read_to_string(settings_path()) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(k) = v.get("opencodeWatchApiKey").and_then(|x| x.as_str()) {
-                        if !k.is_empty() {
-                            keys.opencode_watch = k.to_string();
-                            save_encrypted_keys(&keys);
-                            eprintln!("[SETTINGS] 已将 opencode Key 迁移到加密存储");
-                        }
-                    }
-                }
             }
         }
         Self {
@@ -653,11 +610,9 @@ mod tests {
                 main: "k_main".into(),
                 vision: "k_vision".into(),
                 image: "k_image".into(),
-                opencode_watch: "k_opencode".into(),
             });
             let keys = store.keys();
             assert_eq!(keys.main, "k_main");
-            assert_eq!(keys.opencode_watch, "k_opencode");
             // 持久化文件不含 key
             let persisted = std::fs::read_to_string(settings_path()).unwrap_or_default();
             assert!(!persisted.contains("sk-secret-main"));

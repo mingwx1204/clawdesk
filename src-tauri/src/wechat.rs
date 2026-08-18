@@ -1480,7 +1480,6 @@ async fn send_message_once(
 }
 
 /// 发送文本消息到微信用户（遇 -14 session timeout 时先 notifyStart 再重发一次）
-/// pub(crate)：定时任务（scheduler.rs）推送结果时也会调用。
 pub(crate) async fn send_message(
     inner: &Arc<WechatInner>,
     to: &str,

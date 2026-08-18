@@ -1160,16 +1160,8 @@ pub fn snapshot_diff(snapshot_id: String) -> Result<serde_json::Value, String> {
 /// 读取完整应用设置（五大标签页配置，项目 7）。
 #[tauri::command]
 pub fn settings_get(state: State<'_, AppState>) -> serde_json::Value {
-    let mut v = serde_json::to_value(state.settings.get())
-        .unwrap_or(serde_json::json!({}));
-    // ★ 注入 opencode Key（实际存于 DPAPI keys.enc，前端照常读取）
-    if let serde_json::Value::Object(ref mut map) = v {
-        map.insert(
-            "opencodeWatchApiKey".into(),
-            serde_json::Value::String(state.settings.keys().opencode_watch),
-        );
-    }
-    v
+    serde_json::to_value(state.settings.get())
+        .unwrap_or(serde_json::json!({}))
 }
 
 /// 读取运行时 API Key（仅内存态，不持久化）。用于前端在组件重载后恢复 Key，
@@ -1192,17 +1184,8 @@ pub fn settings_set(
         if let Some(v) = map.get("mainKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.main = v.to_string(); } }
         if let Some(v) = map.get("visionKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.vision = v.to_string(); } }
         if let Some(v) = map.get("imageKey").and_then(|v| v.as_str()) { if !v.is_empty() { keys.image = v.to_string(); } }
-        // ★ opencode 回切 Key：同样只进内存 + DPAPI 加密存储（不落 settings.json 明文）
-        if let Some(v) = map.get("opencodeWatchApiKey").and_then(|v| v.as_str()) {
-            if !v.is_empty() { keys.opencode_watch = v.to_string(); }
-        }
         state.settings.set_keys(keys);
         auto_start_val = map.get("autoStart").and_then(|v| v.as_bool());
-    }
-    let mut patch = patch;
-    // ★ 从持久化补丁中剥离明文 Key（apply → save 不会写入 settings.json）
-    if let serde_json::Value::Object(map) = &mut patch {
-        map.remove("opencodeWatchApiKey");
     }
     let updated = state.settings.apply(patch)?;
     // ★ 开机自启动：设置变更时同步写入/删除注册表 Run 键
