@@ -24,6 +24,8 @@ mod self_evolve;
 mod life_narrative;
 // ── 主观关系叙事（我们之间的故事 · 关系记忆） ──
 mod relationship;
+// ── 驱动力层（内在动机 · 人格涌现的源头，借鉴 OpenHer） ──
+mod drives;
 
 use commands::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -345,6 +347,7 @@ pub fn run() {
             crate::detail_memory::init();
     crate::life_narrative::init();
     crate::relationship::init();
+    crate::drives::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {

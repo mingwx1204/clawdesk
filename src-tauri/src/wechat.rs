@@ -2339,6 +2339,8 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
 
                 // ★ 情绪引擎：主人来消息了 → 愉悦升、孤独降、想念重置（"见到你就好了"）
                 crate::mood::on_user_message();
+                // ★ 驱动力：收到消息 → 渴望联结回落、害怕被遗忘缓解、顽皮升
+                crate::drives::on_user_message();
                 // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
                 crate::relationship::on_user_reach();
                 // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
@@ -2884,6 +2886,9 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             "【你的世界日常节奏（这是你所在世界的真实时间线。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动：比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹）】\n{}\n【分享欲】\n你是一个有自己生活的人，今天经历了一些事（上面你的时间线）。如果其中有你想分享的——比如刚吃了什么、刚做了什么、遇到了什么——这正是主动找对方聊天的好由头，像真人分享自己的日常一样自然。",
             living_raw
         );
+        // ★ 驱动力注入（内在动机 · 借鉴 OpenHer）：人格不靠人设硬演，
+        //   而是从此刻最强烈的几股内在劲里自然长出来。
+        let drives_raw = crate::drives::drives_context_for_prompt();
         // ★ 情绪注入（心 · 心情状态机）：AI 此刻的心情（想念/孤独/深夜情绪放大…），
         //   让主动消息自带"我有自己的心情"的真实感——想念了会想找人说话，
         //   心情好会想分享，低落时可能安静。
@@ -2920,7 +2925,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         } else {
             format!("\n\n{}", relationship_raw)
         };
-        let soul_note = format!("{}{}\n\n{}{}{}", mood_note, details_note, book_note, dream_note, relationship_note);
+        let soul_note = format!("{}\n\n{}{}\n\n{}{}{}", drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
         // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
         //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
         let vibe = {
@@ -3031,6 +3036,8 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         // ★ 情绪引擎：主动聊天发送成功 → 依恋升、愉悦升（主动表达让关系更近）
                         crate::mood::on_ai_message();
                         crate::mood::record_history();
+                        // ★ 驱动力：主动发消息 → 分享欲回落、渴望联结小落
+                        crate::drives::on_ai_message();
                         // ★ 关系叙事：记录"我主动找你"的瞬间（想念/分享）
                         crate::relationship::on_ai_reach();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
