@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -80,6 +80,10 @@ const sessionNames = ref<Record<string, string>>({}); // 会话自定义名（id
 const branches = ref<Record<string, string[]>>({});
 const checkpoints = ref<Record<string, boolean>>({});
 const messages = ref<ChatMsg[]>([]);
+/** 按需渲染历史消息：初始只渲染最近 MSG_PAGE 条，滚动到顶部时增量加载更多。 */
+const MSG_PAGE = 50;
+const visibleCount = ref(MSG_PAGE);
+const displayMessages = computed(() => messages.value.slice(Math.max(0, messages.value.length - visibleCount.value)));
 const running = ref(false);
 const runId = ref("");
 /** 流式输出状态（项目 8：打字机逐字渲染 + 工具进度实时渲染）。 */
@@ -230,9 +234,11 @@ async function loadSessionMessages(id: string) {
         // 若后端会话含图片（dataUrl / 本地路径）则保留，切换会话后仍可浏览
         images: Array.isArray(m.images) && m.images.length ? m.images : undefined,
       }));
+    visibleCount.value = MSG_PAGE; // 切换会话后只渲染最近 MSG_PAGE 条
   } catch (e) {
     console.error("加载会话消息失败", e);
     messages.value = [];
+    visibleCount.value = MSG_PAGE;
   }
   // 加载/切换会话后强制滚到底部（重进软件无需手动下滑）
   await nextTick();
@@ -490,7 +496,23 @@ function isNearBottom(): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 }
 function onMsgsScroll(): void {
-  void isNearBottom();
+  const el = msgsRef.value;
+  if (!el) return;
+  // 滚动到顶部（含小缓冲）且仍有更旧消息未渲染时，增量加载一批
+  if (el.scrollTop < 40) void loadMoreMessages();
+}
+/** 向上滚动到顶部时，把更旧的一批消息纳入渲染，并补偿滚动位置避免视口跳变。 */
+async function loadMoreMessages(): Promise<void> {
+  const total = messages.value.length;
+  if (visibleCount.value >= total) return; // 已全部渲染
+  const el = msgsRef.value;
+  const prevHeight = el ? el.scrollHeight : 0;
+  visibleCount.value = Math.min(total, visibleCount.value + MSG_PAGE);
+  await nextTick();
+  if (el) {
+    // 新增内容撑高了 scrollHeight，补偿 scrollTop 使原视口内容保持不动
+    el.scrollTop = el.scrollHeight - prevHeight;
+  }
 }
 function scrollToBottom(force = false): void {
   const el = msgsRef.value;
@@ -952,7 +974,7 @@ function toggleAgent() {
 
       <!-- 消息区 -->
       <main ref="msgsRef" class="msgs" @scroll="onMsgsScroll">
-        <div v-for="m in messages" :key="m.id" class="msg" :class="m.role === 'user' ? 'user' : 'ai'">
+        <div v-for="m in displayMessages" :key="m.id" class="msg" :class="m.role === 'user' ? 'user' : 'ai'">
           <div class="msg-wrap">
             <div class="meta">
               <span>{{ m.role === 'user' ? '你' : 'ClawDesk' }} · [{{ fmtTs(m.timestamp) }}]</span>
