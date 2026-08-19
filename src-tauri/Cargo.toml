@@ -80,7 +80,7 @@ md-5 = "0.10"
 # ── 新增：大厂 Agent 工具链 ────────────────────────────────
 # ① 浏览器自动化（headless Chrome）＋ HTML 解析
 headless_chrome = "1"
-scraper = "0.22"
+# scraper = "0.22"  # ★ 死依赖移除：代码中从未 use scraper（自进化模块的 selector 与 Rust crate scraper 无关）
 # ② 图表生成（Mermaid → SVG，调用本地 mermaid-cli 或前端渲染）
 # 前端渲染用 mermaid.js，后端只输出语法文本（无需额外 crate）
 # ③ Python 沙箱（subprocess + 安全约束）
