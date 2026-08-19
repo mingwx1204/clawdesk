@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { settingsApi, routerApi } from "../utils/api";
 
 /**
  * 设置面板（极简版）：
@@ -56,7 +56,7 @@ async function detectModels() {
   detectModelsText.value = "正在检索可用模型…";
   detectedModels.value = [];
   try {
-    const r = await invoke<any>("list_models", { apiKey: key, endpoint });
+    const r = await routerApi.listModels(key, endpoint);
     const arr: any[] = Array.isArray(r?.models) ? r.models : [];
     detectedModels.value = arr
       .map((m) => (typeof m.id === "string" ? m.id : ""))
@@ -79,7 +79,7 @@ async function checkBalance() {
   mainBalanceLoading.value = true;
   mainBalanceText.value = "查询中…";
   try {
-    const r = await invoke<any>("check_balance", { apiKey: key, endpoint: endpointUrl });
+    const r = await routerApi.checkBalance(key, endpointUrl);
     const infos: any[] = Array.isArray(r?.balance_infos) ? r.balance_infos : [];
     if (r?.is_available === false) {
       mainBalanceText.value = "账户不可用";
@@ -102,7 +102,7 @@ async function checkBalance() {
 
 async function load() {
   try {
-    settings.value = await invoke<AppSettings>("settings_get");
+    settings.value = await settingsApi.get();
   } catch (e) {
     error.value = `加载设置失败：${String(e)}`;
   }
@@ -110,7 +110,7 @@ async function load() {
 
 async function loadKeys(): Promise<void> {
   try {
-    const k = await invoke<{ main?: string; vision?: string; image?: string }>("settings_get_keys");
+    const k = await settingsApi.getKeys();
     if (k?.main) mainKey.value = k.main;
     if (k?.vision) visionKey.value = k.vision;
     if (k?.image) imageKey.value = k.image;
@@ -122,7 +122,7 @@ async function patch(p: Record<string, unknown>): Promise<void> {
   saving.value = true;
   tip.value = "";
   try {
-    settings.value = await invoke<AppSettings>("settings_set", { patch: p });
+    settings.value = await settingsApi.set(p);
     tip.value = "✅ 已保存（即时生效）";
   } catch (e) {
     tip.value = `❌ 保存失败：${String(e)}`;
@@ -149,7 +149,7 @@ async function saveKeys(): Promise<void> {
     if (m) p.mainKey = m;
     if (v) p.visionKey = v;
     if (i) p.imageKey = i;
-    settings.value = await invoke<AppSettings>("settings_set", { patch: p });
+    settings.value = await settingsApi.set(p);
     emit("keys", { main: m, vision: v, image: i });
     keysSavedTip.value = "✅ Key 已保存";
     setTimeout(() => { keysSavedTip.value = ""; }, 2500);
