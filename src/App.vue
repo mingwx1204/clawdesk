@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { sessionsApi, chatApi, settingsApi, routerApi, searchApi, systemApi } from "./utils/api";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
@@ -154,7 +154,7 @@ onMounted(async () => {
   await loadSessionUsage(); // 启动时加载真实上下文占用
   // 恢复内存态 API Key（后端 AppState 持有）；未配置时自动填入用户提供的 DeepSeek Key
   try {
-    const k = await invoke<{ main?: string }>("settings_get_keys");
+    const k = await settingsApi.getKeys();
     if (k?.main) {
       apiKey.value = k.main;
     } else {
@@ -172,7 +172,7 @@ onMounted(async () => {
   document.addEventListener("keydown", onDocKeydown);
   // 恢复外观设置（重启后保持）：深色模式 + 界面不透明度
   try {
-    const s = await invoke<any>("settings_get");
+    const s = await settingsApi.get();
     if (s?.darkTheme) document.documentElement.setAttribute("data-theme", "dark");
     if (typeof s?.uiOpacity === "number") {
       document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
@@ -200,7 +200,7 @@ onUnmounted(() => {
 /** 查询最近一次未捕获异常：弹中文报错 + 自动终止当前任务。 */
 async function checkLastError() {
   try {
-    const err = await invoke<{ message: string; location: string; logPath: string; timestamp?: string } | null>("app_last_error");
+    const err = await systemApi.lastError();
     if (!err) return;
     // 只弹最近 10 分钟内的异常，避免历史残留记录（如 cargo test 失败）被误报为运行时异常
     if (err.timestamp) {
@@ -210,14 +210,14 @@ async function checkLastError() {
       }
     }
     window.alert(`⚠️ ClawDesk 捕获到未处理异常：\n\n${err.message}\n位置：${err.location}\n\n详细日志：${err.logPath}\n\n已自动终止当前任务。`);
-    if (runId.value) await invoke("agent_cancel", { runId: runId.value });
+    if (runId.value) await chatApi.cancel(runId.value);
   } catch { /* 查询失败静默 */ }
 }
 
 /** 加载指定会话的历史消息（切换会话时恢复显示）。 */
 async function loadSessionMessages(id: string) {
   try {
-    const msgs = await invoke<any[]>("agent_session_messages", { sessionId: id });
+    const msgs = await sessionsApi.messages(id);
     const list = msgs ?? [];
     messages.value = list
       .filter((m: any) => m.role === "user" || m.role === "assistant")
@@ -258,7 +258,7 @@ async function renameSession(id: string) {
   if (name === null) return;
   const trimmed = name.trim();
   try {
-    await invoke("agent_session_rename", { sessionId: id, newName: trimmed });
+    await sessionsApi.rename(id, trimmed);
     if (trimmed) sessionNames.value[id] = trimmed;
     else delete sessionNames.value[id];
   } catch (e) {
@@ -267,10 +267,10 @@ async function renameSession(id: string) {
 }
 
 async function refreshSessions() {
-  sessions.value = await invoke<string[]>("agent_sessions");
+  sessions.value = await sessionsApi.list();
   // 会话自定义名（id -> name），用于显示友好名
   try {
-    const metas = await invoke<{ id: string; name?: string | null }[]>("agent_session_metas");
+    const metas = await sessionsApi.metas();
     const m: Record<string, string> = {};
     for (const x of metas ?? []) if (x?.name) m[x.id] = x.name;
     sessionNames.value = m;
@@ -280,11 +280,11 @@ async function refreshSessions() {
   const cp: Record<string, boolean> = {};
   for (const s of sessions.value) {
     try {
-      const br = await invoke<string[]>("agent_branches", { parentId: s });
+      const br = await sessionsApi.branches(s);
       if (br.length) b[s] = br;
     } catch { /* ignore */ }
     try {
-      const ck = await invoke<unknown>("agent_checkpoint", { sessionId: s });
+      const ck = await sessionsApi.checkpoint(s);
       cp[s] = ck != null;
     } catch { /* ignore */ }
   }
@@ -295,7 +295,7 @@ async function refreshSessions() {
 /** Fork 分支会话（§十二.2）：完整拷贝记忆，新会话独立。 */
 async function forkSession(id: string) {
   const newId = `branch-${Date.now()}`;
-  await invoke("agent_fork", { sourceId: id, newId });
+  await sessionsApi.fork(id, newId);
   sessionId.value = newId;
   await loadSessionMessages(newId); // fork 拷贝了父会话记忆，需恢复显示
   await refreshSessions();
@@ -311,7 +311,7 @@ async function resumeSession(id: string) {
 
 async function loadConfig() {
   try {
-    maxRounds.value = await invoke<number>("agent_get_max_rounds");
+    maxRounds.value = await chatApi.maxRounds();
   } catch (e) {
     console.error("加载最大轮数失败", e);
   }
@@ -542,7 +542,7 @@ function stopTypewriter(): void {
 /** 加载当前会话的真实上下文占用（后端 agent_session_usage：累计 token + 内容估算细分）。 */
 async function loadSessionUsage() {
   try {
-    const r = await invoke<any>("agent_session_usage", { sessionId: sessionId.value });
+    const r = await sessionsApi.usage(sessionId.value);
     if (!r) return;
     ctxPct.value = r.pct ?? 0;
     const win = r.windowTokens ?? 0;
@@ -598,9 +598,9 @@ async function exportSession() {
   if (exporting.value) return;
   exporting.value = true;
   try {
-    const path = await invoke<string>("session_export", { sessionId: sessionId.value });
+    const path = await searchApi.export(sessionId.value);
     window.alert(`✅ 会话已导出：\n${path}\n\n将打开所在文件夹。`);
-    await invoke("win_open_in_explorer", { path }).catch(() => {});
+    await systemApi.openInExplorer(path).catch(() => {});
   } catch (e) {
     window.alert(`❌ 导出失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
   } finally {
@@ -614,7 +614,7 @@ async function doSearch() {
   if (!kw) return;
   searching.value = true;
   try {
-    searchResults.value = await invoke<any[]>("session_search", { keyword: kw });
+    searchResults.value = await searchApi.search(kw);
   } catch (e) {
     console.error("搜索失败", e);
     searchResults.value = [];
@@ -663,7 +663,7 @@ async function handleSend(
         attachments.map((p) => `- ${p}`).join("\n") +
         "\n以上附件已保存到本地磁盘，如需要请调用 file_read 工具读取内容。";
     }
-    const outcome = await invoke<any>("agent_chat", {
+    const outcome = await chatApi.chat({
       apiKey: apiKey.value.trim(),
       sessionId: opts?.sessionId ?? sessionId.value,
       runId: runId.value,
@@ -716,7 +716,7 @@ async function handleCancel() {
   // ★ 先向后端发起取消（等待其确认），再重置前端状态，避免旧任务继续跑产生双任务
   const id = runId.value;
   if (id) {
-    try { await invoke("agent_cancel", { runId: id }); } catch { /* 取消失败不阻塞 UI */ }
+    try { await chatApi.cancel(id); } catch { /* 取消失败不阻塞 UI */ }
   }
   stopTypewriter();
   streamingMsgId.value = null;
@@ -765,7 +765,7 @@ function confirmNewSession() {
 }
 async function deleteSession(id: string) {
   try {
-    await invoke("agent_session_delete", { sessionId: id });
+    await sessionsApi.delete(id);
   } catch (e) {
     window.alert(`删除会话失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
     return;
@@ -786,7 +786,7 @@ const MODELS = [
 function selectModel(m: string) {
   selectedModel.value = m;
   if (m === "deepseek-v4-flash" || m === "deepseek-v4-pro") {
-    void invoke("router_set_main_model", { model: m }).catch(() => {});
+    void routerApi.setMainModel(m).catch(() => {});
   }
 }
 // ── v6：权限确认弹窗 ──
@@ -794,11 +794,11 @@ function requestPermission(toolId: string, args: string, callId?: string) {
   permRequest.value = { toolId, args, callId };
 }
 function approvePermission() {
-  if (permRequest.value?.callId) void invoke("agent_confirm_call", { callId: permRequest.value.callId, approve: true }).catch(() => {});
+  if (permRequest.value?.callId) void chatApi.confirmCall(permRequest.value.callId, true).catch(() => {});
   permRequest.value = null;
 }
 function denyPermission() {
-  if (permRequest.value?.callId) void invoke("agent_confirm_call", { callId: permRequest.value.callId, approve: false }).catch(() => {});
+  if (permRequest.value?.callId) void chatApi.confirmCall(permRequest.value.callId, false).catch(() => {});
   permRequest.value = null;
 }
 
