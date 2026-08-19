@@ -1,0 +1,91 @@
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
+
+/* Typography */
+h1, h2, h3 { font-weight: 600; color: var(--color-text); }
+h1 { font-size: 22px; } h2 { font-size: 18px; } h3 { font-size: 15px; }
+p { color: var(--color-text-secondary); }
+
+/* Buttons */
+button {
+  font-family: var(--font-sans); font-size: 13px;
+  cursor: pointer; border: none; background: none;
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
+}
+button:hover { color: var(--color-text); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--color-accent); color: #fff;
+  padding: 7px 16px; border-radius: var(--radius-sm);
+}
+.btn-primary:hover { background: var(--color-accent-hover); }
+
+.btn-danger {
+  background: var(--color-danger); color: #fff;
+  padding: 7px 16px; border-radius: var(--radius-sm);
+}
+
+.btn-ghost {
+  background: none; border: 1px solid var(--color-border);
+  padding: 6px 14px; border-radius: var(--radius-sm);
+}
+
+/* Inputs */
+input, textarea, select {
+  font-family: var(--font-sans); font-size: 13px;
+  padding: 8px 12px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-input-bg); color: var(--color-text);
+  transition: border-color var(--transition-fast);
+}
+input:focus, textarea:focus, select:focus {
+  outline: none; border-color: var(--color-accent);
+}
+
+/* Code */
+code, pre {
+  font-family: var(--font-mono); font-size: 12px;
+}
+pre {
+  background: var(--color-code-bg); border-radius: var(--radius-sm);
+  padding: 10px 14px; overflow-x: auto;
+  color: var(--color-text-secondary);
+}
+
+/* Overlay */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+
+/* Spinner */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 16px; height: 16px; border: 2px solid var(--color-text-muted);
+  border-top-color: var(--color-accent); border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+/* Transitions */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity var(--transition-normal);
+}
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ═══════════════════════════════════════════════════════
+   ClawDesk v6 —— 动漫壁纸 + 半透明气泡布局
+   ═══════════════════════════════════════════════════════ */
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { height:100%; overflow:hidden; font-family:var(--font); color:var(--txt); }
+body { background:#0a0a0f; }
+#app { height:100vh; }
+
+::-webkit-scrollbar { width:7px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:rgba(0,0,0,.18); border-radius:4px; }
+
