@@ -678,12 +678,12 @@ async function testReply() {
               <div v-show="soulOpen" class="wc-soul-body">
                 <!-- OCEAN 人格底色 -->
                 <div class="wc-soul-card">
-                  <div class="wc-soul-title">🧬 人格底色（OCEAN）</div>
-                  <div class="wc-bar-row"><span>开放</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.openness*100)+'%'}"></span></span></div>
-                  <div class="wc-bar-row"><span>尽责</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.conscientiousness*100)+'%'}"></span></span></div>
-                  <div class="wc-bar-row"><span>外向</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.extraversion*100)+'%'}"></span></span></div>
-                  <div class="wc-bar-row"><span>宜人</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.traits.agreeableness*100)+'%'}"></span></span></div>
-                  <div class="wc-bar-row"><span>神经</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.traits.neuroticism*100)+'%'}"></span></span></div>
+                  <div class="wc-soul-title">🧬 人格底色（OCEAN）<span class="wc-anchor-tag" v-if="soulSnap.anchor">锚点 ±{{ Math.round(soulSnap.anchor.range*100) }}%</span></div>
+                  <div class="wc-bar-row"><span>开放</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.openness*100)+'%'}"></span><span class="wc-anchor-tick" v-if="soulSnap.anchor" :style="{left: (soulSnap.anchor.baseline.openness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>尽责</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.conscientiousness*100)+'%'}"></span><span class="wc-anchor-tick" v-if="soulSnap.anchor" :style="{left: (soulSnap.anchor.baseline.conscientiousness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>外向</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.traits.extraversion*100)+'%'}"></span><span class="wc-anchor-tick" v-if="soulSnap.anchor" :style="{left: (soulSnap.anchor.baseline.extraversion*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>宜人</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.traits.agreeableness*100)+'%'}"></span><span class="wc-anchor-tick" v-if="soulSnap.anchor" :style="{left: (soulSnap.anchor.baseline.agreeableness*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>神经</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.traits.neuroticism*100)+'%'}"></span><span class="wc-anchor-tick" v-if="soulSnap.anchor" :style="{left: (soulSnap.anchor.baseline.neuroticism*100)+'%'}"></span></span></div>
                 </div>
                 <!-- 驱动力 -->
                 <div class="wc-soul-card">
@@ -1556,6 +1556,7 @@ async function testReply() {
   text-align: right;
 }
 .wc-bar {
+  position: relative;
   flex: 1;
   height: 8px;
   background: #0e1424;
@@ -1572,4 +1573,6 @@ async function testReply() {
 .wc-bar-fill.wc-bar-warm { background: linear-gradient(90deg, #ff7aa8, #ff9ec0); }
 .wc-bar-fill.wc-bar-sens { background: linear-gradient(90deg, #8b7aff, #b3a8ff); }
 .wc-bar-fill.wc-bar-fun { background: linear-gradient(90deg, #ffb34f, #ffcf7a); }
+.wc-anchor-tag { font-size: 9px; color: #6b7b9e; font-weight: normal; margin-left: 4px; }
+.wc-anchor-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #e8eefc; opacity: 0.7; z-index: 2; pointer-events: none; }
 </style>

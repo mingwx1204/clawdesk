@@ -3805,6 +3805,16 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
             "agreeableness": traits.agreeableness,
             "neuroticism": traits.neuroticism,
         },
+        "anchor": {
+            "baseline": {
+                "openness": crate::persona_traits::anchor_snapshot().baseline.openness,
+                "conscientiousness": crate::persona_traits::anchor_snapshot().baseline.conscientiousness,
+                "extraversion": crate::persona_traits::anchor_snapshot().baseline.extraversion,
+                "agreeableness": crate::persona_traits::anchor_snapshot().baseline.agreeableness,
+                "neuroticism": crate::persona_traits::anchor_snapshot().baseline.neuroticism,
+            },
+            "range": crate::persona_traits::anchor_snapshot().range,
+        },
         "living": crate::living_state::current_state_desc(),
         "narrative": crate::life_narrative::latest_narrative().unwrap_or_default(),
         "relationship": crate::relationship::moment_count(),
