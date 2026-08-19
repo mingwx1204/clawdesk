@@ -228,7 +228,9 @@ fn rand_f64() -> f64 {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    #[allow(dead_code)]
     static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+    #[allow(dead_code)]
     fn lock() -> std::sync::MutexGuard<'static, ()> {
         SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
     }
