@@ -206,7 +206,7 @@ pub async fn list_models(
         .build()
         .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
 
-    let mut candidates = vec![format!("{origin}/models"), format!("{origin}/v1/models")];
+    let candidates = vec![format!("{origin}/models"), format!("{origin}/v1/models")];
 
     let mut last_err = String::new();
     let mut raw: Option<serde_json::Value> = None;

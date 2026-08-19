@@ -76,7 +76,7 @@ pub async fn harness_start_task(app: tauri::AppHandle, state: State<'_, AppState
 
     let params = ModelParams { model: cfg.model.clone(), reasoning_effort: cfg.effort, ..Default::default() };
     // 技能按需加载（方案 1）：固定保留 builtin/mcp，skillhub 技能按消息检索 top-N
-    let mut selected = crate::llm::tool_selector::select_tools(
+    let selected = crate::llm::tool_selector::select_tools(
         &registry.list(),
         &prompt,
         crate::llm::tool_selector::DEFAULT_TOP_N,
