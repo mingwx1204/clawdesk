@@ -8,6 +8,8 @@ import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
 import { useWechatAutoReply } from "./composables/useWechat";
 import { useSessions } from "./composables/useSessions";
+import { useImageViewer } from "./composables/useImageViewer";
+import { useClock } from "./composables/useClock";
 import { renderMd, escapeHtml } from "./utils/markdown";
 import { fmtTs, fmtArgs, fmtOutput, hasArgs, isTerminal, termInfo, hasToolDetail, toolSummary } from "./utils/messageFormat";
 import type { ChatMsg, ToolCallInfo } from "./types/message";
@@ -53,23 +55,10 @@ function onDocClick(e: MouseEvent) {
 }
 
 // ── 图片查看器（点击图片放大浏览，左右切换 / Esc 关闭） ──
-const imageViewer = ref<{ list: string[]; index: number } | null>(null);
-function openImageViewer(list: string[], index: number) {
-  imageViewer.value = { list, index };
-}
-function ivPrev() {
-  if (!imageViewer.value) return;
-  const n = imageViewer.value.list.length;
-  imageViewer.value.index = (imageViewer.value.index - 1 + n) % n;
-}
-function ivNext() {
-  if (!imageViewer.value) return;
-  const n = imageViewer.value.list.length;
-  imageViewer.value.index = (imageViewer.value.index + 1) % n;
-}
+const { imageViewer, openImageViewer, ivPrev, ivNext, ivClose } = useImageViewer();
 function onDocKeydown(e: KeyboardEvent) {
   if (!imageViewer.value) return;
-  if (e.key === "Escape") imageViewer.value = null;
+  if (e.key === "Escape") ivClose();
   else if (e.key === "ArrowLeft") ivPrev();
   else if (e.key === "ArrowRight") ivNext();
 }
@@ -121,10 +110,8 @@ const exporting = ref(false);
 const sidebarCollapsed = ref(false);
 const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
 const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
-const clockTime = ref("");
-const clockDate = ref("");
-// 时区自动保存（localStorage）：设置面板外观页切换后重启不丢失
-const tz = ref(localStorage.getItem("clawdesk_tz") || "Asia/Shanghai");
+// ── 壁纸时钟（时区感知，localStorage 持久化） ──
+const { clockTime, clockDate, tz, updateClock, onTzChange } = useClock();
 const ctxPct = ref(47);
 const ctxTokens = ref("493.4K / 1M 个令牌");
 const ctxItems = ref({ sys: [1.4, 4.7], usr: [19.3, 20.2, 2.8] });
@@ -775,23 +762,6 @@ function denyPermission() {
 }
 
 // ── v6：壁纸时钟 + 时区 ──
-function fmtTime(d: Date, tzs: string): string {
-  return d.toLocaleTimeString("zh-CN", { timeZone: tzs, hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-function fmtDate(d: Date, tzs: string): string {
-  return d.toLocaleDateString("en-US", { timeZone: tzs, year: "numeric", month: "short", day: "numeric", weekday: "long" }).toUpperCase();
-}
-function updateClock() {
-  const now = new Date();
-  clockTime.value = fmtTime(now, tz.value);
-  clockDate.value = fmtDate(now, tz.value);
-}
-/** 时区变更回调（设置面板触发，落盘 localStorage + 刷新时钟）。 */
-function onTzChange(v: string) {
-  tz.value = v;
-  localStorage.setItem("clawdesk_tz", v);
-  updateClock();
-}
 function onMouseMove(e: MouseEvent) {
   if (glowEl) glowEl.style.transform = `translate(${e.clientX - 180}px,${e.clientY - 180}px)`;
   if (artEl) {
