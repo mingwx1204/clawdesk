@@ -695,6 +695,16 @@ async function testReply() {
                   <div class="wc-bar-row"><span>顽皮</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-fun" :style="{width: (soulSnap.drives.playful*100)+'%'}"></span></span></div>
                   <div class="wc-bar-row"><span>小执拗</span><span class="wc-bar"><span :style="{width: (soulSnap.drives.stubborn*100)+'%', fontSize:'80%',color:'#999'}">{{ soulSnap.drives.stubborn > 0.2 ? '今天有点小脾气' : '—' }}</span></span></div>
                 </div>
+                <!-- 好感度（affinity） -->
+                <div class="wc-soul-card" v-if="soulSnap.affinity">
+                  <div class="wc-soul-title">💞 好感度</div>
+                  <div class="wc-bar-row"><span>温暖</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.affinity.warmth*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>信任</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.affinity.trust*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>好奇</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-fun" :style="{width: (soulSnap.affinity.intrigue*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>亲密</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-warm" :style="{width: (soulSnap.affinity.intimacy*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>耐心</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.affinity.patience*100)+'%'}"></span></span></div>
+                  <div class="wc-bar-row"><span>张力</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-sens" :style="{width: (soulSnap.affinity.tension*100)+'%'}"></span></span></div>
+                </div>
                 <!-- 情绪 -->
                 <div class="wc-soul-card">
                   <div class="wc-soul-title">💫 情绪（{{ soulSnap.mood.label }}）</div>

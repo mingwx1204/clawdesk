@@ -30,6 +30,8 @@ mod drives;
 mod persona_traits;
 // ── Ghost 机制（可「已读不回」· 她有自己的状态，借鉴 eros-engine） ──
 mod ghost;
+// ── 好感度模型（六维 affinity · 关系从叙事升级为数值，借鉴 eros-engine） ──
+mod affinity;
 
 use commands::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -355,6 +357,7 @@ pub fn run() {
     crate::drives::init();
     crate::persona_traits::init();
     crate::ghost::init();
+    crate::affinity::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {

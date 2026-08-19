@@ -2347,6 +2347,20 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 }
                 // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
                 crate::relationship::on_user_reach();
+                // ★ 好感度：你主动来找她 → 好奇升（想知道你说啥）、信任微升
+                crate::affinity::on_user_message();
+                // ★ 深聊：消息较长（>80 字）说明在认真聊 → 信任、亲密明显升；
+                //   特别长（>200 字）是倾诉心事 → 强烈升
+                let len_chars = text.chars().count();
+                if len_chars > 200 {
+                    crate::affinity::on_deep_talk_heavy();
+                } else if len_chars > 80 {
+                    crate::affinity::on_deep_talk();
+                }
+                // ★ 小别扭：偶尔（约 8%）带点玩闹式推拉 → 张力微升（关系更多层次）
+                if crate::wechat::random_f64() < 0.08 {
+                    crate::affinity::on_tease();
+                }
                 // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
                 if !text.trim().is_empty() {
                     crate::detail_memory::extract_from_message(&text, "wechat");
@@ -2963,9 +2977,12 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         } else {
             format!("\n\n{}", relationship_raw)
         };
+        // ★ 好感度注入（六维 affinity · 关系亲疏与语气）：决定说话的语气深浅与亲密程度
+        let affinity_raw = crate::affinity::affinity_context_for_prompt();
+        let affinity_note = if affinity_raw.is_empty() { String::new() } else { format!("{}\n\n", affinity_raw) };
         // traits_raw 可能为空（五维都不极端时），空则跳过不拼
         let traits_note = if traits_raw.is_empty() { String::new() } else { format!("{}\n\n", traits_raw) };
-        let soul_note = format!("{}{}\n\n{}{}\n\n{}{}{}", traits_note, drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
+        let soul_note = format!("{}{}{}\n\n{}{}\n\n{}{}{}", affinity_note, traits_note, drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
         // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
         //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
         let vibe = {
@@ -3086,6 +3103,8 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         crate::relationship::on_ai_reach();
                         // ★ Ghost 机制：她成功回复了 → 连续 ghost 计数归零
                         crate::ghost::on_reply();
+                        // ★ 好感度：她主动发消息 → 亲密微升（主动表达拉近距离）
+                        crate::affinity::on_ai_message();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
                         wait_secs = proactive_wait_secs(&inner);
                         crate::llm::logging::debug(
@@ -3793,6 +3812,14 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
         "ghost": {
             "streak": crate::ghost::ghost_snapshot().ghost_streak,
             "last_ghost_ms": crate::ghost::ghost_snapshot().last_ghost_ms,
+        },
+        "affinity": {
+            "warmth": crate::affinity::affinity_snapshot().warmth,
+            "trust": crate::affinity::affinity_snapshot().trust,
+            "intrigue": crate::affinity::affinity_snapshot().intrigue,
+            "intimacy": crate::affinity::affinity_snapshot().intimacy,
+            "patience": crate::affinity::affinity_snapshot().patience,
+            "tension": crate::affinity::affinity_snapshot().tension,
         },
     })
 }
