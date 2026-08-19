@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invokeTool } from "../core/ToolDispatcher";
 
@@ -397,7 +397,7 @@ function removeAttachment(idx: number) {
   color: #5a4a76; font-size: 14px; cursor: pointer; transition: .15s;
   display: flex; align-items: center; justify-content: center;
 }
-.prompt-tag:hover { border-color: rgba(10,132,255,.5); transform: translateY(-1px); }
+.prompt-tag:hover { border-color: rgba(232,122,92,.5); transform: translateY(-1px); }
 .prompt-menu {
   position: absolute; bottom: 36px; left: 0; z-index: 60;
   min-width: 180px; background: rgba(28, 32, 48, 0.97);
@@ -411,7 +411,7 @@ function removeAttachment(idx: number) {
   background: none; border: none; color: #dbe4f0;
   padding: 7px 10px; border-radius: 8px; font-size: 13px; cursor: pointer;
 }
-.pm-item:hover { background: rgba(10,132,255,.15); color: #fff; }
+.pm-item:hover { background: rgba(232,122,92,.15); color: #fff; }
 .preview-row { display: flex; gap: 8px; padding: 0 20px 8px; flex-wrap: wrap; }
 .preview-item { position: relative; width: 60px; height: 60px; }
 .preview-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; border: 1px solid rgba(255,255,255,.5); }
