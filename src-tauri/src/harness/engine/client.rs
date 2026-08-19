@@ -220,6 +220,7 @@ impl LlmClient {
     }
 
     /// 当前端点摘要（不含 key，供状态展示）。
+    #[allow(dead_code)]
     pub fn endpoint_summary(&self) -> serde_json::Value {
         serde_json::json!({ "baseUrl": self.base_url, "protocol": "HTTP/1.1" })
     }

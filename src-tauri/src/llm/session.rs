@@ -68,10 +68,13 @@ pub struct SessionManager {
     /// SQLite 连接（None = 纯内存模式，测试用）。
     db: Mutex<Option<Connection>>,
     /// 触发压缩的消息数阈值。
+    #[allow(dead_code)]
     max_messages: usize,
     /// 触发压缩的总字符数阈值。
+    #[allow(dead_code)]
     max_chars: usize,
     /// 压缩时保留的最近消息条数。
+    #[allow(dead_code)]
     keep_last: usize,
 }
 
@@ -287,6 +290,7 @@ impl SessionManager {
     }
 
     /// 判断是否触发压缩（消息数或字符数超阈值）。
+    #[allow(dead_code)]
     pub fn needs_compaction(&self, session: &AgentSession) -> bool {
         let total_chars: usize = session
             .messages
@@ -302,6 +306,7 @@ impl SessionManager {
     ///   （保留窗口可能以 tool 消息开头、或前置 assistant(tool_calls) 被截掉 →
     ///   DeepSeek HTTP 400 "role 'tool' must be a response to ... 'tool_calls'"）。
     ///   实现思路移植自 harness::engine::context::prune_dangling_tools（Value 版）。
+    #[allow(dead_code)]
     pub fn compact_with(&self, session: &mut AgentSession, summary: String) {
         let keep = self.keep_last.min(session.messages.len());
         let kept = session.messages.split_off(session.messages.len() - keep);
@@ -355,6 +360,7 @@ impl SessionManager {
     }
 
     /// 将会话写入 SQLite（UPSERT）。
+    #[allow(dead_code)]
     pub fn save_checkpoint(&self, cp: &AgentCheckpoint) {
         if let Some(db) = self.db.lock().unwrap().as_ref() {
             let json = serde_json::to_string(cp).unwrap_or_default();
@@ -377,6 +383,7 @@ impl SessionManager {
         None
     }
 
+    #[allow(dead_code)]
     pub fn clear_checkpoint(&self, session_id: &str) {
         if let Some(db) = self.db.lock().unwrap().as_ref() {
             let _ = db.execute("DELETE FROM checkpoints WHERE session_id = ?1", [session_id]);

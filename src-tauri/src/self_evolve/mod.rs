@@ -109,6 +109,7 @@ pub fn ensure_engine_from_settings(
     }
 
     /// 记录一次工具执行结果。
+    #[allow(dead_code)]
     pub fn record_execution(tool_id: &str, success: bool, elapsed_ms: u64, user_reverted: bool) {
         if let Some(engine) = Self::get() {
             engine.tracker.record(tool_id, success, elapsed_ms, user_reverted);

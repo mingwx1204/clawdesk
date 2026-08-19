@@ -60,6 +60,7 @@ impl SkillTracker {
     }
 
     /// 记录一次工具执行。
+    #[allow(dead_code)]
     pub fn record(&self, tool_id: &str, success: bool, elapsed_ms: u64, user_reverted: bool) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -125,6 +126,7 @@ impl SkillTracker {
     }
 
     /// 获取单个工具统计。
+    #[allow(dead_code)]
     pub fn get_stats(&self, tool_id: &str) -> Option<ToolStats> {
         self.stats.lock().unwrap().get(tool_id).cloned()
     }
@@ -161,6 +163,7 @@ impl SkillTracker {
     }
 
     /// 系统退出时落盘。
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         let _ = self.flush();
     }

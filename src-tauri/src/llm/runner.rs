@@ -90,6 +90,7 @@ pub type ConfirmFn = Arc<dyn Fn(&str, &str, &Value) -> bool + Send + Sync>;
 /// 桥接执行器：把现有 ToolDispatcher 包装为引擎 ToolExecutor。
 pub struct DispatcherExecutor {
     /// 工具注册表（引擎确认回调查 def 用）。
+    #[allow(dead_code)]
     pub registry: Arc<ToolRegistry>,
     /// 工具调度器（含沙箱/审计/风险中间件链）。
     pub dispatcher: Arc<ToolDispatcher>,

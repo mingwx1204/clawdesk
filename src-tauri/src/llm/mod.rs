@@ -158,6 +158,7 @@ pub struct Usage {
 
 impl Usage {
     /// 将两段用量相加（用于跨轮累计）。
+    #[allow(dead_code)]
     pub fn add(&mut self, other: &Usage) {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;

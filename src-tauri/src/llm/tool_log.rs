@@ -9,14 +9,17 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// 日志写入互斥（避免并发写交错）。
+#[allow(dead_code)]
 static LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 /// 日志文件路径：`<数据目录>/tool_logs.log`（数据目录优先 D 盘）。
+#[allow(dead_code)]
 fn log_path() -> PathBuf {
     crate::llm::settings::clawdesk_dir().join("tool_logs.log")
 }
 
 /// 记录一次工具调用（追加写，容量由外层按需轮转）。
+#[allow(dead_code)]
 pub fn record(
     tool_id: &str,
     status: &str,
@@ -51,6 +54,7 @@ pub fn record(
 }
 
 /// JSON 摘要截断（char 边界安全）。
+#[allow(dead_code)]
 fn truncate_json(v: &serde_json::Value, max_chars: usize) -> String {
     let s = v.to_string();
     let chars: Vec<char> = s.chars().collect();

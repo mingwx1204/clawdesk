@@ -1,4 +1,4 @@
-﻿//! Agent 运行进度事件 + 取消令牌 + 逐步确认通道。
+//! Agent 运行进度事件 + 取消令牌 + 逐步确认通道。
 //!
 //! - 进度事件经 `ProgressSink` 回调推送给前端（Tauri emit 由命令层封装）；
 //! - 取消令牌为 `Arc<AtomicBool>`，运行循环每步检查，用户可中断；
@@ -59,6 +59,7 @@ impl CancelRegistry {
     }
 
     /// 登记一个待确认调用，返回接收端（runner 等待应答）。
+    #[allow(dead_code)]
     pub fn create_confirm(&self, call_id: String) -> tokio::sync::oneshot::Receiver<bool> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.confirms.lock().unwrap().insert(call_id, tx);
@@ -125,12 +126,14 @@ pub struct ToolCallProgress {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentProgress {
     /// 新一轮开始。
+    #[allow(dead_code)]
     RoundStarted { round: usize },
     /// 模型本轮文本。
     ModelText { round: usize, text: String },
     /// 一次工具调用完成。
     ToolCall(ToolCallProgress),
     /// 上下文压缩发生。
+    #[allow(dead_code)]
     Compaction {
         kept: usize,
         summary_chars: usize,
@@ -149,8 +152,10 @@ pub enum AgentProgress {
         arguments: Value,
     },
     /// 用户取消。
+    #[allow(dead_code)]
     Cancelled,
     /// 循环结束。
+    #[allow(dead_code)]
     Finished {
         final_text: String,
         used_rounds: usize,

@@ -405,6 +405,7 @@ fn ts_to_local_str(ts_ms: u64, fmt: &str) -> String {
 }
 
 /// 事件日志（调试/扩展用）：列出最近生活事件
+#[allow(dead_code)]
 pub fn recent_events() -> Vec<LivingEvent> {
     events().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
 }

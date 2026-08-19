@@ -55,6 +55,7 @@ pub fn build_plan_prompt(user_request: &str) -> String {
 }
 
 /// 将计划注入 system 提示（追加到已有系统提示之后）。
+#[allow(dead_code)]
 pub fn inject_plan_into_system(system: &str, plan_steps: &[String]) -> String {
     if plan_steps.is_empty() {
         return system.to_string();
