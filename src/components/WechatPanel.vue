@@ -719,7 +719,7 @@ async function testReply() {
                   <div class="wc-soul-title">🌱 生活 · 记忆</div>
                   <div class="wc-soul-text">{{ soulSnap.living }}</div>
                   <div v-if="soulSnap.narrative" class="wc-soul-text" style="color:#999;margin-top:4px">📖 {{ soulSnap.narrative }}</div>
-                  <div class="wc-soul-text" style="margin-top:4px">💞 关系记忆 {{ soulSnap.relationship }} 条 · 📌 细节记忆 {{ soulSnap.details }} 条</div>
+                  <div class="wc-soul-text" style="margin-top:4px">💞 关系记忆 {{ soulSnap.relationship }} 条 · 📌 细节记忆 {{ soulSnap.details?.total ?? 0 }} 条（稳定事实 {{ soulSnap.details?.profile ?? 0 }} · 会话时刻 {{ soulSnap.details?.relationship ?? 0 }}）</div>
                   <div v-if="soulSnap.ghost" class="wc-soul-text" style="margin-top:4px;color:#c0a060">
                     👻 连续沉默 {{ soulSnap.ghost.streak }} 次 <span v-if="soulSnap.ghost.last_ghost_ms">· 上次 {{ fmtGhostAgo(soulSnap.ghost.last_ghost_ms) }}</span>
                   </div>

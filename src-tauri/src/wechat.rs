@@ -3808,7 +3808,11 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
         "living": crate::living_state::current_state_desc(),
         "narrative": crate::life_narrative::latest_narrative().unwrap_or_default(),
         "relationship": crate::relationship::moment_count(),
-        "details": crate::detail_memory::all_details().len(),
+        "details": {
+            "total": crate::detail_memory::all_details().len(),
+            "profile": crate::detail_memory::profile_facts().len(),
+            "relationship": crate::detail_memory::relationship_facts().len(),
+        },
         "ghost": {
             "streak": crate::ghost::ghost_snapshot().ghost_streak,
             "last_ghost_ms": crate::ghost::ghost_snapshot().last_ghost_ms,
@@ -3824,10 +3828,16 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
     })
 }
 
-/// 手动添加一条细节记忆（主人/前端/AI 都能用）。
+/// 手动添加一条细节记忆（主人/前端/AI 都能用）。默认 relationship 层。
 #[tauri::command]
 pub fn wechat_detail_add(text: String, tags: Option<String>) -> Result<usize, String> {
     crate::detail_memory::add_detail(&text, tags.as_deref().unwrap_or(""))
+}
+
+/// 手动添加一条「稳定事实」（profile 层，跨会话永久保留）。
+#[tauri::command]
+pub fn wechat_profile_fact_add(text: String, tags: Option<String>) -> Result<usize, String> {
+    crate::detail_memory::add_profile_fact(&text, tags.as_deref().unwrap_or(""))
 }
 
 /// 查看全部细节记忆（前端管理/展示）。

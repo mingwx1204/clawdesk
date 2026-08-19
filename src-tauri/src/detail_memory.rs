@@ -21,6 +21,10 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 /// 一条细节记忆。
+///
+/// 语义分层（借鉴 eros-engine 的 Profile vs Relationship）：
+/// - `layer = "profile"`：跨会话稳定事实（如"你对花生过敏"）——任何情境都该知道，永久保留
+/// - `layer = "relationship"`：会话时刻/回调（如"昨晚聊到凌晨"）——与具体关系绑定
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetailMemory {
     /// 毫秒时间戳
@@ -33,6 +37,14 @@ pub struct DetailMemory {
     pub tags: String,
     /// 引用次数（AI 提起过的次数，用于遗忘权重）
     pub used: u32,
+    /// 语义层："profile"（稳定事实）或 "relationship"（会话时刻）。
+    /// 旧数据无此字段 → serde 用 default 补 "relationship"（向前兼容）。
+    #[serde(default = "default_layer")]
+    pub layer: String,
+}
+
+fn default_layer() -> String {
+    "relationship".to_string()
 }
 
 /// 抽取规则：主人消息里出现这些关键词 → 值得记住的细节
@@ -95,11 +107,13 @@ pub fn init() {
 }
 
 /// 去重后追加一条细节（同内容不重复记）。
-pub fn remember(text: &str, source: &str, tags: &str) -> bool {
+/// `layer`：「profile」（稳定事实，永久保留）或「relationship」（会话时刻）。
+pub fn remember_with_layer(text: &str, source: &str, tags: &str, layer: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
     }
+    let layer = if layer == "profile" { "profile".to_string() } else { "relationship".to_string() };
     let mut g = details().lock().unwrap_or_else(|e| e.into_inner());
     // 去重：同文本（或高度相似）不再重复记
     if g.iter().any(|d| d.text == text) {
@@ -115,6 +129,7 @@ pub fn remember(text: &str, source: &str, tags: &str) -> bool {
         source: source.to_string(),
         tags: tags.to_string(),
         used: 0,
+        layer,
     });
     // 落盘
     let path = details_file();
@@ -151,9 +166,44 @@ pub fn extract_from_message(msg: &str, source: &str) -> usize {
     added
 }
 
-/// 手动添加细节（前端/AI 调用）。
+/// 便捷包装：默认记入 relationship 层（会话时刻），保持旧 API 签名兼容。
+pub fn remember(text: &str, source: &str, tags: &str) -> bool {
+    remember_with_layer(text, source, tags, "relationship")
+}
+
+/// 手动添加细节（前端/AI 调用）。默认 relationship 层。
 pub fn add_detail(text: &str, tags: &str) -> Result<usize, String> {
     Ok(if remember(text, "manual", tags) { 1 } else { 0 })
+}
+
+/// 记录一条「稳定事实」（profile 层）：跨会话持久、永久保留、任何情境都该知道。
+/// 用途：你对花生过敏、你养了猫、你生日、你住在哪儿…这类身份级事实。
+pub fn add_profile_fact(text: &str, tags: &str) -> Result<usize, String> {
+    Ok(if remember_with_layer(text, "manual", tags, "profile") { 1 } else { 0 })
+}
+
+/// 只取 profile 层的稳定事实（按 used 降序 → 时间倒序）。
+pub fn profile_facts() -> Vec<DetailMemory> {
+    let g = details().lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<DetailMemory> = g
+        .iter()
+        .filter(|d| d.layer == "profile")
+        .cloned()
+        .collect();
+    v.sort_by(|a, b| b.used.cmp(&a.used).then(b.ts_ms.cmp(&a.ts_ms)));
+    v
+}
+
+/// 只取 relationship 层的会话时刻（按 used 降序 → 时间倒序）。
+pub fn relationship_facts() -> Vec<DetailMemory> {
+    let g = details().lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<DetailMemory> = g
+        .iter()
+        .filter(|d| d.layer == "relationship")
+        .cloned()
+        .collect();
+    v.sort_by(|a, b| b.used.cmp(&a.used).then(b.ts_ms.cmp(&a.ts_ms)));
+    v
 }
 
 /// 全部细节（按时间倒序，供前端展示/管理）。
@@ -206,51 +256,67 @@ fn flush_disk() {
 /// 注入 prompt 的"你记得主人的事"：按时间倒序取最近 N 条（去重、限长）。
 /// 返回空表示还没有值得说的细节。
 pub fn details_context_for_prompt(recent_max: usize, max_chars: usize) -> String {
-    let all = all_details();
-    if all.is_empty() {
+    // ══ 语义分层检索 ══
+    // 1. profile 层（稳定事实）优先——「任何情境都该知道」，永远先注入；
+    // 2. relationship 层（会话时刻）按遗忘曲线补足——used 降序 + 时间倒序。
+    let facts = profile_facts();
+    let moments = relationship_facts();
+    if facts.is_empty() && moments.is_empty() {
         return String::new();
     }
-    // ══ 遗忘曲线 ══
-    // 排序：被想起次数 used 降序优先（重要的忘不掉），used 相同时按时间从新到旧
-    // （长期未被想起的旧细节 used 低 → 沉底 → 最终被 200 条上限淘汰，像真人慢慢淡忘）。
-    let mut ranked: Vec<DetailMemory> = all;
-    ranked.sort_by(|a, b| b.used.cmp(&a.used).then(b.ts_ms.cmp(&a.ts_ms)));
     let mut parts: Vec<String> = Vec::new();
     let mut used_bumped: Vec<String> = Vec::new();
-    for d in ranked.iter().take(recent_max) {
-        let when = chrono::DateTime::from_timestamp((d.ts_ms / 1000) as i64, 0)
-            .map(|dt| {
-                let dt = dt.with_timezone(&Local);
-                let today = Local::now().date_naive();
-                let days = today.signed_duration_since(dt.date_naive()).num_days();
-                if days <= 0 {
-                    "今天".to_string()
-                } else if days == 1 {
-                    "昨天".to_string()
-                } else {
-                    format!("{days}天前")
-                }
-            })
-            .unwrap_or_default();
-        let line = format!("【{}】{}{}", when, d.text, if d.tags.is_empty() { String::new() } else { format!("（{}）", d.tags) });
-        if parts.iter().map(|p: &String| p.chars().count()).sum::<usize>() + line.chars().count() > max_chars {
+    let mut used_chars = 0usize;
+    // 先注入 profile 稳定事实
+    for d in facts.iter().take(recent_max) {
+        let line = fmt_line(d);
+        if used_chars + line.chars().count() > max_chars {
             break;
         }
+        used_chars += line.chars().count();
+        parts.push(line);
+        used_bumped.push(d.text.clone());
+    }
+    // 再补 relationship 会话时刻
+    for d in moments.iter().take(recent_max) {
+        let line = fmt_line(d);
+        if used_chars + line.chars().count() > max_chars {
+            break;
+        }
+        used_chars += line.chars().count();
         parts.push(line);
         used_bumped.push(d.text.clone());
     }
     if parts.is_empty() {
         return String::new();
     }
-    // 被选中注入的细节「又被想起来一次」→ used+1（正反馈：AI 反复想起的细节逐渐固化）
+    // 被选中注入的细节「又被想起来一次」→ used+1
     for t in used_bumped {
         mark_used(&t);
     }
-    // 一次性落盘 used 累加（避免每条细节各重写一次文件）
     flush_disk();
     format!("【你记得的关于主人的事（被看见：这些是他随口提过、你放在心上的。自然聊天时可以提起，但不要一口气全说出来，像真人一样在合适的时机提到）】
 {}", parts.join("
 "))
+}
+
+/// 把一条细节格式化为一行（带相对时间 + 标签）。
+fn fmt_line(d: &DetailMemory) -> String {
+    let when = chrono::DateTime::from_timestamp((d.ts_ms / 1000) as i64, 0)
+        .map(|dt| {
+            let dt = dt.with_timezone(&Local);
+            let today = Local::now().date_naive();
+            let days = today.signed_duration_since(dt.date_naive()).num_days();
+            if days <= 0 {
+                "今天".to_string()
+            } else if days == 1 {
+                "昨天".to_string()
+            } else {
+                format!("{days}天前")
+            }
+        })
+        .unwrap_or_default();
+    format!("【{}】{}{}", when, d.text, if d.tags.is_empty() { String::new() } else { format!("（{}）", d.tags) })
 }
 
 #[cfg(test)]
@@ -329,6 +395,28 @@ mod tests {
         let _ = details_context_for_prompt(5, 400);
         let after = all_details()[0].used;
         assert_eq!(after, before + 1, "注入 prompt 应把 used +1");
+    }
+
+    #[test]
+    fn profile_facts_are_separated_from_relationship() {
+        let _g = lock();
+        details().lock().unwrap().clear();
+        remember_with_layer("主人对花生过敏", "test", "食物,忌口", "profile");
+        remember("昨晚聊到凌晨两点", "test", "聊天");
+        let pf = profile_facts();
+        let rf = relationship_facts();
+        assert_eq!(pf.len(), 1, "profile 应只有 1 条");
+        assert_eq!(rf.len(), 1, "relationship 应只有 1 条");
+        assert!(pf[0].text.contains("花生"));
+        assert!(rf[0].text.contains("凌晨"));
+        // 分层检索：profile 稳定事实排在前面（优先占字符预算）
+        let ctx = details_context_for_prompt(1, 400);
+        assert!(ctx.contains("花生"), "profile 稳定事实应注入");
+        assert!(ctx.contains("凌晨"), "relationship 时刻也应注入（两层各取 1 条）");
+        // profile 应排在前面
+        let p = ctx.find("花生").unwrap();
+        let r2 = ctx.find("凌晨").unwrap();
+        assert!(p < r2, "profile 稳定事实应排在 relationship 之前");
     }
 }
 
