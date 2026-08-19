@@ -223,6 +223,19 @@ function fmtTs(ts: number): string {
   try { return new Date(ts).toLocaleTimeString(); } catch { return ""; }
 }
 
+/** ghost 上次「没回」距离现在多久（用于灵魂面板展示） */
+function fmtGhostAgo(ms: number): string {
+  if (!ms) return "";
+  const diff = Date.now() - ms;
+  if (diff < 0) return "";
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return min + " 分钟前";
+  const h = Math.floor(min / 60);
+  if (h < 24) return h + " 小时前";
+  return Math.floor(h / 24) + " 天前";
+}
+
 /** 消息类型图标（voice=语音转写 / image=图片 / file=文件 / 其余文本） */
 function typeIcon(t: string): string {
   switch (t) {
@@ -697,6 +710,9 @@ async function testReply() {
                   <div class="wc-soul-text">{{ soulSnap.living }}</div>
                   <div v-if="soulSnap.narrative" class="wc-soul-text" style="color:#999;margin-top:4px">📖 {{ soulSnap.narrative }}</div>
                   <div class="wc-soul-text" style="margin-top:4px">💞 关系记忆 {{ soulSnap.relationship }} 条 · 📌 细节记忆 {{ soulSnap.details }} 条</div>
+                  <div v-if="soulSnap.ghost" class="wc-soul-text" style="margin-top:4px;color:#c0a060">
+                    👻 连续沉默 {{ soulSnap.ghost.streak }} 次 <span v-if="soulSnap.ghost.last_ghost_ms">· 上次 {{ fmtGhostAgo(soulSnap.ghost.last_ghost_ms) }}</span>
+                  </div>
                 </div>
               </div>
             </div>

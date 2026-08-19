@@ -2771,6 +2771,34 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                 *inner.proactive_idle_rounds.lock() = 0;
             }
         }
+        // ★ Ghost 机制（可「已读不回」· 她有自己的状态，借鉴 eros-engine）：
+        //   她偶尔「暂时没回」不是因为礼貌或防轰炸，而是此刻她没这个心力/兴致。
+        //   四层保护：前10条不ghost、连续≤2次、冷却期1小时、score>0.65才ghost。
+        {
+            let recs = read_history_limit(&inner, 200);
+            let msg_count = recs.len() as u64;
+            let ds = crate::drives::drive_snapshot();
+            let ms = crate::mood::mood_snapshot();
+            let dec = crate::ghost::decide(
+                msg_count,
+                ds.playful,
+                ds.connection,
+                ds.share,
+                ms.arousal,
+                ds.fear_forgotten,
+            );
+            if dec == crate::ghost::GhostDecision::Ghost {
+                crate::llm::logging::debug(
+                    "wechat",
+                    &format!(
+                        "slot{} Ghost：她此刻没心力主动说话（playful={:.2} connection={:.2} share={:.2} arousal={:.2} fear={:.2}）",
+                        inner.slot, ds.playful, ds.connection, ds.share, ms.arousal, ds.fear_forgotten
+                    ),
+                );
+                wait_secs = proactive_wait_secs(&inner);
+                continue;
+            }
+        }
         // ★ 拟人上下文：读取该微信共享会话记忆（wechat-{slot}，与自动回复同一份记忆）
         //   + 上次主动消息，注入生成请求 → 避免"人格分裂"、重复话题、时间线错乱。
         let mut context_note = String::new();
@@ -3056,6 +3084,8 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         }
                         // ★ 关系叙事：记录"我主动找你"的瞬间（想念/分享）
                         crate::relationship::on_ai_reach();
+                        // ★ Ghost 机制：她成功回复了 → 连续 ghost 计数归零
+                        crate::ghost::on_reply();
                         // ★ 时段加权随机：发送成功后取下次间隔（晚高峰更活跃）
                         wait_secs = proactive_wait_secs(&inner);
                         crate::llm::logging::debug(
@@ -3760,6 +3790,10 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
         "narrative": crate::life_narrative::latest_narrative().unwrap_or_default(),
         "relationship": crate::relationship::moment_count(),
         "details": crate::detail_memory::all_details().len(),
+        "ghost": {
+            "streak": crate::ghost::ghost_snapshot().ghost_streak,
+            "last_ghost_ms": crate::ghost::ghost_snapshot().last_ghost_ms,
+        },
     })
 }
 

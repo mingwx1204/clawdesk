@@ -28,6 +28,8 @@ mod relationship;
 mod drives;
 // ── 人格底座（OCEAN 大五人格 · 心理学锚点，借鉴 character-sim） ──
 mod persona_traits;
+// ── Ghost 机制（可「已读不回」· 她有自己的状态，借鉴 eros-engine） ──
+mod ghost;
 
 use commands::AppState;
 use std::sync::{Mutex, OnceLock};
@@ -352,6 +354,7 @@ pub fn run() {
     crate::relationship::init();
     crate::drives::init();
     crate::persona_traits::init();
+    crate::ghost::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {
