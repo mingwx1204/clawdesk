@@ -1,3 +1,6 @@
+//! 移植遗留的协议层（fleet/workroom/agent_run 等）：ClawDesk 单 agent 模式暂未启用。
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

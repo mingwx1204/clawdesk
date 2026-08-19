@@ -7,6 +7,8 @@
 //!   codewhale_config / codewhale_execpolicy / codewhale_mcp 的全部代码
 //!   （headless 服务端层，由 ClawDesk AppState + commands 层承担等价职责）。
 
+#![allow(dead_code)]
+
 pub mod turn_loop;
 
 use std::path::PathBuf;

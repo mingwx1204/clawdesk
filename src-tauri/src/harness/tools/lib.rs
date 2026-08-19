@@ -1,3 +1,6 @@
+//! 移植遗留的工具抽象层：ClawDesk 实际使用 core::tool 层，此模块为引擎协议预留。
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

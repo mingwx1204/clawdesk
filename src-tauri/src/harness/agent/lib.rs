@@ -1,3 +1,6 @@
+//! 移植遗留的模型解析层（ModelRegistry / provider kind / passthrough 识别）。
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 mod provider_kind;

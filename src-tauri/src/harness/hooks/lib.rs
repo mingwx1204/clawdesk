@@ -1,3 +1,6 @@
+//! 移植遗留的钩子层：当前引擎仅使用 bridge 子模块，其余为多 agent 编排预留。
+#![allow(dead_code)]
+
 pub mod bridge;
 
 use std::path::PathBuf;

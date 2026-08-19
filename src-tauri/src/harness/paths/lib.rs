@@ -4,6 +4,7 @@
 //! migration and per-subsystem fallback remain with the crate that owns those
 //! files.
 #![deny(missing_docs)]
+#![allow(dead_code)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;
