@@ -84,6 +84,7 @@ fn builtin_voices() -> Vec<TtsVoiceInfo> {
 }
 
 /// 语气风格中文名映射（前端展示）。
+#[allow(dead_code)]
 pub fn style_label(style: &str) -> &'static str {
     match style {
         "cheerful" => "😄 开心",
@@ -343,6 +344,7 @@ pub(crate) async fn synthesize_audio(
 // 文档：https://docs.siliconflow.cn/cn/api-reference/audio/create-speech
 
 /// CosyVoice 2 音色列表（硅基流动预置，真人实录级主播音色）
+#[allow(dead_code)]
 pub fn cosyvoice_voices() -> Vec<(&'static str, &'static str)> {
     vec![
         ("alex", "Alex · 男声 沉稳磁性"),
