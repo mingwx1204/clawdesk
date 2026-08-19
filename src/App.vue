@@ -7,12 +7,25 @@ import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
 import { useWechatAutoReply } from "./composables/useWechat";
+import { useSessions } from "./composables/useSessions";
 import { renderMd, escapeHtml } from "./utils/markdown";
 import { fmtTs, fmtArgs, fmtOutput, hasArgs, isTerminal, termInfo, hasToolDetail, toolSummary } from "./utils/messageFormat";
 import type { ChatMsg, ToolCallInfo } from "./types/message";
 
 // ★ 微信自动回复（独立 composable：监听 wechat-message → AI 回复 → 回发）
 const { listenWechatMessages } = useWechatAutoReply(() => apiKey.value);
+
+// ── 会话管理（composable：列表/重命名/分支/删除/断点） ──
+const {
+  sessionId,
+  sessions,
+  sessionNames,
+  checkpoints,
+  refresh: refreshSessions,
+  rename: renameSessionApi,
+  fork: forkSessionApi,
+  remove: removeSession,
+} = useSessions();
 
 // Markdown 渲染与代码块复制逻辑已拆至 ./utils/markdown（renderMd/escapeHtml/fence）。
 // onDocClick 保留在此（需访问 openImageViewer）。
@@ -74,11 +87,6 @@ function onDocKeydown(e: KeyboardEvent) {
 const apiKey = ref("");
 // ★ 安全修复：不再硬编码 Key。通过 DPAPI 加密持久化（重启自动恢复），
 //   或用户在设置中手动填入。避免真实 Key 泄露到源代码/版本控制。
-const sessionId = ref("default");
-const sessions = ref<string[]>([]);
-const sessionNames = ref<Record<string, string>>({}); // 会话自定义名（id -> name）
-const branches = ref<Record<string, string[]>>({});
-const checkpoints = ref<Record<string, boolean>>({});
 const messages = ref<ChatMsg[]>([]);
 /** 按需渲染历史消息：初始只渲染最近 MSG_PAGE 条，滚动到顶部时增量加载更多。 */
 const MSG_PAGE = 50;
@@ -256,49 +264,15 @@ async function renameSession(id: string) {
   const cur = sessionNames.value[id] || id;
   const name = window.prompt("重命名会话（留空恢复默认名称）", cur);
   if (name === null) return;
-  const trimmed = name.trim();
-  try {
-    await sessionsApi.rename(id, trimmed);
-    if (trimmed) sessionNames.value[id] = trimmed;
-    else delete sessionNames.value[id];
-  } catch (e) {
-    console.error("重命名失败", e);
-  }
-}
-
-async function refreshSessions() {
-  sessions.value = await sessionsApi.list();
-  // 会话自定义名（id -> name），用于显示友好名
-  try {
-    const metas = await sessionsApi.metas();
-    const m: Record<string, string> = {};
-    for (const x of metas ?? []) if (x?.name) m[x.id] = x.name;
-    sessionNames.value = m;
-  } catch { /* ignore */ }
-  // 分支从属关系（§十二.2）与断点状态（§十二.1）
-  const b: Record<string, string[]> = {};
-  const cp: Record<string, boolean> = {};
-  for (const s of sessions.value) {
-    try {
-      const br = await sessionsApi.branches(s);
-      if (br.length) b[s] = br;
-    } catch { /* ignore */ }
-    try {
-      const ck = await sessionsApi.checkpoint(s);
-      cp[s] = ck != null;
-    } catch { /* ignore */ }
-  }
-  branches.value = b;
-  checkpoints.value = cp;
+  await renameSessionApi(id, name);
 }
 
 /** Fork 分支会话（§十二.2）：完整拷贝记忆，新会话独立。 */
 async function forkSession(id: string) {
-  const newId = `branch-${Date.now()}`;
-  await sessionsApi.fork(id, newId);
-  sessionId.value = newId;
-  await loadSessionMessages(newId); // fork 拷贝了父会话记忆，需恢复显示
-  await refreshSessions();
+  const newId = await forkSessionApi(id);
+  if (newId) {
+    await loadSessionMessages(newId); // fork 拷贝了父会话记忆，需恢复显示
+  }
 }
 
 /** 从断点续跑（§十二.1）：带 resume=true 发起任务。 */
@@ -764,17 +738,15 @@ function confirmNewSession() {
   loadSessionUsage().catch(() => {});
 }
 async function deleteSession(id: string) {
-  try {
-    await sessionsApi.delete(id);
-  } catch (e) {
-    window.alert(`删除会话失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  const wasCurrent = sessionId.value === id;
+  const ok = await removeSession(id);
+  if (!ok) {
+    window.alert("删除会话失败，请重试");
     return;
   }
-  if (sessionId.value === id) {
-    sessionId.value = "default";
+  if (wasCurrent) {
     await loadSessionMessages("default"); // 回到默认会话并恢复其历史
   }
-  await refreshSessions();
 }
 
 // ── v6：模型选择（智能路由 / V4-Flash / V4-Pro） ──
