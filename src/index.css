@@ -96,19 +96,11 @@
 }
 [data-theme="dark"] .ns-input::placeholder,
 [data-theme="dark"] .sc-input::placeholder { color: #6b7482; }
-[data-theme="dark"] .search-item,
-[data-theme="dark"] .snap-item,
-[data-theme="dark"] .mcp-item,
-[data-theme="dark"] .sandbox-item {
+[data-theme="dark"] .search-item {
   background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.1);
 }
 [data-theme="dark"] .search-item .search-content,
 [data-theme="dark"] .search-meta { color: #b4b9c6; }
-[data-theme="dark"] .snap-item .sn-name,
-[data-theme="dark"] .sn-info { color: #d0d2dc; }
-[data-theme="dark"] .mcp-item .mc-name,
-[data-theme="dark"] .mcp-item .mc-path { color: #d0d2dc; }
-[data-theme="dark"] .sandbox-item .sx-path { color: #c8cbd6; }
 [data-theme="dark"] .pc-sub { color: #9aa3b2; }
 [data-theme="dark"] .sc-label { color: #b4b9c6; }
 [data-theme="dark"] .st-item,
@@ -620,24 +612,6 @@ body { background:#0a0a0f; }
 .sc-header h3 { font-size:15px; color:#2a2a3a; }
 .sc-close { width:26px; height:26px; border-radius:50%; border:1px solid rgba(0,0,0,.12); background:rgba(255,255,255,.6); color:#5a5a6a; cursor:pointer; font-size:12px; transition:.15s; }
 .sc-close:hover { background:rgba(255,69,58,.15); color:#ff453a; }
-.tabs {
-  position:relative; display:flex; flex-direction:column; gap:4px; width:158px; flex-shrink:0;
-  padding:12px 10px; border-right:1px solid rgba(0,0,0,.08); overflow-y:auto;
-}
-.tab-indicator {
-  position:absolute; left:10px; right:10px; top:12px; height:34px; z-index:0;
-  background:rgba(232,122,92,.18); border:1px solid rgba(232,122,92,.45);
-  border-radius:9px; box-shadow:0 2px 8px rgba(232,122,92,.12);
-  transition:top .25s ease, height .25s ease;
-}
-.tab {
-  position:relative; z-index:1; display:flex; align-items:center; width:100%; padding:8px 12px; border-radius:9px;
-  border:1px solid transparent; background:transparent; color:#5a5a6a;
-  font-family:var(--font); font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap;
-  transition:color .15s, background .15s; text-align:left;
-}
-.tab:hover { background:rgba(232,122,92,.1); color:var(--accent); }
-.tab.active { background:transparent; color:var(--accent); font-weight:700; }
 .sc-body { flex:1; min-width:0; overflow-y:auto; padding:14px 20px 18px; }
 .sc-group { display:none; }
 .sc-group.active { display:block; animation:bubbleIn .2s ease; }
@@ -661,8 +635,6 @@ body { background:#0a0a0f; }
   background:rgba(255,255,255,.78); color:#2a2a3a; font-family:var(--font); font-size:12.5px; outline:none; transition:.15s;
 }
 .sc-select:focus, .sc-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(232,122,92,.15); }
-.sc-check { display:flex; align-items:center; gap:8px; font-size:12.5px; color:#2a2a3a; padding:5px 0; cursor:pointer; }
-.sc-check input { accent-color:var(--accent); width:15px; height:15px; }
 
 /* ── 猜人物游戏面板 ── */
 .gp-overlay {
@@ -791,27 +763,6 @@ body { background:#0a0a0f; }
   transition:.15s;
 }
 .btn-primary:hover { filter:brightness(1.1); }
-.sc-tip { font-size:11px; color:#0a7c2f; margin:8px 0 0; }
-.skill-toolbar { display:flex; align-items:center; gap:10px; margin:4px 0 8px; }
-.skill-count { font-size:11px; color:#7a7a8a; }
-.skill-list { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
-.skill-item { display:flex; align-items:flex-start; gap:7px; padding:5px 8px; border-radius:7px; font-size:11.5px; color:#3a3a4a; cursor:pointer; }
-.skill-item:hover { background:rgba(232,122,92,.1); }
-.skill-item input { accent-color:var(--accent); width:14px; height:14px; margin-top:2px; flex:none; }
-.skill-text { display:flex; flex-direction:column; min-width:0; }
-.skill-id { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.skill-zh { font-size:10.5px; color:#8a8aa0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-[data-theme="dark"] .skill-zh { color:#8b94a7; }
-.snap-list { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
-.snap-item { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:9px; background:rgba(255,255,255,.6); border:1px solid rgba(0,0,0,.08); }
-.snap-info { flex:1; min-width:0; }
-.snap-file { display:block; font-size:11.5px; color:#2a2a3a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.snap-meta { display:block; font-size:10px; color:#7a7a8a; margin-top:1px; }
-.snap-actions { display:flex; gap:4px; flex-shrink:0; }
-.snap-btn { padding:3px 8px; border-radius:6px; border:1px solid rgba(0,0,0,.12); background:rgba(255,255,255,.7); color:#5a5a6a; font-size:10.5px; cursor:pointer; font-family:var(--font); }
-.snap-btn:hover { background:rgba(232,122,92,.14); color:var(--accent); }
-.snap-btn.danger:hover { background:rgba(255,69,58,.14); color:#ff453a; }
-
 
 /* 权限确认弹窗 */
 .perm-overlay {
@@ -845,30 +796,6 @@ body { background:#0a0a0f; }
 .pc-yes { color:#fff; background:linear-gradient(180deg,#f09076,#e87a5c); box-shadow:0 3px 10px rgba(232,122,92,.35); }
 .pc-yes:hover { filter:brightness(1.1); }
 
-/* MCP 服务器管理 */
-.mcp-list { display:flex; flex-direction:column; gap:6px; margin:4px 0 10px; }
-.mcp-item { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:9px; background:rgba(255,255,255,.6); border:1px solid rgba(0,0,0,.08); }
-.mcp-ico { width:26px; height:26px; border-radius:7px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(232,122,92,.14); color:var(--accent); }
-.mcp-info { flex:1; min-width:0; }
-.mcp-name { display:block; font-size:12px; font-weight:600; color:#2a2a3a; }
-.mcp-cmd { display:block; font-size:10px; color:#7a7a8a; font-family:'SF Mono',Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.mcp-del { width:22px; height:22px; border-radius:6px; border:none; background:transparent; color:#8a8a9a; cursor:pointer; font-size:11px; flex-shrink:0; }
-.mcp-del:hover { color:#ff453a; background:rgba(255,69,58,.12); }
-.mcp-add { display:grid; grid-template-columns:1fr 1.6fr; gap:6px; margin-top:8px; }
-.mcp-add .sc-input { margin:0; }
-.mcp-add .btn-primary { margin-top:0; grid-column:1 / -1; }
-
-/* 沙箱根目录 */
-.sandbox-list { display:flex; flex-direction:column; gap:6px; margin:4px 0 10px; }
-.sandbox-item { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:9px; background:rgba(255,255,255,.6); border:1px solid rgba(0,0,0,.08); }
-.sandbox-item .sx-ico { width:26px; height:26px; border-radius:7px; display:flex; align-items:center; justify-content:center; background:rgba(255,214,10,.16); color:#b08a00; flex-shrink:0; }
-.sandbox-item .sx-path { flex:1; font-size:11.5px; color:#2a2a3a; font-family:'SF Mono',Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.sandbox-item .sx-del { width:22px; height:22px; border-radius:6px; border:none; background:transparent; color:#8a8a9a; cursor:pointer; font-size:11px; flex-shrink:0; }
-.sandbox-item .sx-del:hover { color:#ff453a; background:rgba(255,69,58,.12); }
-.sandbox-add { display:flex; gap:6px; }
-.sandbox-add .sc-input { flex:1; margin:0; }
-.sandbox-add .btn-primary { margin-top:0; flex-shrink:0; }
-
 /* 日志 / 自检 / 导出 */
 .log-view { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
 .log-preview { width:100%; height:130px; border-radius:9px; border:1px solid rgba(0,0,0,.12); background:rgba(20,20,28,.9); color:#9fe8a8; font-family:'SF Mono',Menlo,monospace; font-size:10.5px; padding:8px 10px; resize:none; outline:none; line-height:1.5; }
@@ -898,17 +825,14 @@ button:hover::after { left:150%; opacity:1; transition:left .65s ease; }
 .attach:hover { transform:scale(1.12); }
 .sc-close:hover { transform:rotate(90deg); }
 .sp-del:hover { transform:scale(1.15); }
-.snap-btn:hover { transform:translateY(-1px); box-shadow:0 3px 10px rgba(232,122,92,.25); }
-.tab:hover { transform:translateY(-1px); }
 button:active { filter:brightness(.92) saturate(1.12); }
 .mem-btn:active, .send:active, .btn-primary:active {
   transform:translateY(0) scale(.95);
   box-shadow:0 2px 6px rgba(232,122,92,.3), inset 0 2px 6px rgba(0,0,0,.12);
 }
-.attach:active, .sc-close:active, .sp-del:active, .snap-btn:active { transform:scale(.9); }
+.attach:active, .sc-close:active, .sp-del:active { transform:scale(.9); }
 .settings-btn:active { transform:rotate(60deg) scale(.9); }
 .cp-compress:active { transform:scale(.92); }
-.tab:active { transform:scale(.94); }
 .sp-item:active, .am-item:active { background:rgba(232,122,92,.26); }
 
 
