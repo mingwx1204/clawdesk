@@ -136,11 +136,6 @@ pub fn proactiveness() -> f64 {
     snapshot().extraversion
 }
 
-/// 调制度：宜人性影响她"顺从 vs 有脾气"的倾向（高宜人 → 更顺从少争执）。
-pub fn agreeableness() -> f64 {
-    snapshot().agreeableness
-}
-
 /// 生成"人格底色"描述（注入 prompt 用，不啰嗦，只点出影响行为的关键倾向）。
 pub fn traits_context_for_prompt() -> String {
     let t = snapshot();

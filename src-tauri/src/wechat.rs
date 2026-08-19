@@ -2550,8 +2550,11 @@ fn proactive_wait_secs(inner: &Arc<WechatInner>) -> u64 {
         18..=22 => 0.3,
         _ => 1.0,
     };
-    let eff_min = ((min as f64) * activity).max(1.0) as u64;
-    let eff_max = ((max as f64) * activity).max((eff_min as f64) + 1.0) as u64;
+    // OCEAN 外向性调制：外向的她更愿主动（间隔更短），内向的偏等待（间隔更长）
+    let extro = crate::persona_traits::proactiveness();
+    let extro_factor = if extro >= 0.6 { 0.7 } else if extro <= 0.4 { 1.5 } else { 1.0 };
+    let eff_min = ((min as f64) * activity * extro_factor).max(1.0) as u64;
+    let eff_max = ((max as f64) * activity * extro_factor).max((eff_min as f64) + 1.0) as u64;
     let lambda = ((eff_min + eff_max) as f64) / 2.0;
     let wait = poisson_sample(lambda).clamp(eff_min, eff_max) * 60;
     wait.max(60).min(24 * 3600)

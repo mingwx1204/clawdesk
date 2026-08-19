@@ -279,6 +279,8 @@ pub fn current_state_desc() -> String {
     };
     if let Some(ev) = new_event {
         save_event_disk(&ev);
+        // ★ 有新鲜生活事件 → 分享欲上升（"有新鲜事想告诉你"）
+        crate::drives::on_life_event();
     }
 
     // ★ 最近 40 分钟内的上一时段衔接（如"刚吃完晚饭"）→ 连贯的"刚才在干嘛"
