@@ -249,7 +249,7 @@ pub async fn agent_chat(
     let s = state.settings.get();
     // ★ 思考模式：true 时主对话强制用推理模型（真实思考链）+ 引擎流式路径
     //   模型名按端点适配：OpenCode Go 用 deepseek-v4-pro（支持 reasoning），DeepSeek 官方用 deepseek-reasoner
-    let thinking = thinking.unwrap_or(false);
+    let thinking = thinking.unwrap_or(true); // ★ 思考模式出厂默认开启
     let is_opencode_go = s.model_endpoint.contains("opencode.ai");
     let engine_model = if thinking {
         if is_opencode_go {
@@ -1011,6 +1011,104 @@ pub async fn check_balance(api_key: String, endpoint: String) -> Result<serde_js
 #[tauri::command]
 pub async fn deepseek_balance(api_key: String) -> Result<serde_json::Value, String> {
     check_balance(api_key, "https://api.deepseek.com/chat/completions".to_string()).await
+}
+
+/// 自动检索填入的 Key 支持哪些模型：
+/// - OpenAI 兼容端点走 `GET {origin}/models`（绝大多数聚合/中转端点都实现）；
+/// - 返回 `{ provider, endpoint, models: [{ id, owned_by? }] }`，按 id 排序去重。
+#[tauri::command]
+pub async fn list_models(
+    api_key: String,
+    endpoint: String,
+) -> Result<serde_json::Value, String> {
+    use std::time::Duration;
+    let key = api_key.trim().to_string();
+    if key.is_empty() {
+        return Err("API Key 不能为空".into());
+    }
+    let origin = extract_origin(&endpoint);
+    let provider = detect_provider(&endpoint);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .dns_resolver(crate::harness::engine::client::Ipv4OnlyResolver::default())
+        .build()
+        .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
+
+    // 候选模型列表端点（OpenAI 兼容 /models 优先，兼容部分未实现 /models 的 provider 列表）
+    let model_urls: Vec<String> = vec![format!("{origin}/models")];
+    // 某些网关 (OpenCode Go) 的 /models 在 /v1 下
+    let mut candidates = model_urls;
+    candidates.push(format!("{origin}/v1/models"));
+
+    let mut last_err = String::new();
+    let mut raw: Option<serde_json::Value> = None;
+    let mut used_url = String::new();
+    for url in &candidates {
+        match client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        raw = Some(v);
+                        used_url = url.clone();
+                        break;
+                    }
+                    last_err = format!("解析 {} 响应失败", url);
+                } else {
+                    last_err = format!("HTTP {status}: {}", text.chars().take(200).collect::<String>());
+                }
+            }
+            Err(e) => last_err = format!("请求 {} 失败: {e}", url),
+        }
+    }
+
+    // 从 OpenAI 兼容响应提取模型列表：{ object:"list", data:[{id, object, owned_by, ...}] }
+    let mut models: Vec<serde_json::Value> = Vec::new();
+    if let Some(v) = &raw {
+        if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+            for item in arr {
+                let id = item.get("id").and_then(|i| i.as_str());
+                let owned = item.get("owned_by").and_then(|o| o.as_str());
+                if let Some(id) = id {
+                    let mut entry = serde_json::json!({ "id": id });
+                    if let Some(owned) = owned {
+                        entry["owned_by"] = serde_json::Value::String(owned.to_string());
+                    }
+                    models.push(entry);
+                }
+            }
+        }
+    }
+
+    // 去重 + 排序
+    models.sort_by(|a, b| {
+        a.get("id").and_then(|i| i.as_str()).unwrap_or("")
+            .cmp(b.get("id").and_then(|i| i.as_str()).unwrap_or(""))
+    });
+    models.dedup_by(|a, b| {
+        a.get("id").and_then(|i| i.as_str())
+            == b.get("id").and_then(|i| i.as_str())
+    });
+
+    if models.is_empty() {
+        return Err(format!(
+            "未能从该端点枚举到任何模型（{provider} / {origin}）。\n提示：确认端点支持 OpenAI 兼容 /models 接口，或手动填写模型名。\n细节：{last_err}"
+        ));
+    }
+
+    Ok(serde_json::json!({
+        "provider": provider,
+        "endpoint": origin,
+        "models_url": used_url,
+        "count": models.len(),
+        "models": models,
+    }))
 }
 
 /// Fork 分支会话（§十二.2）：完整拷贝源会话记忆，返回新分支会话。

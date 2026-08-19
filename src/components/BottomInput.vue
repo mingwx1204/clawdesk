@@ -17,24 +17,13 @@ interface ModelOption { id: string; label: string; desc: string; }
 defineProps<{
   running?: boolean;
   disabled?: boolean;
-  currentRound?: number;
-  modelLabel?: string;
   models?: ModelOption[];
   selectedModel?: string;
-  agentOn?: boolean;
-  mode?: string;
-  thinking?: boolean;
-  ctxPct?: number;
-  ctxTokens?: string;
-  ctxItems?: { sys: number[]; usr: number[] };
 }>();
 const emit = defineEmits<{
   (e: "send", content: string, images?: string[], attachments?: string[]): void;
   (e: "cancel"): void;
   (e: "select-model", id: string): void;
-  (e: "toggle-agent"): void;
-  (e: "set-mode", id: string): void;
-  (e: "toggle-thinking"): void;
 }>();
 
 const prompt = ref("");
@@ -43,32 +32,13 @@ const attachments = ref<AttachItem[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
 const attachMenuOpen = ref(false);
-const promptMenuOpen = ref(false);
 const moreOpen = ref(false);
-
-/** 快捷指令库（对标大厂提示词模板）。 */
-const PROMPT_TEMPLATES = [
-  { label: "✍️ 翻译", prompt: "请将以下内容翻译成中文，保持原意和语气：\n\n" },
-  { label: "📝 总结", prompt: "请用简洁的中文总结以下内容的要点：\n\n" },
-  { label: "🐛 找 Bug", prompt: "请审查以下代码，找出潜在 bug 并给出修复建议：\n\n" },
-  { label: "💡 代码解释", prompt: "请逐段解释以下代码的作用与设计思路：\n\n" },
-  { label: "📋 写日报", prompt: "请根据我今天的工作内容生成一份简洁日报：\n\n" },
-  { label: "🧠 头脑风暴", prompt: "请针对以下主题给出 5 个有创意的想法：\n\n" },
-  { label: "✏️ 润色", prompt: "请润色以下文本，使其更通顺专业：\n\n" },
-  { label: "📊 数据分析", prompt: "请分析以下数据并给出结论和建议：\n\n" },
-];
 
 /** 供父组件（编辑重发）回填输入框。 */
 function setPrompt(text: string) {
   prompt.value = text;
 }
 defineExpose({ setPrompt });
-
-/** 插入快捷指令模板（追加到输入框末尾）。 */
-function insertTemplate(t: { label: string; prompt: string }) {
-  promptMenuOpen.value = false;
-  prompt.value = (prompt.value ? prompt.value + "\n\n" : "") + t.prompt;
-}
 
 /** 截屏提问：调用 window_screenshot 工具截取当前屏幕，加入图片预览。 */
 async function captureScreen() {
@@ -100,12 +70,6 @@ function closeAttachMenu() { attachMenuOpen.value = false; }
 onMounted(() => document.addEventListener("click", closeAttachMenu));
 onUnmounted(() => document.removeEventListener("click", closeAttachMenu));
 
-const MODE_OPTIONS = [
-  { id: "off", label: "关闭" },
-  { id: "plan_only", label: "计划只读" },
-  { id: "step_confirm", label: "逐步确认" },
-  { id: "yolo", label: "YOLO 全自动" },
-];
 const MAX_FILE_MB = 20; // 与后端 attachment_save 上限一致
 
 function onSend() {
@@ -279,40 +243,6 @@ function removeAttachment(idx: number) {
             <span>{{ md.label }}</span>
             <span v-if="md.id === selectedModel" class="more-check">✓</span>
           </button>
-          <!-- 思考模式 -->
-          <div class="more-sec">功能</div>
-          <button class="more-item" :class="{ active: thinking }" @click="emit('toggle-thinking')">
-            <span>💭 思考模式</span>
-            <span v-if="thinking" class="more-dot on"></span>
-          </button>
-          <!-- Agent -->
-          <button class="more-item" @click="emit('toggle-agent')">
-            <span>🤖 Agent</span>
-            <span :class="['more-dot', agentOn ? 'on' : '']"></span>
-          </button>
-          <!-- 模式 -->
-          <div class="more-sec">Agent 模式</div>
-          <button
-            v-for="mo in MODE_OPTIONS"
-            :key="mo.id"
-            class="more-item"
-            :class="{ active: mo.id === mode }"
-            @click="moreOpen = false; emit('set-mode', mo.id)"
-          >
-            <span>{{ mo.label }}</span>
-            <span v-if="mo.id === mode" class="more-check">✓</span>
-          </button>
-          <!-- 上下文 -->
-          <div class="more-sec">上下文 {{ ctxPct }}%</div>
-          <div class="more-ctx">
-            <div class="more-ctx-bar"><span :style="{ width: ctxPct + '%' }"></span></div>
-            <span class="more-ctx-text">{{ ctxTokens }}</span>
-          </div>
-          <!-- 快捷指令 -->
-          <div class="more-sec">快捷指令</div>
-          <button v-for="t in PROMPT_TEMPLATES" :key="t.label" class="more-item" @click="insertTemplate(t); moreOpen = false">
-            <span>{{ t.label }}</span>
-          </button>
         </div>
       </div>
 
@@ -341,29 +271,7 @@ function removeAttachment(idx: number) {
 
 <style scoped>
 .input-area { position: relative; }
-/* 快捷指令（提示词模板） */
-.prompt-wrap { position: relative; display: flex; align-items: center; }
-.prompt-tag {
-  width: 30px; height: 30px; border-radius: 50%;
-  border: 1px solid rgba(255,255,255,.35); background: var(--bar);
-  color: #5a4a76; font-size: 14px; cursor: pointer; transition: .15s;
-  display: flex; align-items: center; justify-content: center;
-}
-.prompt-tag:hover { border-color: rgba(232,122,92,.5); transform: translateY(-1px); }
-.prompt-menu {
-  position: absolute; bottom: 36px; left: 0; z-index: 60;
-  min-width: 180px; background: rgba(28, 32, 48, 0.97);
-  border: 1px solid rgba(255,255,255,.12); border-radius: 12px;
-  padding: 6px; display: none; box-shadow: 0 10px 34px rgba(0,0,0,.4);
-  backdrop-filter: blur(12px);
-}
-.prompt-menu.open { display: block; }
-.pm-item {
-  display: block; width: 100%; text-align: left;
-  background: none; border: none; color: #dbe4f0;
-  padding: 7px 10px; border-radius: 8px; font-size: 13px; cursor: pointer;
-}
-.pm-item:hover { background: rgba(232,122,92,.15); color: #fff; }
+/* 快捷指令（提示词模板）已移除 */
 .preview-row { display: flex; gap: 8px; padding: 0 20px 8px; flex-wrap: wrap; }
 .preview-item { position: relative; width: 60px; height: 60px; }
 .preview-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; border: 1px solid rgba(255,255,255,.5); }

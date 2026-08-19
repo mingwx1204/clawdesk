@@ -336,9 +336,9 @@ impl Default for AppSettings {
             vision_endpoint: "https://api.z.ai/chat/completions".into(),
             image_model: "flux-1".into(),
             image_endpoint: "https://api.siliconflow.cn/images/generations".into(),
-            // ② Agent
-            agent_enabled: false, // 出厂默认关闭（硬性约束）
-            agent_mode: "off".into(),
+            // ② Agent（出厂默认开启 YOLO 全自动）
+            agent_enabled: true,
+            agent_mode: "yolo".into(),
             max_rounds: 15,
             compaction_threshold: 8000,
             max_tool_rounds: 15,
@@ -364,9 +364,9 @@ impl Default for AppSettings {
             // ⑧ 沙箱根目录
             sandbox_roots: Vec::new(),
             auto_start: false,
-            self_evolve_enabled: false,
+            self_evolve_enabled: true,
             self_evolve_model: "deepseek-chat".into(),
-            self_evolve_auto: false,
+            self_evolve_auto: true,
             self_evolve_threshold: 0.6,
             // ⑬ 朗读 / TTS
             tts_enabled: default_tts_enabled(),
@@ -555,10 +555,12 @@ mod tests {
     #[test]
     fn default_settings_sane() {
         let s = AppSettings::default();
-        assert!(!s.agent_enabled, "Agent 出厂默认关闭");
+        assert!(s.agent_enabled, "Agent 出厂默认开启");
         assert!(s.chinese_only, "出厂默认中文");
         assert_eq!(s.max_rounds, 15);
-        assert_eq!(s.agent_mode, "off");
+        assert_eq!(s.agent_mode, "yolo");
+        assert!(s.self_evolve_enabled, "自进化厂默认开启");
+        assert!(s.self_evolve_auto, "自动进化厂默认开启");
     }
 
     #[test]

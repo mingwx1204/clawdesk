@@ -276,6 +276,7 @@ pub fn run() {
             commands::agent_session_usage,
             commands::check_balance,
             commands::deepseek_balance,
+            commands::list_models,
             commands::session_export,
             commands::session_search,
             commands::logs_tail,

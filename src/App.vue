@@ -91,7 +91,6 @@ const streamingMsgId = ref<string | null>(null);
 const pendingText = ref("");
 
 // Agent 配置
-const agentMode = ref("off"); // off / plan_only / step_confirm / yolo
 const maxRounds = ref(15);
 const currentRound = ref(0);
 
@@ -112,13 +111,7 @@ const exporting = ref(false);
 // ── v6 交互状态 ──
 // 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
 const sidebarCollapsed = ref(false);
-const sessionPanelOpen = ref(false);
 const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
-const modelMenuOpen = ref(false);
-const agentOn = ref(false);
-const currentMode = ref("off");
-// 💭 思考模式：一键切换到 deepseek-reasoner，流式展示真实思考链
-const thinkingOn = ref(false);
 const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
 const clockTime = ref("");
 const clockDate = ref("");
@@ -255,7 +248,6 @@ async function selectSession(s: string) {
   }
   sessionId.value = s;
   await loadSessionMessages(s);
-  sessionPanelOpen.value = false;
   await loadSessionUsage(); // 切换会话后刷新上下文占用
 }
 
@@ -318,14 +310,6 @@ async function resumeSession(id: string) {
 }
 
 async function loadConfig() {
-  try {
-    const m = await invoke<string>("agent_get_mode");
-    agentMode.value = m;
-    currentMode.value = m; // ★ 启动同步：顶栏/输入栏显示的权限模式与后端一致
-    agentOn.value = m !== "off";
-  } catch (e) {
-    console.error("加载 Agent 模式失败", e);
-  }
   try {
     maxRounds.value = await invoke<number>("agent_get_max_rounds");
   } catch (e) {
@@ -687,8 +671,6 @@ async function handleSend(
       resume: false,
       // ★ 图片：dataURL 传给后端保存到本地，模型用 analyze_image 工具查看
       images: images?.length ? [...images] : undefined,
-      // ★ 思考模式：一键切换到 deepseek-reasoner，流式展示真实思考链
-      thinking: thinkingOn.value,
       // ★ 人设（system prompt 追加）：虚拟机微信托管复用 Bot 槽位人设
       persona: opts?.persona ?? null,
     });
@@ -762,16 +744,6 @@ async function onTitlebarMouseDown(e: MouseEvent) {
   try { await getCurrentWindow().startDragging(); } catch { /* 忽略 */ }
 }
 
-async function setMode(mode: string) {
-  try {
-    agentMode.value = await invoke<string>("agent_set_mode", { mode });
-    currentMode.value = agentMode.value;
-    agentOn.value = agentMode.value !== "off";
-  } catch (e) {
-    console.error("设置模式失败", e);
-  }
-}
-
 // ── v7：会话列表已迁移到侧边栏，不再需要下拉方式
 const newSessionOpen = ref(false);
 const newSessionName = ref("");
@@ -788,7 +760,6 @@ function confirmNewSession() {
   sessionId.value = name ? `sess-${name}` : `sess-${Date.now()}`;
   messages.value = []; // 新会话无历史
   newSessionOpen.value = false;
-  sessionPanelOpen.value = false;
   refreshSessions().catch(() => {});
   loadSessionUsage().catch(() => {});
 }
@@ -814,13 +785,10 @@ const MODELS = [
 ];
 function selectModel(m: string) {
   selectedModel.value = m;
-  modelMenuOpen.value = false;
   if (m === "deepseek-v4-flash" || m === "deepseek-v4-pro") {
     void invoke("router_set_main_model", { model: m }).catch(() => {});
   }
 }
-const modelLabel = () => MODELS.find((x) => x.id === selectedModel.value)?.label ?? "自动";
-
 // ── v6：权限确认弹窗 ──
 function requestPermission(toolId: string, args: string, callId?: string) {
   permRequest.value = { toolId, args, callId };
@@ -871,12 +839,6 @@ function onKeysSaved(keys: { main?: string }) {
 }
 
 // 工具卡 / 消息辅助函数已拆至 ./utils/messageFormat（fmtTs/fmtArgs/fmtOutput/isTerminal/termInfo/hasArgs/hasToolDetail/toolSummary）
-
-function toggleAgent() {
-  agentOn.value = !agentOn.value;
-  const m = currentMode.value === "off" ? "yolo" : currentMode.value;
-  void setMode(agentOn.value ? m : "off");
-}
 </script>
 
 <template>
@@ -1062,23 +1024,11 @@ function toggleAgent() {
       <BottomInput
         ref="bottomInputRef"
         :running="running"
-        :current-round="currentRound"
-        :model-label="modelLabel()"
         :models="MODELS"
         :selected-model="selectedModel"
-        :agent-on="agentOn"
-        :mode="currentMode"
-        :thinking="thinkingOn"
-        :ctx-pct="ctxPct"
-        :ctx-tokens="ctxTokens"
-        :ctx-items="ctxItems"
         @send="handleSend"
         @cancel="handleCancel"
         @select-model="selectModel"
-        @toggle-agent="toggleAgent"
-        @set-mode="setMode"
-        @toggle-thinking="thinkingOn = !thinkingOn"
-        @request-permission="requestPermission"
       />
     </div>
 
