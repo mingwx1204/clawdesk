@@ -191,7 +191,7 @@ pub fn dream_recall(recall_prob: f64, max_age_days: i64) -> Option<String> {
     let today = now.date_naive();
     let g = narratives().lock().unwrap_or_else(|e| e.into_inner());
     // 收集"最近 max_age_days 天内、且不是今天"的叙事
-    let mut candidates: Vec<&Narrative> = g
+    let candidates: Vec<&Narrative> = g
         .iter()
         .filter(|n| {
             match chrono::NaiveDate::parse_from_str(&n.day, "%Y-%m-%d") {
