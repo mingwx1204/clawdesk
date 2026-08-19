@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { invokeTool } from "../core/ToolDispatcher";
 
 /**
@@ -14,7 +14,7 @@ interface AttachItem {
 }
 interface ModelOption { id: string; label: string; desc: string; }
 
-const props = defineProps<{
+defineProps<{
   running?: boolean;
   disabled?: boolean;
   currentRound?: number;
@@ -43,10 +43,8 @@ const attachments = ref<AttachItem[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
 const attachMenuOpen = ref(false);
-const modelMenuOpen = ref(false);
-const modeMenuOpen = ref(false);
 const promptMenuOpen = ref(false);
-const roundNum = computed(() => Math.max(1, props.currentRound ?? 1));
+const moreOpen = ref(false);
 
 /** 快捷指令库（对标大厂提示词模板）。 */
 const PROMPT_TEMPLATES = [
@@ -108,9 +106,6 @@ const MODE_OPTIONS = [
   { id: "step_confirm", label: "逐步确认" },
   { id: "yolo", label: "YOLO 全自动" },
 ];
-const MODE_LABELS: Record<string, string> = { off: "关闭", plan_only: "计划只读", step_confirm: "逐步确认", yolo: "YOLO 全自动" };
-const modeLabel = computed(() => MODE_LABELS[props.mode ?? "off"] ?? props.mode ?? "关闭");
-
 const MAX_FILE_MB = 20; // 与后端 attachment_save 上限一致
 
 function onSend() {
@@ -266,73 +261,57 @@ function removeAttachment(idx: number) {
         </button>
       </div>
 
-      <!-- 模型选择（智能路由） + 思考模式开关 -->
-      <div class="model-wrap">
-        <button class="model-tag" @click="modelMenuOpen = !modelMenuOpen">
-          <span class="l"></span><span>{{ modelLabel }}</span>
+      <!-- ⌘ 更多菜单（收编模型/思考/Agent/模式/上下文/快捷指令） -->
+      <div class="more-wrap">
+        <button class="more-btn" :class="{ on: moreOpen }" title="更多选项" @click="moreOpen = !moreOpen">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
         </button>
-        <button
-          class="think-tag"
-          :class="{ on: thinking }"
-          :title="thinking ? '思考模式已开启：deepseek-reasoner 真实思考链' : '思考模式：用 deepseek-reasoner 展示真实思考链'"
-          @click="emit('toggle-thinking')"
-        >💭</button>
-        <div class="model-menu" :class="{ open: modelMenuOpen }">
+        <div class="more-menu" :class="{ open: moreOpen }" @click.stop>
+          <!-- 模型选择 -->
+          <div class="more-sec">模型</div>
           <button
             v-for="md in models"
             :key="md.id"
-            class="mm-item"
+            class="more-item"
             :class="{ active: md.id === selectedModel }"
-            @click="modelMenuOpen = false; emit('select-model', md.id)"
+            @click="moreOpen = false; emit('select-model', md.id)"
           >
-            <span class="mm-ico">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-            </span>
-            <span class="mm-body">
-              <span class="mm-name">{{ md.label }}</span>
-              <span class="mm-desc">{{ md.desc }}</span>
-            </span>
-            <span class="mm-check">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            </span>
+            <span>{{ md.label }}</span>
+            <span v-if="md.id === selectedModel" class="more-check">✓</span>
           </button>
-        </div>
-      </div>
-
-      <!-- Agent 控制中心 -->
-      <div class="agent-inline">
-        <label class="agent-toggle" @click="emit('toggle-agent')">
-          <span class="at-label">Agent</span>
-          <span class="at-switch" :class="{ on: agentOn }"></span>
-        </label>
-        <div class="mode-wrap">
-          <button class="mode-select" @click="modeMenuOpen = !modeMenuOpen">
-            <span>{{ modeLabel }}</span>
-            <svg class="caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          <!-- 思考模式 -->
+          <div class="more-sec">功能</div>
+          <button class="more-item" :class="{ active: thinking }" @click="emit('toggle-thinking')">
+            <span>💭 思考模式</span>
+            <span v-if="thinking" class="more-dot on"></span>
           </button>
-          <div class="mode-menu" :class="{ open: modeMenuOpen }">
-            <button
-              v-for="mo in MODE_OPTIONS"
-              :key="mo.id"
-              class="mm-item2"
-              :class="{ active: mo.id === mode }"
-              @click="modeMenuOpen = false; emit('set-mode', mo.id)"
-            >
-              <span class="dot"></span>{{ mo.label }}
-            </button>
+          <!-- Agent -->
+          <button class="more-item" @click="emit('toggle-agent')">
+            <span>🤖 Agent</span>
+            <span :class="['more-dot', agentOn ? 'on' : '']"></span>
+          </button>
+          <!-- 模式 -->
+          <div class="more-sec">Agent 模式</div>
+          <button
+            v-for="mo in MODE_OPTIONS"
+            :key="mo.id"
+            class="more-item"
+            :class="{ active: mo.id === mode }"
+            @click="moreOpen = false; emit('set-mode', mo.id)"
+          >
+            <span>{{ mo.label }}</span>
+            <span v-if="mo.id === mode" class="more-check">✓</span>
+          </button>
+          <!-- 上下文 -->
+          <div class="more-sec">上下文 {{ ctxPct }}%</div>
+          <div class="more-ctx">
+            <div class="more-ctx-bar"><span :style="{ width: ctxPct + '%' }"></span></div>
+            <span class="more-ctx-text">{{ ctxTokens }}</span>
           </div>
-        </div>
-        <span v-if="agentOn && running" class="round-status run">
-          <span class="spinner"></span>思考中 · 第 {{ roundNum }} 轮 / 最大 15 轮
-        </span>
-      </div>
-
-      <!-- 快捷指令（提示词模板） -->
-      <div class="prompt-wrap">
-        <button class="prompt-tag" title="快捷指令" @click="promptMenuOpen = !promptMenuOpen">📚</button>
-        <div class="prompt-menu" :class="{ open: promptMenuOpen }" @click.stop>
-          <button v-for="t in PROMPT_TEMPLATES" :key="t.label" class="pm-item" @click="insertTemplate(t)">
-            {{ t.label }}
+          <!-- 快捷指令 -->
+          <div class="more-sec">快捷指令</div>
+          <button v-for="t in PROMPT_TEMPLATES" :key="t.label" class="more-item" @click="insertTemplate(t); moreOpen = false">
+            <span>{{ t.label }}</span>
           </button>
         </div>
       </div>
@@ -347,33 +326,6 @@ function removeAttachment(idx: number) {
         @drop="onDrop"
         @dragover.prevent
       />
-
-      <!-- 上下文进度环（悬停面板 + 压缩对话） -->
-      <div class="progress-wrap">
-        <span class="pct">{{ ctxPct ?? 0 }}%</span>
-        <div class="ctx-panel">
-          <div class="cp-title">会话信息</div>
-          <div class="cp-sub">上下文窗口</div>
-          <div class="cp-token">
-            <span class="cp-bar"><span class="cp-fill" :style="{ width: ctxPct + '%' }"></span></span>
-            <span class="cp-val">{{ ctxPct }}%</span>
-          </div>
-          <div class="cp-line">{{ ctxTokens }}</div>
-          <div class="cp-sec">系统</div>
-          <div class="cp-item"><span>系统指令</span><span>{{ ctxItems?.sys[0] }}%</span></div>
-          <div class="cp-item"><span>工具定义</span><span>{{ ctxItems?.sys[1] }}%</span></div>
-          <div class="cp-sec">用户上下文</div>
-          <div class="cp-item"><span>消息</span><span>{{ ctxItems?.usr[0] }}%</span></div>
-          <div class="cp-item"><span>工具操控</span><span>{{ ctxItems?.usr[1] }}%</span></div>
-          <div class="cp-item"><span>文件</span><span>{{ ctxItems?.usr[2] }}%</span></div>
-        </div>
-        <div class="ring">
-          <svg width="26" height="26" viewBox="0 0 24 24">
-            <circle class="ring-track" cx="12" cy="12" r="9"/>
-            <circle class="ring-fill" cx="12" cy="12" r="9"/>
-          </svg>
-        </div>
-      </div>
 
       <!-- 发送 / 停止 -->
       <button

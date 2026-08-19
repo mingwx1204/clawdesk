@@ -110,6 +110,8 @@ const searching = ref(false);
 const exporting = ref(false);
 
 // ── v6 交互状态 ──
+// 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
+const sidebarCollapsed = ref(false);
 const sessionPanelOpen = ref(false);
 const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
 const modelMenuOpen = ref(false);
@@ -770,10 +772,7 @@ async function setMode(mode: string) {
   }
 }
 
-// ── v6：会话下拉 ──
-function toggleSessionPanel() {
-  sessionPanelOpen.value = !sessionPanelOpen.value;
-}
+// ── v7：会话列表已迁移到侧边栏，不再需要下拉方式
 const newSessionOpen = ref(false);
 const newSessionName = ref("");
 function openNewSession() {
@@ -900,6 +899,9 @@ function toggleAgent() {
       <!-- 注意：不要加 data-tauri-drag-region，它会拦截 JS 的 mousedown，导致 startDragging 不触发 -->
       <div class="titlebar" @mousedown="onTitlebarMouseDown">
         <div class="tb-brand">
+          <button class="tb-btn sidebar-toggle-btn" title="侧边栏" @mousedown.stop @click="sidebarCollapsed = !sidebarCollapsed">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          </button>
           <svg class="tb-logo" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.6" fill="currentColor"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(120 12 12)"/></svg>
           <span class="tb-title">ClawDesk</span>
         </div>
@@ -916,59 +918,66 @@ function toggleAgent() {
         </div>
       </div>
 
-      <!-- 顶部：所有会话 + 设置 -->
+      <!-- 侧边栏（绝对定位 overlay，不参与文档流） -->
+      <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+        <div class="sidebar-head">
+          <span class="sb-title">💬 会话</span>
+        </div>
+        <button class="sidebar-new" @click="openNewSession">＋ 新建会话</button>
+        <div class="sidebar-body">
+          <div
+            v-for="s in sessions"
+            :key="s"
+            class="sp-item"
+            :class="{ active: s === sessionId }"
+            @click="selectSession(s)"
+          >
+            <span class="sp-ico">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            </span>
+            <span class="sp-body">
+              <span class="sp-name">{{ sessionNames[s] || s }}<span v-if="checkpoints[s]" class="cp-badge">断点</span></span>
+              <span class="sp-time">{{ s }}</span>
+            </span>
+            <span class="sp-ops">
+              <span class="sp-op" title="重命名" @click.stop="renameSession(s)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+              </span>
+              <span class="sp-op" title="Fork 分支" @click.stop="forkSession(s)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+              </span>
+              <span class="sp-op" title="断点续跑" @click.stop="resumeSession(s)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              </span>
+              <span class="sp-del" title="删除会话" @click.stop="deleteSession(s)">✕</span>
+            </span>
+          </div>
+          <p v-if="!sessions.length" class="sp-empty">暂无会话</p>
+        </div>
+        <div class="sidebar-foot">
+          <button class="sb-foot-btn" title="搜索" @click="searchOpen = true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            搜索
+          </button>
+          <button class="sb-foot-btn" title="微信" @click="showWechat = true">
+            <span class="wx-dot" :class="{ on: wechatOnline }"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8.69 4C4.86 4 1.75 6.57 1.75 9.75c0 1.78.9 3.38 2.33 4.47l-.66 2.05a.35.35 0 0 0 .52.4l2.36-1.36c.74.2 1.52.3 2.39.3h.22c-.06-.4-.1-.82-.1-1.24 0-3.22 3.04-5.86 6.87-5.86.2 0 .4.01.6.02C15.45 6.1 12.4 4 8.69 4zm-2.2 3.5a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zm4.75 0a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zM18.5 9.5c-3.13 0-5.75 2.28-5.75 5.25S15.37 20 18.5 20c.77 0 1.5-.14 2.16-.38l1.55.89a.28.28 0 0 0 .42-.32l-.53-1.64c1.28-.93 2.15-2.3 2.15-3.8 0-2.97-2.62-5.25-5.75-5.25zm-2 4.5a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36zm4 0a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36z"/></svg>
+            微信
+          </button>
+          <button class="sb-foot-btn" title="设置" @click="showSettings = true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            设置
+          </button>
+        </div>
+      </aside>
+
+      <!-- 顶部栏（精简：搜索 + 导出，微信/设置已迁入侧边栏） -->
       <div class="top-bar">
         <div class="top-left">
-          <button class="mem-btn" @click="toggleSessionPanel">所有会话</button>
           <button class="mem-btn top-icon" title="搜索历史对话" @click="searchOpen = true">🔍</button>
           <button class="mem-btn top-icon" title="导出当前会话" :disabled="exporting" @click="exportSession">📤</button>
         </div>
         <div class="status-right">
-          <button class="settings-btn wx-btn" title="内置微信（独立账号，不影响电脑上的微信）" @click="showWechat = true">
-            <span class="wx-dot" :class="{ on: wechatOnline }"></span>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.69 4C4.86 4 1.75 6.57 1.75 9.75c0 1.78.9 3.38 2.33 4.47l-.66 2.05a.35.35 0 0 0 .52.4l2.36-1.36c.74.2 1.52.3 2.39.3h.22c-.06-.4-.1-.82-.1-1.24 0-3.22 3.04-5.86 6.87-5.86.2 0 .4.01.6.02C15.45 6.1 12.4 4 8.69 4zm-2.2 3.5a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zm4.75 0a.83.83 0 1 1 0 1.66.83.83 0 0 1 0-1.66zM18.5 9.5c-3.13 0-5.75 2.28-5.75 5.25S15.37 20 18.5 20c.77 0 1.5-.14 2.16-.38l1.55.89a.28.28 0 0 0 .42-.32l-.53-1.64c1.28-.93 2.15-2.3 2.15-3.8 0-2.97-2.62-5.25-5.75-5.25zm-2 4.5a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36zm4 0a.68.68 0 1 1 0 1.36.68.68 0 0 1 0-1.36z"/></svg>
-          </button>
-          <button class="settings-btn" title="设置" @click="showSettings = true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
-
-        <!-- 所有会话下拉 -->
-        <div class="session-panel" :class="{ open: sessionPanelOpen }">
-          <button class="sp-new" @click="openNewSession">＋ 新建会话</button>
-          <div class="sp-list">
-            <div
-              v-for="s in sessions"
-              :key="s"
-              class="sp-item"
-              :class="{ active: s === sessionId }"
-              @click="selectSession(s)"
-            >
-              <span class="sp-ico">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-              </span>
-              <span class="sp-body">
-                <span class="sp-name">{{ sessionNames[s] || s }}<span v-if="checkpoints[s]" class="cp-badge">断点</span></span>
-                <span class="sp-time">{{ s }}</span>
-              </span>
-              <span class="sp-ops">
-                <span class="sp-op" title="重命名" @click.stop="renameSession(s)">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-                </span>
-                <span class="sp-op" title="Fork 分支" @click.stop="forkSession(s)">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
-                </span>
-                <span class="sp-op" title="断点续跑" @click.stop="resumeSession(s)">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                </span>
-                <span class="sp-del" title="删除会话" @click.stop="deleteSession(s)">✕</span>
-              </span>
-            </div>
-            <p v-if="!sessions.length" class="sp-empty">暂无会话</p>
-          </div>
         </div>
       </div>
 
