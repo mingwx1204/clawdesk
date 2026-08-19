@@ -54,3 +54,30 @@ export const systemApi = {
   lastError: () => invoke<{ message: string; location: string; logPath: string; timestamp?: string } | null>("app_last_error"),
   openInExplorer: (path: string) => invoke("win_open_in_explorer", { path }),
 };
+
+// ── 微信 iLink Bot ──
+export const wechatApi = {
+  botStatus: () => invoke<any>("wechat_bot_status"),
+  getQr: (slot: number) => invoke<{ qrcode: string; qrcodeUrl: string }>("wechat_get_qr", { slot }),
+  refreshQr: (slot: number) => invoke<{ qrcode: string; qrcodeUrl: string }>("wechat_refresh_qr", { slot }),
+  qrStatus: (slot: number) => invoke<any>("wechat_qr_status", { slot }),
+  verifyCode: (code: string, slot: number) => invoke("wechat_verify_code", { code, slot }),
+  botStart: (slot: number) => invoke("wechat_bot_start", { config: {}, slot }),
+  botStop: (slot: number) => invoke("wechat_bot_stop", { slot }),
+  logout: (slot: number) => invoke("wechat_logout", { slot }),
+  setPersona: (slot: number, persona: string) => invoke("wechat_set_persona", { slot, persona }),
+  setProactive: (args: Record<string, unknown>) => invoke<any>("wechat_set_proactive", args),
+  setBotRules: (args: Record<string, unknown>) => invoke<any>("wechat_set_bot_rules", args),
+  history: (slot: number) => invoke<{ records: any[] }>("wechat_history", { slot }),
+  botReply: (args: Record<string, unknown>) => invoke("wechat_bot_reply", args),
+  sendMessage: (args: Record<string, unknown>) => invoke("wechat_send_message", args),
+  sendImage: (toUser: string, imagePath: string, slot: number) => invoke("wechat_send_image", { toUser, imagePath, slot }),
+  sendVoice: (toUser: string, text: string, slot: number) => invoke("wechat_send_voice", { toUser, text, slot }),
+  typing: (toUser: string, active: boolean, slot: number) => invoke("wechat_typing", { toUser, active, slot }),
+  livingState: () => invoke<string>("wechat_living_state"),
+  moodState: () => invoke<any>("wechat_mood_state"),
+  soulSnapshot: () => invoke<any>("wechat_soul_snapshot"),
+  livingContext: () => invoke<string>("wechat_living_context"),
+  soulContext: () => invoke<string>("wechat_soul_context"),
+  mobileQrSvg: (text: string) => invoke<string>("mobile_qr_svg", { text }),
+};

@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { chatApi, wechatApi } from "../utils/api";
 
 /**
  * 微信自动回复逻辑（从 App.vue 下沉的独立 composable）。
@@ -50,7 +50,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
     // 读取该微信的人设（后端 wechat 槽位 persona，已随账号恢复）
     let persona: string | null = null;
     try {
-      const st = await invoke<any>("wechat_bot_status");
+      const st = await wechatApi.botStatus();
       const bots = st?.bots || [];
       const b = bots.find((x: any) => x.slot === slot);
       if (b?.personaText) persona = b.personaText;
@@ -69,7 +69,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       //   人设自然演绎（猫→晒太阳、机器人→待机充电），不与人设冲突。
       let livingNote = "";
       try {
-        const living = await invoke<string>("wechat_living_context");
+        const living = await wechatApi.livingContext();
         if (living) livingNote = `\n\n[你的世界日常节奏（这是你所在世界的真实时间线，时间与真实时钟同步。但它只是背景参考，你必须结合自己的人设自然演绎你的生活，不必照搬人类活动——比如你是猫就演绎成晒太阳/追毛线，你是机器人就演绎成待机/充电，你是修仙者就演绎成闭关/炼丹。用户问你在干嘛/你最近在干嘛时按此回答）：${living}]`;
       } catch { /* 状态获取失败忽略 */ }
       // ★ 微信真人聊天风格约束（去 AI 味）：微信聊天要像真人朋友发消息，
@@ -78,7 +78,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       //   + 记得主人随口提过的事。自动回复时让"活人感"自然流露。
       let soulNote = "";
       try {
-        const soul = await invoke<string>("wechat_soul_context");
+        const soul = await wechatApi.soulContext();
         if (soul) soulNote = `\n\n${soul}`;
       } catch { /* 灵魂上下文获取失败忽略 */ }
       //   不是写文章——短、口语、有情绪、不解释过程。
@@ -100,7 +100,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       }
       // ★ AI 生成期间显示"对方正在输入"（后端保活，回复后 finally 关闭）
       startWechatTyping(msg.fromUser, slot);
-      const outcome = await invoke<any>("agent_chat", {
+      const outcome = await chatApi.chat({
         apiKey,
         sessionId: `wechat-${slot}`, // ★ 每个微信独立会话记忆（wechat-0 / wechat-1 …）
         runId: `wechat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -123,7 +123,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       if (generatedImages.length) {
         for (const imgPath of generatedImages) {
           try {
-            await invoke("wechat_send_image", { toUser: msg.fromUser, imagePath: imgPath, slot });
+            await wechatApi.sendImage(msg.fromUser, imgPath, slot);
             console.log(`[wechat] 已发送图片到 ${msg.fromUser}: ${imgPath}`);
           } catch (e) {
             console.error("[wechat] 发送图片失败", e);
@@ -131,7 +131,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
         }
       }
       if (!reply) return;
-      await invoke("wechat_bot_reply", {
+      await wechatApi.botReply({
         msgId: msg.msgId,
         toUser: msg.fromUser,
         content: reply,
@@ -145,7 +145,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
         // 不传 voice：后端按已保存的 voice_id 合成（Edge/CosyVoice 共用同一字段），
         // 避免旧代码硬编码 Edge 默认音色覆盖用户选择的 CosyVoice 音色
         try {
-          await invoke("wechat_send_voice", { toUser: msg.fromUser, text: reply, slot });
+          await wechatApi.sendVoice(msg.fromUser, reply, slot);
           console.log(`[wechat] 语音回复已发送 ${msg.fromUser}`);
         } catch (e) {
           console.error("[wechat] 语音回复发送失败", e);
@@ -155,7 +155,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       console.error("微信自动回复失败", e);
     } finally {
       // ★ 停止"正在输入"保活（无论成功/失败都结束输入态，避免对方一直看到输入中）
-      void invoke("wechat_typing", { toUser: msg.fromUser, active: false, slot }).catch(() => {});
+      void wechatApi.typing(msg.fromUser, false, slot).catch(() => {});
     }
   }
 
@@ -165,7 +165,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
    * autoReplyWechat 的 finally 关闭。生成前调用一次即可（保活由后端维持）。
    */
   function startWechatTyping(toUser: string, slot: number) {
-    void invoke("wechat_typing", { toUser, active: true, slot }).catch(() => {});
+    void wechatApi.typing(toUser, true, slot).catch(() => {});
   }
 
   /** 挂载微信消息监听（组件 onMounted 时调用，返回解除函数） */

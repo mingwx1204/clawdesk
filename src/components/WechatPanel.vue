@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { sessionsApi, wechatApi } from "../utils/api";
 
 /** 微信消息（与后端 WechatMessage 对应）。 */
 interface WechatMsg {
@@ -100,7 +100,7 @@ const chatTip = ref("");
 /** 从后端加载当前槽位聊天记录，重建会话列表 + 当前会话消息。 */
 async function reloadChats(): Promise<void> {
   try {
-    const r = await invoke<{ records: any[] }>("wechat_history", { slot: curSlot.value });
+    const r = await wechatApi.history(curSlot.value);
     const records: any[] = r?.records ?? [];
     chatCache.value = records;
     // 按联系人 dir 分组（dir = 对方用户 ID；AI 发出的消息 toUser 同为 dir）
@@ -156,7 +156,7 @@ async function sendChat(): Promise<void> {
   if (!activeChat.value) return;
   chatSending.value = true;
   try {
-    await invoke("wechat_send_message", {
+    await wechatApi.sendMessage({
       toUser: activeChat.value,
       content: text,
       slot: curSlot.value,
@@ -253,7 +253,7 @@ async function saveProactive() {
     if (proactiveIntervalMin.value > proactiveIntervalMax.value) {
       proactiveIntervalMax.value = proactiveIntervalMin.value;
     }
-    const r = await invoke<any>("wechat_set_proactive", {
+    const r = await wechatApi.setProactive({
       slot: curSlot.value,
       enabled: proactiveEnabled.value,
       intervalMin: proactiveIntervalMin.value,
@@ -289,7 +289,7 @@ function syncProactive(b: BotStatus | undefined) {
 async function genQrSvg(text: string): Promise<string> {
   if (!text) return "";
   try {
-    return await invoke<string>("mobile_qr_svg", { text });
+    return await wechatApi.mobileQrSvg(text);
   } catch {
     return "";
   }
@@ -368,7 +368,7 @@ function setVoiceReply(v: boolean) {
 /** 保存使用规则（白名单 + 音色 + 引擎，后端持久化） */
 async function saveRules() {
   try {
-    const r = await invoke<any>("wechat_set_bot_rules", {
+    const r = await wechatApi.setBotRules({
       slot: curSlot.value,
       allowedUsers: allowedUsers.value.trim() || null,
       voiceId: voiceId.value.trim() || null,
@@ -412,7 +412,7 @@ function setAutoReply(v: boolean) {
 
 async function refreshStatus() {
   try {
-    const r = await invoke<any>("wechat_bot_status");
+    const r = await wechatApi.botStatus();
     bots.value = r?.bots || [];
     // ★ 同步当前槽位的后端设置（重启后自动恢复的主动聊天配置；
     //    主动消息发送后轮询也能刷新"上次主动"时间）
@@ -436,24 +436,24 @@ async function refreshStatus() {
   } catch { /* 静默 */ }
   // ★ AI 生活状态（世界线）：与 bot 状态一并刷新，展示 AI 此刻在做什么
   try {
-    const s = await invoke<string>("wechat_living_state");
+    const s = await wechatApi.livingState();
     if (s) livingState.value = s;
   } catch { /* 静默 */ }
   // ★ AI 当前心情（情绪引擎）：展示 AI 此刻的心情标签
   try {
-    const m = await invoke<any>("wechat_mood_state");
+    const m = await wechatApi.moodState();
     if (m?.label) moodState.value = m.label;
   } catch { /* 静默 */ }
   // ★ 灵魂全景：一次性拉取八层状态
   try {
-    soulSnap.value = await invoke<any>("wechat_soul_snapshot");
+    soulSnap.value = await wechatApi.soulSnapshot();
   } catch { /* 静默 */ }
 }
 
 async function startQr() {
   qrState.value = "loading";
   try {
-    const r = await invoke<{ qrcode: string; qrcodeUrl: string }>("wechat_get_qr", { slot: curSlot.value });
+    const r = await wechatApi.getQr(curSlot.value);
     qrcodeUrl.value = r.qrcodeUrl;
     qrSvg.value = await genQrSvg(r.qrcodeUrl);
     qrState.value = "wait";
@@ -467,7 +467,7 @@ async function startQr() {
 
 async function refreshQr() {
   try {
-    const r = await invoke<{ qrcode: string; qrcodeUrl: string }>("wechat_refresh_qr", { slot: curSlot.value });
+    const r = await wechatApi.refreshQr(curSlot.value);
     qrcodeUrl.value = r.qrcodeUrl;
     qrSvg.value = await genQrSvg(r.qrcodeUrl);
     qrState.value = "wait";
@@ -496,7 +496,7 @@ async function pollQr() {
   if (pollBusy || qrState.value === "confirmed") return;
   pollBusy = true;
   try {
-    const r = await invoke<any>("wechat_qr_status", { slot: curSlot.value });
+    const r = await wechatApi.qrStatus(curSlot.value);
     const s = r?.status;
     if (s === "confirmed") {
       qrState.value = "confirmed";
@@ -526,7 +526,7 @@ async function pollQr() {
 async function submitVerifyCode() {
   if (!verifyCode.value.trim()) return;
   try {
-    await invoke("wechat_verify_code", { code: verifyCode.value.trim(), slot: curSlot.value });
+    await wechatApi.verifyCode(verifyCode.value.trim(), curSlot.value);
     verifyCode.value = "";
     qrState.value = "wait";
     pushLog("🔢 配对码已提交，等待确认…");
@@ -538,7 +538,7 @@ async function submitVerifyCode() {
 
 async function startBot() {
   try {
-    await invoke("wechat_bot_start", { config: {}, slot: curSlot.value });
+    await wechatApi.botStart(curSlot.value);
     pushLog(`🚀 微信 Bot 已启动，长轮询接收消息中…`);
   } catch (e) {
     pushLog(`启动失败: ${e}`);
@@ -548,7 +548,7 @@ async function startBot() {
 
 async function stopBot() {
   try {
-    await invoke("wechat_bot_stop", { slot: curSlot.value });
+    await wechatApi.botStop(curSlot.value);
     pushLog(`⏹ 微信 Bot 已停止`);
   } catch (e) {
     pushLog(`停止失败: ${e}`);
@@ -558,7 +558,7 @@ async function stopBot() {
 
 async function logout() {
   try {
-    await invoke("wechat_logout", { slot: curSlot.value });
+    await wechatApi.logout(curSlot.value);
     pushLog(`👋 已登出微信`);
     qrcodeUrl.value = "";
     qrSvg.value = "";
@@ -574,7 +574,7 @@ async function logout() {
 async function clearMemory() {
   const sid = `wechat-${curSlot.value}`;
   try {
-    const ok = await invoke<boolean>("agent_session_delete", { sessionId: sid });
+    const ok = await sessionsApi.delete(sid);
     if (ok) {
       pushLog(`🧹 已清除 微信 的 AI 记忆（会话 ${sid}）`);
     } else {
@@ -590,7 +590,7 @@ async function savePersona() {
   personaLoading.value = true;
   personaSaved.value = false;
   try {
-    await invoke("wechat_set_persona", { slot: curSlot.value, persona: personaText.value });
+    await wechatApi.setPersona(curSlot.value, personaText.value);
     personaSaved.value = true;
     personaDirty.value = false; // 保存成功 = 恢复同步，轮询可继续回填
     pushLog(`✅ 微信 人设已保存（${personaText.value.length} 字）`);
@@ -606,7 +606,7 @@ async function savePersona() {
 /** 读取该微信的聊天记录（D 盘 history.jsonl） */
 async function loadHistory(slot: number) {
   try {
-    const r = await invoke<any>("wechat_history", { slot });
+    const r = await wechatApi.history(slot);
     historyList.value = r?.records || [];
   } catch { historyList.value = []; }
 }
@@ -618,7 +618,7 @@ async function testReply() {
     return;
   }
   try {
-    await invoke("wechat_bot_reply", {
+    await wechatApi.botReply({
       msgId: last.msgId,
       toUser: last.fromUser,
       content: "👋 测试回复成功！ClawDesk 微信 Bot 运行正常。",
