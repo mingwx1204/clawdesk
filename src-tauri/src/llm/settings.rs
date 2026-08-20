@@ -9,8 +9,9 @@
 //!   与 client.rs "Key 不落盘、不打印" 契约一致；
 //! - 每一轮 DeepSeek 推理经 runner 读取最新设置（环境快照注入配置摘要）。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,23 @@ use serde::{Deserialize, Serialize};
 /// **避免 set_var 修改全局环境变量导致并行测试互相污染**（项目 7 修复，
 /// 与 snapshot.rs ROOT_OVERRIDE 同款方案）。
 static PATH_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// 数据目录的**线程级**测试覆盖：只影响设置覆盖的当前测试线程。
+/// 进程级 `CLAWDESK_DATA_DIR` env 方案会让其他并行测试线程写日志时也
+/// 落到临时目录，污染 tail/rotate/tool_log 等断言（全量并行偶发失败根因）。
+static DATA_DIR_THREAD_OVERRIDE: LazyLock<Mutex<HashMap<std::thread::ThreadId, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 测试专用：给当前线程设置/清除数据目录覆盖。
+#[cfg(test)]
+pub(crate) fn set_test_thread_data_dir(dir: Option<PathBuf>) {
+    let tid = std::thread::current().id();
+    let mut map = DATA_DIR_THREAD_OVERRIDE.lock().unwrap();
+    match dir {
+        Some(d) => { map.insert(tid, d); }
+        None => { map.remove(&tid); }
+    }
+}
 
 /// 设置文件路径：`<数据目录>/settings.json`（软件升级不覆盖）。
 pub fn settings_path() -> PathBuf {
@@ -36,6 +54,12 @@ pub fn settings_path() -> PathBuf {
 ///   自动把 settings.json / keys.enc / sessions.db / knowledge.db / tool_logs.log / snapshots / exports 复制过去，
 ///   保证从旧版本升级不丢配置与 Key。
 pub fn clawdesk_dir() -> PathBuf {
+    {
+        let map = DATA_DIR_THREAD_OVERRIDE.lock().unwrap();
+        if let Some(dir) = map.get(&std::thread::current().id()) {
+            return dir.clone();
+        }
+    }
     if let Some(p) = std::env::var_os("CLAWDESK_DATA_DIR") {
         let dir = PathBuf::from(p);
         let _ = std::fs::create_dir_all(&dir);

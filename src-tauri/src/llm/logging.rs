@@ -118,21 +118,16 @@ fn rotate_if_needed(path: &PathBuf, max_bytes: u64) {
 mod tests {
     use super::*;
 
-    /// 测试专用：把日志目录指向临时目录（覆盖层方案，避免 set_var 污染并行测试）。
+    /// 测试专用：把日志目录指向临时目录。
+    /// 使用线程级数据目录覆盖：其他并行测试线程不受影响，也不会污染本线程断言。
     fn with_temp_log_dir<T>(f: impl FnOnce() -> T) -> T {
-        let _g = super::test_env_lock();
+        let _g = crate::llm::logging::test_env_lock(); // 同模块测试串行，避免共用同名临时目录
         let dir = std::env::temp_dir().join(format!("clawdesk-logdir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // ★ 用 CLAWDESK_DATA_DIR 覆盖（clawdesk_dir 优先读它；只覆盖 APPDATA
-        //   在真实数据目录 D:\ClawDeskData 存在时会写入真实目录，并行测试互相污染）
-        let old = std::env::var("CLAWDESK_DATA_DIR").ok();
-        std::env::set_var("CLAWDESK_DATA_DIR", &dir);
+        crate::llm::settings::set_test_thread_data_dir(Some(dir.clone()));
         let result = f();
-        match old {
-            Some(v) => std::env::set_var("CLAWDESK_DATA_DIR", v),
-            None => std::env::remove_var("CLAWDESK_DATA_DIR"),
-        }
+        crate::llm::settings::set_test_thread_data_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
         result
     }

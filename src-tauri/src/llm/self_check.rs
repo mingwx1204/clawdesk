@@ -181,18 +181,15 @@ mod tests {
     use super::*;
 
     fn with_temp_log_dir<T>(f: impl FnOnce() -> T) -> T {
-        let _g = crate::llm::logging::test_env_lock();
+        let _g = crate::llm::logging::test_env_lock(); // 同模块测试串行，避免共用同名临时目录
         let dir = std::env::temp_dir().join(format!("clawdesk-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // ★ 用 CLAWDESK_DATA_DIR 覆盖（clawdesk_dir 优先读它，避免写入真实数据目录）
-        let old = std::env::var("CLAWDESK_DATA_DIR").ok();
-        std::env::set_var("CLAWDESK_DATA_DIR", &dir);
+        // 线程级覆盖：自检中的 SQLite / 日志路径只对当前测试线程生效，
+        // 其他并行测试线程不受影响，避免全量并行时互相污染。
+        crate::llm::settings::set_test_thread_data_dir(Some(dir.clone()));
         let result = f();
-        match old {
-            Some(v) => std::env::set_var("CLAWDESK_DATA_DIR", v),
-            None => std::env::remove_var("CLAWDESK_DATA_DIR"),
-        }
+        crate::llm::settings::set_test_thread_data_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
         result
     }

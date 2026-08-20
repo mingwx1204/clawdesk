@@ -72,13 +72,12 @@ mod tests {
 
     #[test]
     fn record_writes_log_file() {
-        // 共享串行锁：与 logging / error_guard 等测试的 set_var(数据目录) 互斥
         let _g = crate::llm::logging::test_env_lock();
         let dir = std::env::temp_dir().join(format!("clawdesk-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // ★ 用 CLAWDESK_DATA_DIR 覆盖（clawdesk_dir 优先读它，避免写入真实数据目录）
-        let old = std::env::var("CLAWDESK_DATA_DIR").ok();
-        std::env::set_var("CLAWDESK_DATA_DIR", &dir);
+        // 线程级覆盖：只有当前测试线程写 tool_logs.log 会落到临时目录
+        crate::llm::settings::set_test_thread_data_dir(Some(dir.clone()));
 
         record(
             "builtin:get_time",
@@ -95,11 +94,7 @@ mod tests {
         assert!(content.contains("builtin:get_time"));
         assert!(content.contains("success"));
 
-        // 恢复环境变量
-        match old {
-            Some(v) => std::env::set_var("CLAWDESK_DATA_DIR", v),
-            None => std::env::remove_var("CLAWDESK_DATA_DIR"),
-        }
+        crate::llm::settings::set_test_thread_data_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
