@@ -1,8 +1,11 @@
-# ── 编译加速：sccache 编译缓存（跨 clean 复用，二次全量构建提速数倍）──
+# ── 编译加速：sccache 缓存 + rust-lld 链接器（2-5x 链接提速）──
 [build]
 rustc-wrapper = "sccache"
 
 # 静态链接 VC++ 运行时，消除对 Visual C++ Redistributable 的依赖
 # 这样 exe 可以在任何 Win10/Win11 电脑上直接运行，无需额外安装运行时库
+# rust-lld 替代 MSVC link.exe：链接阶段提速 2-5x（Rust 1.90+ stable 支持）
+# rust-lld 路径在 rustup toolchain 的 lib/rustlib/<target>/bin/ 下
 [target.x86_64-pc-windows-msvc]
+linker = "D:/AppData/rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
 rustflags = ["-C", "target-feature=+crt-static"]
