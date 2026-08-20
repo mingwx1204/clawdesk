@@ -284,6 +284,8 @@ pub fn run() {
             commands::log_cmd::logs_tail,
             commands::log_cmd::logs_size,
             commands::log_cmd::app_last_error,
+            commands::llama_server::local_vision_ready,
+            commands::llama_server::local_vision_available,
             commands::log_cmd::self_check_run,
             commands::win_cmd::win_open_in_explorer,
             commands::win_cmd::win_clipboard_set,

@@ -53,6 +53,10 @@ export const searchApi = {
 export const systemApi = {
   lastError: () => invoke<{ message: string; location: string; logPath: string; timestamp?: string } | null>("app_last_error"),
   openInExplorer: (path: string) => invoke("win_open_in_explorer", { path }),
+  // 本地视觉服务（llama-server）是否就绪：供启动动画等待模型加载完成
+  localVisionReady: () => invoke<boolean>("local_vision_ready"),
+  // 本地视觉是否已安装（模型+llama-server）：无模型则跳过等待
+  localVisionAvailable: () => invoke<boolean>("local_vision_available"),
 };
 
 // ── 微信 iLink Bot ──

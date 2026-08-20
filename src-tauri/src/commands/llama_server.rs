@@ -316,6 +316,19 @@ pub fn health_ok() -> bool {
         .unwrap_or(false)
 }
 
+/// 本地视觉服务是否已就绪（health 检查）。供前端轮询，决定何时淡出启动动画。
+#[tauri::command]
+pub fn local_vision_ready() -> bool {
+    health_ok()
+}
+
+/// 本地视觉是否「可用」（模型 + llama-server 都已安装）。
+/// 前端据此决定：无模型则跳过等待，直接淡出启动动画（不等满超时）。
+#[tauri::command]
+pub fn local_vision_available() -> bool {
+    model_dir().is_some() && llama_server_exe().is_some()
+}
+
 /// 终止 llama-server 子进程（退出时调用）。
 pub fn stop() {
     let mut guard = LLAMA_SERVER.lock().unwrap_or_else(|e| e.into_inner());

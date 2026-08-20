@@ -128,8 +128,6 @@ let streamBuf = "";
 let thinkingBuf = "";
 
 onMounted(async () => {
-  // ★ 兜底：无论初始化是否异常，最多 6 秒后强制淡出启动动画，防止卡死
-  window.setTimeout(() => window.__splashHide?.(), 6000);
   try {
     unlisten = await listen<any>("agent://progress", (e) => handleProgress(e.payload));
     // 缺陷2修复：监听引擎 SSE 流式事件（harness_start_task 新路径）
@@ -182,10 +180,57 @@ onMounted(async () => {
   // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
   void import("./lib/tts").then(({ loadTtsSettings }) => void loadTtsSettings());
 
-  // ★ 初始化完成 → 淡出启动动画（index.html 内联 splash）
-  //   延迟一点让用户看到完整的开场动画，再切入主界面
-  setTimeout(() => window.__splashHide?.(), 300);
+  // ★ 启动动画联动：等待本地视觉模型（llama-server）就绪或超时，
+  //   就绪后淡出 splash，让用户在动画期间完成模型加载。
+  //   轮询 backoff：200ms → 400ms → ... → 最大 2s 间隔，最长等 30s。
+  void waitForLocalVision();
 });
+
+/**
+ * 等待本地视觉服务（llama-server）就绪后淡出启动动画。
+ *
+ * 联动逻辑：
+ * - 后端已在启动时自动 spawn llama-server（异步加载模型，约 11s）；
+ * - 若模型文件不存在，后端未启动服务，这里快速返回（不无限等待）；
+ * - 轮询 backoff：200ms 起逐步放大到 2s 上限，最长 30s 强制淡出（防卡死）；
+ * - 就绪 / 超时 / 无模型 → 都淡出 splash，进入主界面。
+ */
+async function waitForLocalVision() {
+  // 先确认本地视觉是否已安装：无模型/无 llama-server 则立即淡出，不空等
+  try {
+    const available = await systemApi.localVisionAvailable();
+    if (!available) {
+      window.__splashHide?.();
+      return;
+    }
+  } catch {
+    window.__splashHide?.();
+    return;
+  }
+
+  const START = Date.now();
+  const MAX_WAIT_MS = 30_000;
+  let interval = 200;
+
+  while (Date.now() - START < MAX_WAIT_MS) {
+    try {
+      const ready = await systemApi.localVisionReady();
+      if (ready) {
+        window.__splashHide?.();
+        return;
+      }
+    } catch {
+      // 命令失败（异常）视为「无需等待」，直接淡出
+      window.__splashHide?.();
+      return;
+    }
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(interval * 2, 2000);
+  }
+
+  // 超时兜底：不再等待，淡出进入主界面
+  window.__splashHide?.();
+}
 
 onUnmounted(() => {
   unlisten?.();
