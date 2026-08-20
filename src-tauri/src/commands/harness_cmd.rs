@@ -51,6 +51,10 @@ pub async fn harness_start_task(app: tauri::AppHandle, state: State<'_, AppState
         confirm: if matches!(agent_mode, crate::llm::AgentMode::StepConfirm) { Some(crate::harness::hooks::bridge::make_step_confirm_callback(registry.clone(), None)) } else { None },
     });
 
+    // 会话级互斥：与 agent_chat / 手动压缩 / 清空上下文串行，避免读-改-写覆盖。
+    let session_lock = state.session_locks.for_session(&session_id);
+    let _session_guard = session_lock.lock().await;
+
     let session = state.sessions.get_or_create(&session_id);
     let mut messages: Vec<serde_json::Value> = session.messages.iter().map(|m| {
         let role = match m.role { crate::llm::Role::System=>"system", crate::llm::Role::User=>"user", crate::llm::Role::Assistant=>"assistant", crate::llm::Role::Tool=>"tool" };

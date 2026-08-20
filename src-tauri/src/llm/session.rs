@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,29 @@ pub struct AgentCheckpoint {
     /// 当前上下文摘要。
     pub summary: String,
     pub created_at: String,
+}
+
+/// 按会话 ID 的异步互斥锁：同一会话的 agent_chat / 手动压缩 / 清空上下文 /
+/// 微信主动聊天记忆写入必须串行，避免「读-改-写」竞争导致消息或摘要互相覆盖。
+///
+/// 锁表常驻（会话数量有限），调用方拿到 `Arc<tokio::sync::Mutex<()>>` 后
+/// `.lock().await`，guard 生命周期 = 该会话的操作临界区。
+#[derive(Default)]
+pub struct SessionLocks {
+    map: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl SessionLocks {
+    pub fn new() -> Self {
+        Self { map: Mutex::new(HashMap::new()) }
+    }
+
+    pub fn for_session(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.map.lock().unwrap();
+        map.entry(id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 /// 会话管理器（应用级共享状态，线程安全）。
@@ -500,6 +523,16 @@ mod tests {
         assert_eq!(cleared.total_input_tokens, 1234);
         assert_eq!(cleared.total_output_tokens, 567);
         assert_eq!(mgr.len(), 1);
+    }
+
+    #[test]
+    fn session_locks_reuse_same_mutex_for_same_id() {
+        let locks = SessionLocks::new();
+        let a = locks.for_session("same");
+        let b = locks.for_session("same");
+        let c = locks.for_session("other");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &c));
     }
 
     #[test]

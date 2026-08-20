@@ -66,15 +66,26 @@ pub fn agent_session_messages(
 }
 
 /// 删除一个 Agent 会话。
+/// 等待该会话正在运行的 agent_chat 结束后再删除，避免运行中会话被并发改写。
 #[tauri::command]
-pub fn agent_session_delete(state: State<'_, AppState>, session_id: String) -> bool {
-    state.sessions.delete(&session_id).is_some()
+pub async fn agent_session_delete(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<bool, String> {
+    let session_lock = state.session_locks.for_session(&session_id);
+    let _guard = session_lock.lock().await;
+    Ok(state.sessions.delete(&session_id).is_some())
 }
 
 /// 清空指定会话的上下文（删除全部消息，保留会话本身与累计用量统计）。
 #[tauri::command]
-pub fn agent_session_clear(state: State<'_, AppState>, session_id: String) -> bool {
-    state.sessions.clear_context(&session_id)
+pub async fn agent_session_clear(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<bool, String> {
+    let session_lock = state.session_locks.for_session(&session_id);
+    let _guard = session_lock.lock().await;
+    Ok(state.sessions.clear_context(&session_id))
 }
 
 /// 把对话历史转成可送给 LLM 的压缩素材。
@@ -134,6 +145,9 @@ pub async fn agent_session_compact(
         return Err("请先在「设置 → 模型 API」中填写 DeepSeek API Key".into());
     }
 
+    // 会话级互斥：压缩期间等待正在运行的 agent_chat 完成，也防止并发压缩互相覆盖。
+    let session_lock = state.session_locks.for_session(&session_id);
+    let _guard = session_lock.lock().await;
     let mut session = state.sessions.get_or_create(&session_id);
     if !state.sessions.can_compact(&session) {
         return Err(format!(

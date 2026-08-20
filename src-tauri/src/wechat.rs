@@ -2819,6 +2819,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         let mut context_note = String::new();
         let sid = format!("wechat-{}", inner.slot);
         if let Some(st) = app.try_state::<crate::commands::AppState>() {
+            // 与 agent_chat 共享同一把会话锁：读到的记忆是一致的快照，
+            // 避免读到自动回复正在写一半的历史。
+            let session_lock = st.session_locks.for_session(&sid);
+            let _session_guard = session_lock.lock().await;
             let session = st.sessions.get_or_create(&sid);
             let recent: Vec<&crate::llm::LlmMessage> = session
                 .messages
@@ -3081,6 +3085,12 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         //   之后用户发消息时，自动回复的 agent_chat(resume=true)
                         //   能记住这次主动消息 → 双端记忆打通，不再"人格分裂"
                         if let Some(st) = app.try_state::<crate::commands::AppState>() {
+                            // 会话锁串行化：等待当前自动回复的 agent_chat 完成后再追加，
+                            // 防止覆盖对方刚写入的消息。
+                            let session_lock = st
+                                .session_locks
+                                .for_session(&format!("wechat-{}", inner.slot));
+                            let _session_guard = session_lock.lock().await;
                             let mut session =
                                 st.sessions.get_or_create(&format!("wechat-{}", inner.slot));
                             session.messages.push(crate::llm::LlmMessage {

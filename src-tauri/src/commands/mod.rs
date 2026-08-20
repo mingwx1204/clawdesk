@@ -41,7 +41,7 @@ use crate::adapters::mcp::{client::McpServerConfig, McpAdapter};
 use crate::llm::progress::{AgentProgress, CancelRegistry};
 use crate::llm::router::ModelRouter;
 use crate::llm::runner::{run_agent_loop, ChatProvider, ToolLoopOutcome};
-use crate::llm::session::SessionManager;
+use crate::llm::session::{SessionLocks, SessionManager};
 use crate::middleware::sensitive_guard::SensitiveFileGuardMiddleware;
 use crate::llm::settings::SettingsStore;
 use crate::llm::AgentMode;
@@ -54,6 +54,8 @@ pub struct AppState {
     pub mcp: Arc<McpAdapter>,
     /// Agent 多轮会话记忆（SQLite 持久化经 attach_db 附加）。
     pub sessions: Arc<SessionManager>,
+    /// 按会话 ID 的异步互斥锁：同一会话的读-改-写操作串行化。
+    pub session_locks: Arc<SessionLocks>,
     /// 运行中 Agent 任务的取消令牌 + 逐步确认通道。
     pub cancel_tokens: Arc<CancelRegistry>,
     /// Agent 权限模式（出厂默认 Off，YOLO 需用户手动开启）。
@@ -78,6 +80,7 @@ impl AppState {
         let registry = Arc::new(ToolRegistry::new());
         let dispatcher = Arc::new(ToolDispatcher::new(registry.clone()));
         let sessions = Arc::new(SessionManager::new());
+        let session_locks = Arc::new(SessionLocks::new());
         let sandbox = Arc::new(SandboxManager::new());
         let router = Arc::new(ModelRouter::new());
         let settings = Arc::new(SettingsStore::new());
@@ -95,6 +98,7 @@ impl AppState {
             dispatcher,
             mcp: Arc::new(McpAdapter::new()),
             sessions,
+            session_locks,
             cancel_tokens: Arc::new(CancelRegistry::new()),
             agent_mode: Arc::new(RwLock::new(AgentMode::Off)),
             max_rounds: Arc::new(RwLock::new(15)),
@@ -362,6 +366,10 @@ pub async fn agent_chat(
         }
     }
 
+    // ★ 会话级互斥：同一会话同时只允许一个 agent_chat 运行，
+    //   防止主界面 / 微信自动回复并发对同一 session 读-改-写互相覆盖。
+    let session_lock = state.session_locks.for_session(&session_id);
+    let _session_guard = session_lock.lock().await;
     let result = run_agent_loop(
         &provider,
         &state.registry,
