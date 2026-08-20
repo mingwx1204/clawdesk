@@ -9,6 +9,7 @@
 //!   DeepSeek 据此如实告知用户或改用文字描述；
 //! - 路径安全：拒绝读取系统敏感目录（HighRiskGuard 统一校验 + 此处双保险）。
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -94,7 +95,26 @@ fn analyze_image(image_path: &str) -> Result<serde_json::Value, String> {
         }));
     }
 
-    // 3) 未配置视觉模型：降级元信息
+    // 3) 云端视觉未配置/失败 → 尝试本地 llama-server 视觉（Qwen2.5-VL-7B）
+    //    （零配置：本地服务在线即自动启用，不在线则继续降级元信息）
+    match local_vision_fallback(&b64, &mime) {
+        Ok(desc) => {
+            return Ok(json!({
+                "imagePath": image_path,
+                "width": w,
+                "height": h,
+                "mimeType": mime,
+                "model": "qwen2.5-vl-7b",
+                "description": desc,
+                "note": "已通过本地视觉模型（Qwen2.5-VL-7B @ llama-server）解析",
+            }));
+        }
+        Err(e) => {
+            crate::llm::logging::debug("local_vision", &format!("本地视觉不可用: {}", e));
+        }
+    }
+
+    // 4) 本地视觉也不可用：降级元信息
     Ok(json!({
         "imagePath": image_path,
         "width": w,
@@ -142,6 +162,70 @@ fn read_and_compress(image_path: &str) -> Result<(u32, u32, String, String), Str
     let mime = "image/png".to_string();
 
     Ok((w, h, mime, b64))
+}
+
+/// 本地视觉 fallback：调用常驻 llama-server（Qwen2.5-VL-7B，OpenAI vision 兼容）。
+///
+/// 端点固定为 http://127.0.0.1:8088（由 llama-server 常驻服务提供）。
+/// 本地服务未启动 / 超时 → 返回 Err；由调用方继续降级元信息（零配置自动探测）。
+fn local_vision_fallback(image_b64: &str, mime: &str) -> Result<String, String> {
+    // 环境变量开关：CLAWDESK_DISABLE_LOCAL_VISION=1 时禁用本地视觉（测试 / 用户显式关闭）
+    if std::env::var("CLAWDESK_DISABLE_LOCAL_VISION").as_deref() == Ok("1") {
+        return Err("本地视觉已禁用（CLAWDESK_DISABLE_LOCAL_VISION=1）".to_string());
+    }
+    const LOCAL_VISION_URL: &str = "http://127.0.0.1:8088/v1/chat/completions";
+    const PROMPT: &str = "请用简体中文详细描述这张图片的内容：画面主体、场景、文字内容（若有）、颜色构成与整体风格。返回结构化描述。";
+
+    let body = json!({
+        "model": "qwen2.5-vl-7b",
+        "messages": [ { "role": "user", "content": [
+            { "type": "text", "text": PROMPT },
+            { "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", mime, image_b64) } }
+        ] } ],
+        "max_tokens": 1024,
+        "temperature": 0.1,
+    });
+
+    // 用短超时快速探测：本地服务不在线时快速失败，不阻塞主流程
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(90))
+        .build();
+
+    // 先做一次极轻量 health 探测（本地服务不在时 150ms 内失败）
+    let health = agent
+        .get("http://127.0.0.1:8088/health")
+        .timeout(std::time::Duration::from_millis(300))
+        .call();
+    if health.is_err() {
+        return Err(health.err().unwrap().to_string());
+    }
+
+    let body_str = serde_json::to_string(&body).map_err(|e| format!("序列化失败: {}", e))?;
+    match agent
+        .post(LOCAL_VISION_URL)
+        .set("Content-Type", "application/json")
+        .send_string(&body_str)
+    {
+        Ok(resp) => {
+            let mut buf = Vec::new();
+            resp.into_reader()
+                .take(4 * 1024 * 1024)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("读取响应失败: {}", e))?;
+            let text = String::from_utf8(buf).map_err(|e| format!("响应非 UTF-8: {}", e))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("解析响应失败: {}", e))?;
+            let desc = v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if desc.is_empty() {
+                return Err("本地视觉返回空内容".to_string());
+            }
+            Ok(desc)
+        }
+        Err(e) => Err(format!("本地视觉请求失败: {}", e)),
+    }
 }
 
 /// 系统敏感路径检查（双保险：中间件 + 执行器内）。
@@ -193,6 +277,8 @@ mod tests {
     /// 离线：生成临时图片 → 未配置视觉模型时降级返回元信息 + 降级提示。
     #[test]
     fn process_local_image_ok() {
+        // 显式禁用本地视觉，保证测试确定性（不依赖本机是否在跑 llama-server）
+        std::env::set_var("CLAWDESK_DISABLE_LOCAL_VISION", "1");
         let dir = std::env::temp_dir().join(format!("clawdesk-ai-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("test.png");
@@ -203,11 +289,36 @@ mod tests {
         let out = analyze_image(p.to_str().unwrap()).unwrap();
         assert_eq!(out["width"], 64);
         assert_eq!(out["height"], 64);
-        assert!(out["note"].as_str().unwrap().contains("未配置视觉模型"));
         // 关键：base64 不进入结果（不撑爆 DeepSeek 上下文）
         assert!(out.get("imageBase64").is_none());
         assert!(out.get("dataUrl").is_none());
+        // note 取决于本地视觉服务是否在线：在线则不包含"未配置"字样
+        // （本测试已通过 CLAWDESK_DISABLE_LOCAL_VISION=1 关闭本地视觉，故走降级分支）
+        assert!(out["note"].as_str().unwrap().contains("未配置视觉模型"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 集成验证：本地 llama-server 在线时，本地视觉 fallback 能返回真实描述。
+    /// 该测试仅在 CLAWDESK_TEST_LOCAL_VISION=1 且本地服务在线时生效。
+    #[test]
+    fn local_vision_online_integration() {
+        if std::env::var("CLAWDESK_TEST_LOCAL_VISION").as_deref() != Ok("1") {
+            return; // 默认跳过（本地服务未必在线）
+        }
+        std::env::remove_var("CLAWDESK_DISABLE_LOCAL_VISION");
+        let sw = std::time::Instant::now();
+        let desc = local_vision_fallback(
+            &read_and_compress("D:\\workspace\\_test_image.png").unwrap().3,
+            "image/png",
+        );
+        let elapsed = sw.elapsed().as_secs_f64();
+        match desc {
+            Ok(d) => {
+                eprintln!("本地视觉耗时 {:.1}s，返回 {} 字符", elapsed, d.chars().count());
+                assert!(!d.is_empty());
+            }
+            Err(e) => panic!("本地视觉调用失败: {}", e),
+        }
     }
 }
