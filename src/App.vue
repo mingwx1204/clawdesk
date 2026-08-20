@@ -109,6 +109,38 @@ const exporting = ref(false);
 // 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
 const sidebarCollapsed = ref(false);
 const rightCollapsed = ref(false); // 右侧「上下文监测」面板折叠状态
+// ── 响应式适配：窗口缩窄时右侧面板自动折叠 ──
+// 低于 COLLAPSE_BELOW 自动收起，高于 EXPAND_ABOVE 才自动恢复（60px 滞回防抖）。
+// auto 折叠在窄窗口下可被用户手动展开覆盖（本次窄窗口周期内不再自动收起）。
+const rightAutoCollapsed = ref(false);
+const rightManualOverride = ref(false);
+const RIGHT_PANEL_COLLAPSE_BELOW = 1020;
+const RIGHT_PANEL_EXPAND_ABOVE = 1080;
+
+function applyResponsivePanels() {
+  const w = window.innerWidth;
+  if (w >= RIGHT_PANEL_EXPAND_ABOVE) {
+    // 回到舒适宽度：清除「窄窗口手动覆盖」标记；auto 折叠则自动恢复
+    rightManualOverride.value = false;
+    if (rightAutoCollapsed.value) {
+      rightCollapsed.value = false;
+      rightAutoCollapsed.value = false;
+    }
+  } else if (w < RIGHT_PANEL_COLLAPSE_BELOW && !rightCollapsed.value && !rightManualOverride.value) {
+    rightCollapsed.value = true;
+    rightAutoCollapsed.value = true;
+  }
+}
+
+function toggleRightPanel() {
+  const willExpand = rightCollapsed.value;
+  rightAutoCollapsed.value = false;
+  rightCollapsed.value = !rightCollapsed.value;
+  // 窄窗口下任何「手动展开」都尊重用户选择：本次窄窗口周期内不再自动收起
+  if (willExpand && window.innerWidth < RIGHT_PANEL_COLLAPSE_BELOW) {
+    rightManualOverride.value = true;
+  }
+}
 const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
 const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
 // ── 壁纸时钟（时区感知，localStorage 持久化） ──
@@ -168,6 +200,9 @@ onMounted(async () => {
   document.addEventListener("mousemove", onMouseMove);
   document.addEventListener("click", onDocClick);
   document.addEventListener("keydown", onDocKeydown);
+  // 响应式：先应用当前窗口尺寸，再监听后续 resize
+  applyResponsivePanels();
+  window.addEventListener("resize", applyResponsivePanels);
   // 恢复外观设置（重启后保持）：深色模式 + 界面不透明度
   try {
     const s = await settingsApi.get();
@@ -241,6 +276,7 @@ onUnmounted(() => {
   unlistenWechat?.();
   unlistenWechatStatus?.();
   if (clockTimer) window.clearInterval(clockTimer);
+  window.removeEventListener("resize", applyResponsivePanels);
   document.removeEventListener("mousemove", onMouseMove);
   document.removeEventListener("click", onDocClick);
   document.removeEventListener("keydown", onDocKeydown);
@@ -874,7 +910,12 @@ function onKeysSaved(keys: { main?: string }) {
           <button class="tb-btn sidebar-toggle-btn" title="侧边栏" @mousedown.stop @click="sidebarCollapsed = !sidebarCollapsed">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
           </button>
-          <button class="tb-btn sidebar-toggle-btn" title="上下文监测面板" @mousedown.stop @click="rightCollapsed = !rightCollapsed">
+          <button
+            class="tb-btn sidebar-toggle-btn"
+            :title="rightAutoCollapsed && rightCollapsed ? '上下文监测面板（窄窗口已自动收起，点击展开）' : '上下文监测面板'"
+            @mousedown.stop
+            @click="toggleRightPanel"
+          >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
           </button>
           <svg class="tb-logo" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.6" fill="currentColor"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(120 12 12)"/></svg>
