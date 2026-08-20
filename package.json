@@ -9,6 +9,9 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "audit:css": "node scripts/audit-css-classes.mjs",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target",
+    "verify": "npm run typecheck && npm run build && npm run check:rust && npm run test:rust",
     "tauri": "tauri"
   },
   "dependencies": {
