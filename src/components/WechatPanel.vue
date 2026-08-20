@@ -1295,6 +1295,7 @@ async function testReply() {
   color: var(--color-text-secondary);
 }
 .wc-row b { color: var(--color-text); font-weight: 500; }
+.wc-living { color: var(--color-accent); font-weight: 600; }
 .wc-switch { position: relative; display: inline-block; width: 34px; height: 19px; vertical-align: middle; }
 .wc-switch input { opacity: 0; width: 0; height: 0; }
 .wc-knob {
@@ -1452,6 +1453,7 @@ async function testReply() {
   margin-bottom: 3px;
 }
 .wc-msg-from { color: var(--color-accent); }
+.wc-msg-time { color: var(--color-text-muted); font-size: 10px; }
 .wc-msg-content {
   font-size: 13px;
   color: var(--color-text);

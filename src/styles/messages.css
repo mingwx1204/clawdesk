@@ -55,6 +55,7 @@
 }
 .tool-card .tc-head { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
 .tool-card .tc-fold { color:var(--accent); font-size:11px; width:13px; text-align:center; transition:transform .13s; flex:none; }
+.tool-card .tc-fold.tc-fold-on { transform: rotate(90deg); }
 .tool-card .tc-hint { margin-left:auto; font-size:11px; color:var(--txt-3); opacity:.8; font-weight:600; flex:none; }
 .tool-card .tc-head:hover .tc-hint { opacity:1; color:var(--accent); }
 .tool-card .t { font-size:10.5px; font-weight:700; padding:0 6px; border-radius:99px; letter-spacing:.5px; flex:none; }
