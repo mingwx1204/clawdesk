@@ -3550,6 +3550,7 @@ pub async fn wechat_bot_reply(
     msg_id: String,
     to_user: String,
     content: String,
+    inner_voice: Option<String>,
 ) -> AppResult<()> {
     let inner = state.bot();
     // ★ 去重检查：同一 msg_id 已处理过（已回复）→ 直接返回，防前端重复调用导致重复回复。
@@ -3601,7 +3602,31 @@ pub async fn wechat_bot_reply(
     send_message(&inner, &to_user, &content, context_token.as_deref()).await?;
     send_typing(&inner, &to_user, false).await;
     // ★ 聊天记录：AI 回复也写入 D 盘 history.jsonl（fromBot=true：AI 发送）
-    append_history(&inner, &to_user, &to_user, &content, "text", true, false);
+    //   内言（innerVoice）随记录保留，前端面板可展示“她当时心里在想什么”
+    {
+        let mut rec = serde_json::json!({
+            "dir": to_user,
+            "botSlot": inner.slot,
+            "fromUser": to_user,
+            "toUser": to_user,
+            "content": content,
+            "msgType": "text",
+            "timestamp": now_millis(),
+            "fromBot": true,
+            "proactive": false,
+        });
+        if let Some(ref iv) = inner_voice {
+            rec["innerVoice"] = serde_json::Value::String(iv.clone());
+        }
+        let line = format!("{}
+", rec.to_string());
+        use std::io::Write;
+        if let Some(path) = history_path_of(&inner) {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+    }
     // ★ 发送成功 → 标记 msg_id 已处理（去重环，容量 100）
     if !msg_id.is_empty() {
         let mut seen = inner.last_msg_ids.lock();

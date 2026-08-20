@@ -90,7 +90,7 @@ const chats = ref<{ dir: string; last: string; lastTime: number; lastType: strin
 /** 当前打开的会话联系人 */
 const activeChat = ref("");
 /** 当前会话消息（按时间正序） */
-const chatMsgs = ref<{ fromBot: boolean; content: string; msgType: string; timestamp: number }[]>([]);
+const chatMsgs = ref<{ fromBot: boolean; content: string; msgType: string; timestamp: number; innerVoice?: string }[]>([]);
 const chatInput = ref("");
 const chatSending = ref(false);
 const chatTip = ref("");
@@ -138,6 +138,7 @@ function rebuildChatMsgs(): void {
       content: rec.content ?? "",
       msgType: rec.msgType ?? "text",
       timestamp: Number(rec.timestamp ?? 0),
+      innerVoice: typeof rec.innerVoice === "string" ? rec.innerVoice : undefined,
     }));
 }
 
@@ -959,7 +960,10 @@ async function testReply() {
               <div class="wc-chat-head">{{ activeChat }} <span class="wc-state">· {{ chatTip }}</span></div>
               <div class="wc-bubbles">
                 <div v-for="(m, i) in chatMsgs" :key="i" class="wc-bubble-row" :class="m.fromBot ? 'me' : 'them'">
-                  <div class="wc-bubble" :title="fmtTs(m.timestamp)">{{ m.content }}</div>
+                  <div class="wc-bubble-col" :class="m.fromBot ? 'me' : 'them'">
+                    <div v-if="m.innerVoice" class="wc-inner-voice">💭 {{ m.innerVoice }}</div>
+                    <div class="wc-bubble" :title="fmtTs(m.timestamp)">{{ m.content }}</div>
+                  </div>
                 </div>
                 <p v-if="!chatMsgs.length" class="wc-log-empty">暂无消息，发一句开场白吧</p>
               </div>
@@ -1180,6 +1184,10 @@ async function testReply() {
   align-items: flex-start;
 }
 .wc-bubble-row.me { align-items: flex-end; }
+.wc-bubble-col { display: flex; flex-direction: column; max-width: 82%; }
+.wc-bubble-col.me { align-items: flex-end; }
+.wc-bubble-col.them { align-items: flex-start; }
+.wc-inner-voice { font-size: 11px; color: var(--color-text-muted); font-style: italic; padding: 3px 11px 0; opacity: 0.75; word-break: break-word; }
 .wc-bubble {
   max-width: 82%;
   padding: 7px 11px;

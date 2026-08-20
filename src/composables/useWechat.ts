@@ -76,7 +76,17 @@ export function useWechatAutoReply(getApiKey: () => string) {
       //   不是写文章——短、口语、有情绪、不解释过程。
       const styleNote = `\n\n[微信聊天铁律（必须严格遵守）：\n1. 默认回复 5~40 字，一句话说清，绝不超过 60 字；\n2. 除非用户明确要求（"写500字"/"详细说说"/"完整分析"等），否则一律像真人发微信：口语化、短句、可省略主语、偶尔语气词（嗯嗯/哈哈哈/行/好嘞）；\n3. 禁止 AI 腔：不用"首先/其次/总之/需要注意的是/总的来说"，不用"！"堆砌，不用"哦～""呢～"等做作语气；\n4. 不需要解释你怎么做到的、不需要总结性发言、不要每句都带 emoji（最多 1 个）；\n5. 对方问了复杂问题（如读文件/分析代码）时也只需给结论和关键点，别列清单；\n6. 像朋友一样接话，而不是像客服回答问题。]`;
       // 微信发来的媒体（图片/文件/语音/视频）已由后端下载解密到本地，拼入 prompt 让 AI 读取
-      let promptText = (msg.content || "") + timeNote + livingNote + soulNote + styleNote;
+      // ★ 内言（inner voice）：心里的话。不是推理泄漏，是写给“对方看”的角色散文。
+      //   允许沉默：平静的应答、机械状态汇报、紧急情况可以不写。
+      const innerVoiceNote = `
+
+[心语铁律（一段写给“对方”看的内心独白，仅在有心里波动时才写）：
+1. 想写时，在最终回复的开头用【心语】...【/心语】包住一小段内心独白（8~30 字），标记之后**另起一行**再写真正的回复正文；
+2. 独白是你自己心里的话，不是推理过程、不是“用户想要...”，要从对方此刻的样子起笔，让感受自然流动（可以是心动、心疼、吃醋、惦记）；
+3. 平静应答、问路、查资料、状态汇报这类机械时刻，一句独白都不要写——不是每句话旁边都该有心跳；
+4. 独白绝不写给用户看、不解释、不带“【心语】”以外的任何说明文字。]`;
+      let promptText = (msg.content || "") + timeNote + livingNote + soulNote + styleNote + innerVoiceNote;
+
       const mediaNotes: string[] = [];
       if (Array.isArray(msg.images) && msg.images.length) {
         mediaNotes.push("图片：\n" + msg.images.map((p: string) => `- ${p}`).join("\n"));
@@ -100,7 +110,15 @@ export function useWechatAutoReply(getApiKey: () => string) {
         resume: true,
         persona, // ★ 该微信的人设（system prompt 注入）
       });
-      const reply = (outcome?.finalText || "").trim();
+      const rawFinal = (outcome?.finalText || "").trim();
+      // ★ 解析内言：如有【心语】...【/心语】标记，拆出独白并从回复正文中剥离
+      let reply = rawFinal;
+      let innerVoice = "";
+      const m = rawFinal.match(/^\s*【心语】([\s\S]*?)【\/心语】\s*\n?([\s\S]*)$/);
+      if (m) {
+        innerVoice = (m[1] || "").trim();
+        reply = (m[2] || "").trim();
+      }
       // ★ AI 回复时若调用过 generate_image 生图，把生成的图片路径一并发给微信
       const generatedImages: string[] = [];
       const rounds: any[] = Array.isArray(outcome?.rounds) ? outcome.rounds : [];
@@ -127,6 +145,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
         msgId: msg.msgId,
         toUser: msg.fromUser,
         content: reply,
+        innerVoice: innerVoice || undefined,
       });
       console.log(`[wechat] 微信已自动回复 ${msg.fromUser}: ${reply.slice(0, 60)}`);
       // ★ AI 语音回复（可选，默认关）：开关开启时，AI 回复文本后再发一条
