@@ -8,6 +8,9 @@
 
 | 提交 | 说明 |
 |------|------|
+| `51d3cbf` | chore: 新增 CSS 类名回归审计脚本并修复 3 个缺失样式 |
+| `1fe30e3` | feat: 微信槽位标签显示最近消息时间与非当前槽位未读计数 |
+| `f4c8610` | feat: 手动上下文压缩接入 LLM 摘要链 |
 | `7d1a19f` | feat: 文件快照差异预览支持一键回滚与删除 |
 | `a762167` | refactor: 微信面板剩余内联色值改为语义 CSS 类 |
 | `9e72692` | fix: 补齐设置面板按钮/状态提示/页脚样式 |
@@ -150,7 +153,11 @@
 - 清空上下文：新增后端命令 `agent_session_clear`（`session_cmd.rs`），调用 `SessionManager::clear_context`
   - 删除全部消息并把 `lastInputTokens` 归零，**保留会话本身与累计 token 统计**
   - 前端二次确认、运行中禁用，完成后自动刷新消息列表和用量面板
-- 未做假「手动压缩」按钮：自动压缩由引擎接管，真正的手动压缩需接入 LLM 摘要链，留作后续
+- 手动压缩按钮「🗜 压缩」（需已配置 API Key，运行中禁用）：
+  - 新增后端命令 `agent_session_compact`：从最近消息往回收集 ≤24K 字 transcript →
+    主模型生成摘要 → `SessionManager::compact_with` 保留最近 10 条并用 system 摘要替换更早历史
+  - `SessionManager::can_compact` 守卫：消息数必须 > keep_last+2，避免摘要反而变长
+  - 压缩完成后自动刷新消息列表与用量面板，弹窗显示摘要长度 / 当前消息数 / 累计压缩次数
 
 ### 文件变动预览（`d7589aa` / `7d1a19f`）
 
@@ -181,6 +188,7 @@
 - `App.vue` 微信在线圆点改为多槽位聚合：任一微信连接即亮灯；启动时主动拉取一次 `wechat_bot_status`
 - `.wc-chat-item.active` 微调：accent 边框 + 3px 左侧 accent 指示条
 - `a762167`：灵魂面板 / 主动聊天的内联颜色改为 `.wc-soul-sub` / `.wc-ghost-text` / `.wc-tip-warn`，并使用 `--color-warning` 等变量
+- `1fe30e3`：`wechat_bot_status` 增加 `lastMessageAt` / `lastMessagePreview`；槽位标签显示最近消息时间，非当前槽位来消息时显示未读红点（切过去清零）
 
 ---
 
@@ -228,6 +236,7 @@ ClawDesk/
 ## 七、构建与校验
 
 - **类型检查**：`npx vue-tsc --noEmit`（零错误）
+- **CSS 回归审计**：`npm run audit:css`（`scripts/audit-css-classes.mjs`，扫描 Vue 模板 class vs CSS 定义）
 - **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
 - **Rust 检查**：`cargo check`（零 warning）
 - **Rust 全量测试**：`cargo test`（376 passed / 0 failed / 1 ignored，含新增 clear_context 单测）
@@ -249,10 +258,10 @@ ClawDesk/
 
 - ✅ **文件变动预览**：已完成（`d7589aa` 列表+差异，`7d1a19f` 回滚/删除）
 - ✅ **亮色主题基础打磨**：已完成（`a762167`，微信面板内联色值清理）
-- **真正的手动压缩**：`SessionManager::needs_compaction` / `compact_with` 已就绪但未接线，可加「LLM 摘要 → 压缩」命令
-- **多槽位细节**：槽位标签可显示最近消息时间/未读数；soul 状态可考虑按槽位隔离
-- **弹窗回归审计**：本次已修复 perm 弹窗；建议用脚本再审计一遍其他从 game.css 丢失但仍被引用的样式类
+- ✅ **真正的手动压缩**：已完成（`f4c8610`，`agent_session_compact` 命令 + 右栏「🗜 压缩」按钮）
+- ✅ **多槽位细节（第一版）**：已完成（`1fe30e3`，最近消息时间 + 非当前槽位未读计数；soul 状态按槽位隔离仍留作后续）
+- ✅ **弹窗/CSS 回归审计**：已完成（`51d3cbf`，`npm run audit:css` 并修复 `.tc-fold-on` / `.wc-living` / `.wc-msg-time`）
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 11 次提交（`3c8fa93` ~ `7d1a19f`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 15 次提交（`3c8fa93` ~ `51d3cbf`） · 工作目录 `D:\workspace\ClawDesk`*
