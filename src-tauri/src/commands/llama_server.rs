@@ -6,10 +6,16 @@
 //! - 提供统一的端点 URL / 端口常量，供 analyze_image 本地视觉 fallback 复用；
 //! - 退出时回收子进程。
 //!
-//! 设计：零配置自动生效 —— 只要模型文件在预期目录，ClawDesk 启动时自动拉起服务；
-//! 文件缺失或已有一个服务在跑（端口占用）时安全跳过。
+//! 设计：零配置自动生效 —— 自动扫描常见位置发现模型文件与 llama-server，
+//! 找到即拉起服务；文件缺失或已有一个服务在跑（端口占用）时安全跳过。
+//!
+//! 自动发现优先级（高→低）：
+//!   1. 环境变量显式指定：CLAWDESK_VISION_MODEL_DIR / CLAWDESK_LLAMA_SERVER
+//!   2. ClawDesk 应用数据目录下的 models/ 子目录
+//!   3. 常见模型目录：D:\\workspace\\models、D:\\models
+//!   4. 磁盘根目录浅层扫描（D:\\、C:\\ 各盘第一层 models 目录）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -29,26 +35,216 @@ static LLAMA_SERVER: Mutex<Option<Child>> = Mutex::new(None);
 /// 是否已启动过（避免重复 spawn）。
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// 返回模型目录（若模型文件存在）。
+/// 返回视觉模型目录（含主模型 .gguf + mmproj .gguf）。
+///
+/// 自动发现：按优先级扫描，找到包含 mmproj 文件 + 主模型(.gguf) 的目录即返回。
 fn model_dir() -> Option<PathBuf> {
-    // 模型存放目录（手动下载 + Motrix 归位后固定于此）
-    let dir = PathBuf::from("D:/workspace/models/qwen2.5-vl-7b");
-    if dir.exists() {
-        Some(dir)
-    } else {
-        None
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1) 环境变量显式指定
+    if let Ok(env) = std::env::var("CLAWDESK_VISION_MODEL_DIR") {
+        let p = PathBuf::from(env);
+        if p.exists() {
+            candidates.push(p);
+        }
+    }
+
+    // 2) ClawDesk 应用数据目录下的 models/
+    let clawdesk = crate::llm::settings::clawdesk_dir();
+    candidates.push(clawdesk.join("models"));
+
+    // 3) 常见模型目录
+    for fixed in [
+        "D:/workspace/models",
+        "D:/models",
+        "D:/Workspace/models",
+        "C:/models",
+    ] {
+        candidates.push(PathBuf::from(fixed));
+    }
+
+    // 4) 对整个候选目录递归查找「含 mmproj 的目录」
+    for root in &candidates {
+        if let Some(dir) = find_vision_model_dir(root) {
+            return Some(dir);
+        }
+    }
+
+    // 5) 兜底：扫描各盘根下第一层含 models 的目录
+    for drive in ["D:\\", "C:\\", "E:\\"] {
+        let p = Path::new(drive);
+        if !p.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.file_name().map(|n| {
+                        let s = n.to_string_lossy().to_lowercase();
+                        s.contains("model") || s.contains("模型")
+                    }).unwrap_or(false)
+                {
+                    if let Some(dir) = find_vision_model_dir(&path) {
+                        return Some(dir);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 在 root 目录（含子目录）递归查找「视觉模型目录」：
+/// 同时含 mmproj*.gguf 与主模型 .gguf(>500MB) 的目录。
+fn find_vision_model_dir(root: &Path) -> Option<PathBuf> {
+    if !root.exists() {
+        return None;
+    }
+    // 递归收集所有 .gguf 文件（限制深度，避免全盘扫描过慢）
+    let mut gguf_files: Vec<PathBuf> = Vec::new();
+    collect_gguf(root, 3, &mut gguf_files);
+
+    // 找到含 mmproj 的目录
+    let mmproj_dirs: std::collections::HashSet<PathBuf> = gguf_files
+        .iter()
+        .filter(|f| f.file_name().map(|n| {
+            n.to_string_lossy().to_lowercase().contains("mmproj")
+        }).unwrap_or(false))
+        .filter_map(|f| f.parent().map(|p| p.to_path_buf()))
+        .collect();
+
+    // 对每个含 mmproj 的目录，确认也有主模型（>500MB 的非 mmproj gguf）
+    for dir in mmproj_dirs {
+        let has_main_model = gguf_files.iter().any(|f| {
+            f.parent() == Some(dir.as_path())
+                && !f.file_name().map(|n| n.to_string_lossy().to_lowercase().contains("mmproj")).unwrap_or(false)
+                && f.metadata().map(|m| m.len() > 500 * 1024 * 1024).unwrap_or(false)
+        });
+        if has_main_model {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// 在指定目录内定位 (主模型, mmproj) 文件对。
+/// 主模型 = 最大的非 mmproj .gguf；mmproj = 文件名含 mmproj 的 .gguf。
+fn locate_model_files(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut main: Option<PathBuf> = None;
+    let mut main_size: u64 = 0;
+    let mut mmproj: Option<PathBuf> = None;
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !path.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            continue;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase().to_string()).unwrap_or_default();
+        let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if name.contains("mmproj") {
+            if mmproj.is_none() {
+                mmproj = Some(path);
+            }
+        } else if size > main_size {
+            main_size = size;
+            main = Some(path);
+        }
+    }
+
+    match (main, mmproj) {
+        (Some(m), Some(p)) => Some((m, p)),
+        _ => None,
     }
 }
 
-/// 返回 llama-server 可执行文件路径（若存在）。
-fn llama_server_exe() -> Option<PathBuf> {
-    // llama.cpp 预编译 CUDA 版解压目录
-    let exe = PathBuf::from("D:/workspace/llama-cpp-bin/llama-server.exe");
-    if exe.exists() {
-        Some(exe)
-    } else {
-        None
+/// 递归收集 .gguf 文件（限制 depth）。
+fn collect_gguf(dir: &Path, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if max_depth == 0 {
+        return;
     }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_gguf(&path, max_depth - 1, out);
+        } else if path.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            out.push(path);
+        }
+    }
+}
+
+/// 返回 llama-server 可执行文件路径（自动发现）。
+fn llama_server_exe() -> Option<PathBuf> {
+    // 1) 环境变量显式指定
+    if let Ok(env) = std::env::var("CLAWDESK_LLAMA_SERVER") {
+        let p = PathBuf::from(env);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2) 常见解压目录 + 递归浅扫
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("D:/workspace/llama-cpp-bin"),
+        PathBuf::from("D:/llama.cpp"),
+        PathBuf::from("D:/workspace/llama.cpp"),
+        crate::llm::settings::clawdesk_dir().join("llama-cpp"),
+    ];
+
+    // 3) 盘根浅扫 llama-cpp 相关目录
+    for drive in ["D:\\", "C:\\", "E:\\"] {
+        let p = Path::new(drive);
+        if !p.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.file_name().map(|n| {
+                    let s = n.to_string_lossy().to_lowercase();
+                    s.contains("llama")
+                }).unwrap_or(false) {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+
+    // 逐个候选目录递归找 llama-server.exe（限深度 3）
+    for root in &candidates {
+        if let Some(exe) = find_exe(root, "llama-server.exe", 3) {
+            return Some(exe);
+        }
+    }
+    None
+}
+
+/// 递归查找指定文件名的可执行文件（限制 depth）。
+fn find_exe(dir: &Path, name: &str, max_depth: usize) -> Option<PathBuf> {
+    if !dir.exists() || max_depth == 0 {
+        return None;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_exe(&path, name, max_depth - 1) {
+                return Some(found);
+            }
+        } else if path.file_name().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// 后台启动 llama-server（非阻塞，spawn 后立即返回）。
@@ -65,12 +261,19 @@ pub fn start() {
         return;
     };
 
-    let model = dir.join("Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf");
-    let mmproj = dir.join("mmproj-model-f16.gguf");
-    if !model.exists() || !mmproj.exists() {
-        eprintln!("[LOCAL_VISION] 模型文件不完整，跳过本地视觉服务");
-        return;
-    }
+    // 自动识别目录内的主模型（最大的非 mmproj gguf）与 mmproj 文件
+    let (model, mmproj) = match locate_model_files(&dir) {
+        Some(pair) => pair,
+        None => {
+            eprintln!("[LOCAL_VISION] 模型目录内未找到主模型+mmproj，跳过");
+            return;
+        }
+    };
+    eprintln!(
+        "[LOCAL_VISION] 模型: {} | mmproj: {}",
+        model.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        mmproj.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+    );
 
     // 先探测端口是否已被占用（可能是上次残留的服务 / 用户手动起的）
     if health_ok() {
@@ -126,6 +329,27 @@ pub fn stop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 验证自动发现：能找到本机的模型目录与 llama-server（无文件环境则跳过）。
+    #[test]
+    fn autodiscover_model_and_server() {
+        if std::env::var("CLAWDESK_TEST_LOCAL_VISION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir = model_dir();
+        eprintln!("模型目录: {:?}", dir);
+        assert!(dir.is_some(), "应能找到模型目录");
+
+        let exe = llama_server_exe();
+        eprintln!("llama-server: {:?}", exe);
+        assert!(exe.is_some(), "应能找到 llama-server");
+
+        // 验证目录内能定位到 (主模型, mmproj) 对
+        let (model, mmproj) = locate_model_files(dir.as_ref().unwrap()).unwrap();
+        eprintln!("主模型: {:?} | mmproj: {:?}", model, mmproj);
+        assert!(model.file_name().unwrap().to_string_lossy().contains("VL") || model.metadata().unwrap().len() > 500*1024*1024);
+        assert!(mmproj.file_name().unwrap().to_string_lossy().to_lowercase().contains("mmproj"));
+    }
 
     /// 集成验证：auto-start 能拉起 llama-server，health 就绪后 stop 回收。
     /// 仅当模型文件存在时生效（无模型环境直接返回）。
