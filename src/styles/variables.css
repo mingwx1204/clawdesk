@@ -66,6 +66,48 @@
   --txt-3: #5f6672;
 }
 
+/* ── 亮色模式：覆盖同一套 CSS 变量（暗/亮切换无需改组件）── */
+:root[data-theme="light"] {
+  --color-bg: #edf1f8;
+  --color-sidebar-bg: #f5f7fb;
+  --color-surface: #ffffff;
+  --color-surface-hover: #eef3fa;
+  --color-card: #ffffff;
+  --color-border: #d7deea;
+  --color-border-light: #c3cddd;
+  --color-text: #1c2534;
+  --color-text-secondary: #53617a;
+  --color-text-muted: #8792a8;
+  --color-accent: #3d7bff;
+  --color-accent-hover: #2f68e8;
+  --color-accent-warm: #e06748;
+  --color-accent-warm-hover: #c9563b;
+  --color-success: #2f9e55;
+  --color-warning: #b57c0e;
+  --color-danger: #d64545;
+  --color-msg-user: #dbe7ff;
+  --color-msg-user-border: #b9cfff;
+  --color-msg-assistant: #ffffff;
+  --color-msg-assistant-border: #dde4ef;
+  --color-code-bg: #f2f4f9;
+  --color-input-bg: #ffffff;
+
+  --glass: rgba(20, 35, 70, 0.04);
+  --glass-strong: rgba(20, 35, 70, 0.07);
+  --glass-border: rgba(20, 35, 70, 0.10);
+  --glass-blur: blur(20px) saturate(140%);
+  --bar: rgba(255, 255, 255, 0.78);
+  --bubble-ai: rgba(255, 255, 255, 0.94);
+  --bubble-user: rgba(61, 123, 255, 0.14);
+
+  --txt: #1c2534;
+  --txt-2: #53617a;
+  --txt-3: #8792a8;
+  --accent: #3d7bff;
+  --green: #2f9e55;
+  --red: #d64545;
+}
+
 html, body, #app {
   height: 100vh; width: 100vw; overflow: hidden;
   background: var(--color-bg); color: var(--color-text);

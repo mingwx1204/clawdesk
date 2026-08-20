@@ -4,7 +4,7 @@ import { settingsApi, routerApi } from "../utils/api";
 
 /**
  * 设置面板（极简版）：
- * 只保留「模型配置」—— 填 Key / 选模型（自动检测）/ API 地址 / 保存。
+ * 模型配置 + 外观（主题/不透明度/字号）—— 填 Key / 选模型 / 保存。
  * Agent、思考、自进化均已默认开启（后端 hardcode），不再在界面展示开关。
  */
 
@@ -13,9 +13,10 @@ const emit = defineEmits<{
   (e: "close"): void;
   (e: "keys", keys: { main?: string; vision?: string; image?: string }): void;
   (e: "tz", v: string): void;
+  (e: "appearance", s: AppSettings): void;
 }>();
 
-// ── 设置结构（与后端 AppSettings camelCase 逐字段镜像，仅保留模型相关）──
+// ── 设置结构（与后端 AppSettings camelCase 逐字段镜像，模型 + 外观）──
 interface AppSettings {
   model: string;
   modelEndpoint: string;
@@ -23,6 +24,10 @@ interface AppSettings {
   visionEndpoint: string;
   imageModel: string;
   imageEndpoint: string;
+  // 外观（后端已持久化，这里补充类型与控件）
+  darkTheme: boolean;
+  uiOpacity: number;
+  fontSize: number;
 }
 
 const settings = ref<AppSettings | null>(null);
@@ -122,7 +127,9 @@ async function patch(p: Record<string, unknown>): Promise<void> {
   saving.value = true;
   tip.value = "";
   try {
-    settings.value = await settingsApi.set(p);
+    const updated = await settingsApi.set(p);
+    settings.value = updated;
+    emit("appearance", updated); // 主题/不透明度/字号即时同步到主界面
     tip.value = "✅ 已保存（即时生效）";
   } catch (e) {
     tip.value = `❌ 保存失败：${String(e)}`;
@@ -232,6 +239,50 @@ onMounted(async () => {
             <label class="sc-label">API 地址</label>
             <input :value="settings.imageEndpoint" class="sc-input" @change="field('imageEndpoint', ($event.target as HTMLInputElement).value)" />
             <input v-model="imageKey" type="password" class="sc-input" placeholder="绘图 API Key（可留空）" style="margin-top:6px" />
+
+            <h4 style="margin-top:14px">外观</h4>
+            <p class="sc-desc">主题 / 界面不透明度 / 字号，保存后立即生效并自动持久化</p>
+            <div class="sc-row">
+              <span class="sc-row-label">主题</span>
+              <div class="sc-theme-switch">
+                <button
+                  class="sc-theme-btn"
+                  :class="{ active: settings.darkTheme }"
+                  type="button"
+                  @click="field('darkTheme', true)"
+                >🌙 深色</button>
+                <button
+                  class="sc-theme-btn"
+                  :class="{ active: !settings.darkTheme }"
+                  type="button"
+                  @click="field('darkTheme', false)"
+                >☀️ 亮色</button>
+              </div>
+            </div>
+            <div class="sc-row">
+              <span class="sc-row-label">不透明度</span>
+              <input
+                type="range"
+                min="0.6"
+                max="1"
+                step="0.05"
+                :value="settings.uiOpacity"
+                @change="field('uiOpacity', Number(($event.target as HTMLInputElement).value))"
+              />
+              <span class="sc-range-val">{{ Math.round(settings.uiOpacity * 100) }}%</span>
+            </div>
+            <div class="sc-row">
+              <span class="sc-row-label">字号</span>
+              <input
+                type="range"
+                min="12"
+                max="22"
+                step="1"
+                :value="settings.fontSize"
+                @change="field('fontSize', Number(($event.target as HTMLInputElement).value))"
+              />
+              <span class="sc-range-val">{{ settings.fontSize }}px</span>
+            </div>
 
             <h4 style="margin-top:14px">时区</h4>
             <select :value="tz || 'Asia/Shanghai'" class="sc-select" @change="emit('tz', ($event.target as HTMLSelectElement).value)">

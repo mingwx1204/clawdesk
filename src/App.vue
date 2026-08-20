@@ -203,17 +203,10 @@ onMounted(async () => {
   // 响应式：先应用当前窗口尺寸，再监听后续 resize
   applyResponsivePanels();
   window.addEventListener("resize", applyResponsivePanels);
-  // 恢复外观设置（重启后保持）：深色模式 + 界面不透明度
+  // 恢复外观设置（重启后保持）：深色/亮色主题 + 界面不透明度 + 字号
   try {
     const s = await settingsApi.get();
-    if (s?.darkTheme) document.documentElement.setAttribute("data-theme", "dark");
-    if (typeof s?.uiOpacity === "number") {
-      document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
-    }
-    // ★ 字号设置实际生效（12~22px）
-    if (typeof s?.fontSize === "number" && s.fontSize >= 12 && s.fontSize <= 22) {
-      document.documentElement.style.fontSize = s.fontSize + "px";
-    }
+    applyAppearance(s);
   } catch { /* 静默 */ }
   // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
   void import("./lib/tts").then(({ loadTtsSettings }) => void loadTtsSettings());
@@ -884,6 +877,17 @@ function onKeysSaved(keys: { main?: string }) {
   if (keys.main) apiKey.value = keys.main;
 }
 
+/** 应用外观设置：主题（dark/light）、界面不透明度、全局字号。 */
+function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?: number } | null | undefined) {
+  document.documentElement.setAttribute("data-theme", s?.darkTheme === false ? "light" : "dark");
+  if (typeof s?.uiOpacity === "number") {
+    document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
+  }
+  if (typeof s?.fontSize === "number" && s.fontSize >= 12 && s.fontSize <= 22) {
+    document.documentElement.style.fontSize = s.fontSize + "px";
+  }
+}
+
 // 工具卡 / 消息辅助函数已拆至 ./utils/messageFormat（fmtTs/fmtArgs/fmtOutput/isTerminal/termInfo/hasArgs/hasToolDetail/toolSummary）
 </script>
 
@@ -1143,6 +1147,7 @@ function onKeysSaved(keys: { main?: string }) {
       @close="showSettings = false"
       @keys="onKeysSaved"
       @tz="onTzChange"
+      @appearance="applyAppearance"
     />
 
     <!-- 微信 Bot 面板 -->

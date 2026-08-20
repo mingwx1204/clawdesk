@@ -13,6 +13,7 @@ import "./styles/wallpaper.css";
 import "./styles/messages.css";
 import "./styles/input.css";
 import "./styles/menu.css";
+import "./styles/theme-light.css";
 import App from "./App.vue";
 
 createApp(App).mount("#app");
