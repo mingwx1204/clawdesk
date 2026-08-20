@@ -246,30 +246,17 @@ impl WechatInner {
     }
 }
 
-/// 微信 Bot 数量：只保留一个微信（2026-08-19 `7ceaea8` 已明确收敛多槽位）。
-/// `slot` 参数 / 槽位数组结构仅为历史兼容保留，不表示多账号能力。
-pub const MAX_BOTS: usize = 1;
-
-/// 多微信 Bot 状态：槽位数组，每个槽位一个独立 WechatInner
-pub struct WechatBotState(pub Mutex<Vec<Arc<WechatInner>>>);
+/// 单微信 Bot 状态（产品已收敛为单账号；内部仍使用 slot0 目录保持数据兼容）。
+pub struct WechatBotState(pub Arc<WechatInner>);
 
 impl WechatBotState {
     pub fn new() -> Self {
-        let bots = (0..MAX_BOTS)
-            .map(|slot| Arc::new(WechatInner::new(slot)))
-            .collect();
-        Self(Mutex::new(bots))
+        Self(Arc::new(WechatInner::new(0)))
     }
 
-    /// 获取指定槽位实例（new() 已预创建全部 MAX_BOTS 个，直接索引）
-    pub fn bot(&self, slot: usize) -> Arc<WechatInner> {
-        let slot = slot.min(MAX_BOTS - 1);
-        self.0.lock()[slot].clone()
-    }
-
-    /// 全部槽位实例（用于启动时自动恢复所有已登录微信）
-    pub fn bots(&self) -> Vec<Arc<WechatInner>> {
-        self.0.lock().clone()
+    /// 唯一的微信实例。
+    pub fn bot(&self) -> Arc<WechatInner> {
+        self.0.clone()
     }
 }
 
@@ -1928,7 +1915,7 @@ async fn send_file_once(
     Ok(())
 }
 
-/// 发送 AI 语音回复（按槽位配置的引擎合成真人音色 mp3 → 作为文件发给微信用户）。
+/// 发送 AI 语音回复（按已配置的引擎合成真人音色 mp3 → 作为文件发给微信用户）。
 /// - engine=edge: Edge TTS 免费合成（默认）
 /// - engine=cosyvoice: 硅基流动 CosyVoice 2 真人级音色（需 API Key，免费额度）
 /// - engine=indextts: 本地 IndexTTS2 声音克隆（参考音频 = 诗妍的声音，最像真人）
@@ -1939,9 +1926,8 @@ pub async fn wechat_send_voice(
     to_user: String,
     text: String,
     voice: Option<String>,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     // 1) 按引擎合成（indextts > cosyvoice > edge；缺配置自动回退）
     let engine = inner.voice_engine.lock().clone();
     let voice_id = inner.voice();
@@ -2153,7 +2139,7 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                                 );
                                 let _ = app2.emit(
                                     "wechat-bot-status",
-                                    serde_json::json!({ "type": "session_expired", "slot": inner2.slot }),
+                                    serde_json::json!({ "type": "session_expired" }),
                                 );
                                 break;
                             }
@@ -2445,7 +2431,7 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
             );
             let _ = app2.emit(
                 "wechat-bot-status",
-                serde_json::json!({ "type": "loop_crashed", "slot": inner2.slot }),
+                serde_json::json!({ "type": "loop_crashed" }),
             );
         }
         // 循环退出清理（仅 stop / panic / 会话失效时到达）
@@ -3130,7 +3116,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                         );
                         let _ = app.emit(
                             "wechat-bot-status",
-                            serde_json::json!({ "type": "proactive_sent", "slot": inner.slot }),
+                            serde_json::json!({ "type": "proactive_sent" }),
                         );
                     }
                     Err(e) => {
@@ -3149,63 +3135,60 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
 
 // ─── Tauri 命令 ───
 
-/// 初始化数据目录（应用 setup 时调用）—— 数据目录优先 D 盘，全部槽位共享目录结构
+/// 初始化数据目录（应用 setup 时调用）—— 数据目录优先 D 盘。
 pub fn init_data_dir(app: &tauri::AppHandle, state: &WechatBotState) {
     let dir = crate::llm::settings::clawdesk_dir().join("wechat");
     let _ = std::fs::create_dir_all(&dir);
-    for inner in state.bots() {
-        let d = dir.join(format!("slot{}", inner.slot));
-        let _ = std::fs::create_dir_all(&d);
-        *inner.data_dir.lock() = Some(dir.clone());
-    }
+    let inner = state.bot();
+    // 继续使用 slot0 子目录：与历史版本数据路径兼容，不迁移已有登录态/记录。
+    let d = dir.join(format!("slot{}", inner.slot));
+    let _ = std::fs::create_dir_all(&d);
+    *inner.data_dir.lock() = Some(dir.clone());
     let _ = app; // app 参数保留（签名兼容）
 }
 
-/// 应用启动时自动续连：遍历全部槽位，有已保存登录凭据的微信逐个后台恢复长轮询，
-/// 无需用户手动点「启动 Bot」（软件常驻后台即可 7×24 接收所有微信消息）。
+/// 应用启动时自动续连：有已保存登录凭据则后台恢复长轮询，
+/// 无需用户手动点「启动 Bot」（软件常驻后台即可 7×24 接收微信消息）。
 pub async fn auto_resume(app: AppHandle, state: &WechatBotState) {
-    let bots = state.bots();
-    for inner in bots {
-        // 加载已保存账号（slot{N}/account.json，DPAPI 加密）+ 人设（slot{N}/persona.md）
-        load_account(&inner).await;
-        let has_token = inner
-            .token
-            .lock()
-            .as_ref()
-            .map(|t| !t.is_empty())
-            .unwrap_or(false);
-        if !has_token {
-            continue; // 该槽位未绑定，跳过
-        }
-        if inner.base_url.lock().is_none() {
-            *inner.base_url.lock() = Some(ILINK_BASE_URL.to_string());
-        }
-        inner.connected.store(true, Ordering::SeqCst);
-        // 关键：notifyStart 激活会话（否则 sendmessage 返回 -14 session timeout）
-        notify_start(&inner).await;
-        refresh_typing_ticket(&inner).await;
-        start_getupdates_loop(&inner, app.clone()).await;
-        // 每个已登录微信都启动主动聊天循环（8:00~23:00 才会真正发送；防重入）
-        ensure_proactive_loop(&inner, app.clone());
-        crate::llm::logging::debug("wechat", &format!("slot{} 自动续连已恢复（已保存的登录凭据）", inner.slot));
-        let _ = app.emit(
-            "wechat-bot-status",
-            serde_json::json!({ "type": "connected", "resumed": true, "slot": inner.slot }),
-        );
+    let inner = state.bot();
+    // 加载已保存账号（slot0/account.json，DPAPI 加密）+ 人设（slot0/persona.md）
+    load_account(&inner).await;
+    let has_token = inner
+        .token
+        .lock()
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    if !has_token {
+        return; // 未登录，跳过
     }
+    if inner.base_url.lock().is_none() {
+        *inner.base_url.lock() = Some(ILINK_BASE_URL.to_string());
+    }
+    inner.connected.store(true, Ordering::SeqCst);
+    // 关键：notifyStart 激活会话（否则 sendmessage 返回 -14 session timeout）
+    notify_start(&inner).await;
+    refresh_typing_ticket(&inner).await;
+    start_getupdates_loop(&inner, app.clone()).await;
+    // 启动主动聊天循环（8:00~23:00 才会真正发送；防重入）
+    ensure_proactive_loop(&inner, app.clone());
+    crate::llm::logging::debug("wechat", "自动续连已恢复（已保存的登录凭据）");
+    let _ = app.emit(
+        "wechat-bot-status",
+        serde_json::json!({ "type": "connected", "resumed": true }),
+    );
 }
 
 /// 设置主动聊天参数（开关 / 随机间隔区间分钟 / 目标用户；target 为空则用最近聊过的人）
 #[tauri::command]
 pub fn wechat_set_proactive(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
     enabled: bool,
     interval_min: Option<u64>,
     interval_max: Option<u64>,
     target: Option<String>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     inner.proactive_enabled.store(enabled, Ordering::SeqCst);
     if let Some(im) = interval_min {
         *inner.proactive_interval_min.lock() = im.clamp(1, 24 * 60);
@@ -3237,7 +3220,6 @@ pub fn wechat_set_proactive(
     // ★ 持久化：写入 slot{N}/proactive.json，软件重启后自动恢复上次设置
     save_proactive(&inner);
     Ok(serde_json::json!({
-        "slot": inner.slot,
         "enabled": inner.proactive_enabled.load(Ordering::SeqCst),
         "intervalMin": *inner.proactive_interval_min.lock(),
         "intervalMax": *inner.proactive_interval_max.lock(),
@@ -3257,7 +3239,6 @@ pub fn wechat_set_proactive(
 #[tauri::command]
 pub fn wechat_set_bot_rules(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
     allowed_users: Option<String>,
     voice_id: Option<String>,
     voice_engine: Option<String>,
@@ -3265,7 +3246,7 @@ pub fn wechat_set_bot_rules(
     indextts_url: Option<String>,
     indextts_voice_path: Option<String>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     if let Some(au) = allowed_users {
         let cleaned: Vec<String> = au
             .split([',', '，', '\n', '\r', ' '])
@@ -3298,7 +3279,6 @@ pub fn wechat_set_bot_rules(
     }
     save_proactive(&inner);
     Ok(serde_json::json!({
-        "slot": inner.slot,
         "allowedUsers": inner.allowed_users.lock().clone(),
         "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
         "voiceEngine": inner.voice_engine.lock().clone(),
@@ -3308,13 +3288,12 @@ pub fn wechat_set_bot_rules(
     }))
 }
 
-/// 获取登录二维码（指定槽位）
+/// 获取登录二维码
 #[tauri::command]
 pub async fn wechat_get_qr(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     // 清理过期会话
     if let Some(qr) = inner.qr_session.lock().as_ref() {
         if now_millis() - qr.started_at > LOGIN_TTL_MS {
@@ -3327,7 +3306,6 @@ pub async fn wechat_get_qr(
             return Ok(serde_json::json!({
                 "qrcode": qr.qrcode,
                 "qrcodeUrl": qr.qrcode_url,
-                "slot": inner.slot,
             }));
         }
     }
@@ -3336,17 +3314,16 @@ pub async fn wechat_get_qr(
     let qrcode = qr.qrcode.clone();
     let qrcode_url = qr.qrcode_url.clone();
     *inner.qr_session.lock() = Some(qr);
-    Ok(serde_json::json!({ "qrcode": qrcode, "qrcodeUrl": qrcode_url, "slot": inner.slot }))
+    Ok(serde_json::json!({ "qrcode": qrcode, "qrcodeUrl": qrcode_url }))
 }
 
-/// 长轮询扫码状态（单次，前端循环调用，指定槽位）
+/// 长轮询扫码状态（单次，前端循环调用）
 #[tauri::command]
 pub async fn wechat_qr_status(
     state: tauri::State<'_, WechatBotState>,
     app: AppHandle,
-    slot: Option<usize>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let session = inner
         .qr_session
         .lock()
@@ -3384,9 +3361,9 @@ pub async fn wechat_qr_status(
             ensure_proactive_loop(&inner, app.clone());
             let _ = app.emit(
                 "wechat-bot-status",
-                serde_json::json!({ "type": "connected", "botId": bot_id, "userId": user_id, "slot": inner.slot }),
+                serde_json::json!({ "type": "connected", "botId": bot_id, "userId": user_id }),
             );
-            Ok(serde_json::json!({ "status": "confirmed", "botId": bot_id, "userId": user_id, "slot": inner.slot }))
+            Ok(serde_json::json!({ "status": "confirmed", "botId": bot_id, "userId": user_id }))
         }
         "scaned_but_redirect" => {
             if let Some(host) = resp["redirect_host"].as_str() {
@@ -3408,14 +3385,13 @@ pub async fn wechat_qr_status(
     }
 }
 
-/// 提交手机微信显示的配对码（need_verifycode 状态时，指定槽位）
+/// 提交手机微信显示的配对码（need_verifycode 状态时）
 #[tauri::command]
 pub async fn wechat_verify_code(
     state: tauri::State<'_, WechatBotState>,
     code: String,
-    slot: Option<usize>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let mut guard = inner.qr_session.lock();
     let session = guard
         .as_mut()
@@ -3425,28 +3401,26 @@ pub async fn wechat_verify_code(
     Ok(serde_json::json!({ "ok": true }))
 }
 
-/// 刷新二维码（过期 / 配对码多次错误后，指定槽位）
+/// 刷新二维码（过期 / 配对码多次错误后）
 #[tauri::command]
 pub async fn wechat_refresh_qr(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let client = http_client();
     let qr = fetch_qr(&client).await?;
     let qrcode = qr.qrcode.clone();
     let qrcode_url = qr.qrcode_url.clone();
     *inner.qr_session.lock() = Some(qr);
-    Ok(serde_json::json!({ "qrcode": qrcode, "qrcodeUrl": qrcode_url, "slot": inner.slot }))
+    Ok(serde_json::json!({ "qrcode": qrcode, "qrcodeUrl": qrcode_url }))
 }
 
-/// 登出微信（清除本地 token，指定槽位）
+/// 登出微信（清除本地 token）
 #[tauri::command]
 pub async fn wechat_logout(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     wechat_bot_stop_inner(&inner);
     *inner.token.lock() = None;
     *inner.bot_id.lock() = None;
@@ -3466,15 +3440,14 @@ pub async fn wechat_logout(
     Ok(())
 }
 
-/// 启动微信 Bot（指定槽位：自动加载已保存账号并续连）
+/// 启动微信 Bot（自动加载已保存账号并续连）
 #[tauri::command]
 pub async fn wechat_bot_start(
     app: AppHandle,
     state: tauri::State<'_, WechatBotState>,
     _config: serde_json::Value,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     // 首次运行时加载已保存账号
     if inner.token.lock().is_none() {
         load_account(&inner).await;
@@ -3498,20 +3471,19 @@ pub async fn wechat_bot_start(
         ensure_proactive_loop(&inner, app.clone());
         let _ = app.emit(
             "wechat-bot-status",
-            serde_json::json!({ "type": "connected", "resumed": true, "slot": inner.slot }),
+            serde_json::json!({ "type": "connected", "resumed": true }),
         );
         return Ok(());
     }
     Err("微信未登录，请先在微信面板扫码登录".to_string())
 }
 
-/// 停止微信 Bot（指定槽位）
+/// 停止微信 Bot
 #[tauri::command]
 pub fn wechat_bot_stop(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     wechat_bot_stop_inner(&inner);
     Ok(())
 }
@@ -3542,9 +3514,8 @@ pub async fn wechat_typing(
     state: tauri::State<'_, WechatBotState>,
     to_user: String,
     active: bool,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     if active {
         *inner.typing_target.lock() = Some(to_user.clone());
         let mut guard = inner.typing_task.lock();
@@ -3572,16 +3543,15 @@ pub async fn wechat_typing(
     Ok(())
 }
 
-/// 通过 Bot 回复微信用户消息（AI 回复，指定槽位）
+/// 通过 Bot 回复微信用户消息（AI 回复）
 #[tauri::command]
 pub async fn wechat_bot_reply(
     state: tauri::State<'_, WechatBotState>,
     msg_id: String,
     to_user: String,
     content: String,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     // ★ 去重检查：同一 msg_id 已处理过（已回复）→ 直接返回，防前端重复调用导致重复回复。
     //   发送成功后才把 msg_id 记入去重环（发送失败可重试，不占去重位）
     if !msg_id.is_empty() && inner.last_msg_ids.lock().contains(&msg_id) {
@@ -3643,100 +3613,90 @@ pub async fn wechat_bot_reply(
     Ok(())
 }
 
-/// 发送消息到微信用户（指定槽位）
+/// 发送消息到微信用户
 #[tauri::command]
 pub async fn wechat_send_message(
     state: tauri::State<'_, WechatBotState>,
     to_user: String,
     content: String,
     context_token: Option<String>,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let ctx = context_token.or_else(|| inner.context_map.lock().get(&to_user).cloned());
     send_message(&inner, &to_user, &content, ctx.as_deref()).await?;
     append_history(&inner, &to_user, &to_user, &content, "text", true, false);
     Ok(())
 }
 
-/// 发送本地图片到微信用户（指定槽位）
+/// 发送本地图片到微信用户
 #[tauri::command]
 pub async fn wechat_send_image(
     state: tauri::State<'_, WechatBotState>,
     to_user: String,
     image_path: String,
     context_token: Option<String>,
-    slot: Option<usize>,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let ctx = context_token.or_else(|| inner.context_map.lock().get(&to_user).cloned());
     send_image(&inner, &to_user, &image_path, ctx.as_deref()).await?;
     append_history(&inner, &to_user, &to_user, &image_path, "image", true, false);
     Ok(())
 }
 
-/// 获取全部微信槽位状态（多账号列表：每个槽位的登录/连接/消息数/人设）
+/// 获取微信 Bot 状态（单账号）。
 #[tauri::command]
 pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<serde_json::Value> {
-    let bots = state.bots();
-    let list: Vec<serde_json::Value> = bots
-        .iter()
-        .map(|inner| {
-            let bot_id = inner.bot_id.lock().clone().unwrap_or_default();
-            let logged = inner.token.lock().as_ref().map(|t| !t.is_empty()).unwrap_or(false);
-            let persona_len = inner
-                .persona
-                .lock()
-                .as_ref()
-                .map(|p| p.len())
-                .unwrap_or(0);
-            let persona_text = inner.persona.lock().clone().unwrap_or_default();
-            // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
-            let history_count = read_history_limit(inner, 200).len();
-            serde_json::json!({
-                "slot": inner.slot,
-                "name": format!("微信{}", inner.slot + 1),
-                "running": inner.running.load(Ordering::SeqCst),
-                "connected": inner.connected.load(Ordering::SeqCst),
-                "botName": if bot_id.is_empty() { format!("微信{}", inner.slot + 1) } else { bot_id.clone() },
-                "lastPoll": *inner.last_poll.lock(),
-                "messageCount": *inner.msg_count.lock(),
-                "loggedIn": logged,
-                "botId": bot_id,
-                "personaLen": persona_len,
-                "personaText": persona_text,
-                "historyCount": history_count,
-                "proactiveEnabled": inner.proactive_enabled.load(Ordering::SeqCst),
-                "proactiveIntervalMin": *inner.proactive_interval_min.lock(),
-                "proactiveIntervalMax": *inner.proactive_interval_max.lock(),
-                "proactiveLastAt": *inner.proactive_last_at.lock(),
-                "proactiveTarget": inner.proactive_target.lock().clone().unwrap_or_default(),
-                // ★ 使用规则（白名单 / 音色）：前端面板展示与回填
-                "allowedUsers": inner.allowed_users.lock().clone(),
-                "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
-                "voiceEngine": inner.voice_engine.lock().clone(),
-                "cosyvoiceApiKey": inner.cosyvoice_api_key.lock().clone().unwrap_or_default(),
-                "indexttsUrl": inner.indextts_url.lock().clone().unwrap_or_default(),
-                "indexttsVoicePath": inner.indextts_voice_path.lock().clone().unwrap_or_default(),
-                // ★ 能力声明（对齐 AstrBot PlatformMetadata 思路）：上层据此决定 UI 与行为。
-                //   协议能力天花板（官方 iLink 单聊）：文本/图片收发、语音接收（云端转写）、
-                //   引用解析、typing、主动推送；不支持群聊/语音发送/视频理解。
-                "capabilities": {
-                    "sendText": true,
-                    "sendImage": true,
-                    "receiveVoiceTranscript": true,
-                    "receiveImages": true,
-                    "receiveFiles": true,
-                    "replyQuote": true,
-                    "typing": true,
-                    "proactive": true,
-                    "groupChat": false,
-                    "sendVoice": false,
-                },
-            })
-        })
-        .collect();
-    Ok(serde_json::json!({ "bots": list, "total": list.len() }))
+    let inner = state.bot();
+    let bot_id = inner.bot_id.lock().clone().unwrap_or_default();
+    let logged = inner.token.lock().as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+    let persona_len = inner
+        .persona
+        .lock()
+        .as_ref()
+        .map(|p| p.len())
+        .unwrap_or(0);
+    let persona_text = inner.persona.lock().clone().unwrap_or_default();
+    // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
+    let history_count = read_history_limit(&inner, 200).len();
+    Ok(serde_json::json!({
+        "bot": {
+            "name": "微信",
+            "running": inner.running.load(Ordering::SeqCst),
+            "connected": inner.connected.load(Ordering::SeqCst),
+            "botName": if bot_id.is_empty() { "微信".to_string() } else { bot_id.clone() },
+            "lastPoll": *inner.last_poll.lock(),
+            "messageCount": *inner.msg_count.lock(),
+            "loggedIn": logged,
+            "botId": bot_id,
+            "personaLen": persona_len,
+            "personaText": persona_text,
+            "historyCount": history_count,
+            "proactiveEnabled": inner.proactive_enabled.load(Ordering::SeqCst),
+            "proactiveIntervalMin": *inner.proactive_interval_min.lock(),
+            "proactiveIntervalMax": *inner.proactive_interval_max.lock(),
+            "proactiveLastAt": *inner.proactive_last_at.lock(),
+            "proactiveTarget": inner.proactive_target.lock().clone().unwrap_or_default(),
+            "allowedUsers": inner.allowed_users.lock().clone(),
+            "voiceId": inner.voice_id.lock().clone().unwrap_or_default(),
+            "voiceEngine": inner.voice_engine.lock().clone(),
+            "cosyvoiceApiKey": inner.cosyvoice_api_key.lock().clone().unwrap_or_default(),
+            "indexttsUrl": inner.indextts_url.lock().clone().unwrap_or_default(),
+            "indexttsVoicePath": inner.indextts_voice_path.lock().clone().unwrap_or_default(),
+            "capabilities": {
+                "sendText": true,
+                "sendImage": true,
+                "receiveVoiceTranscript": true,
+                "receiveImages": true,
+                "receiveFiles": true,
+                "replyQuote": true,
+                "typing": true,
+                "proactive": true,
+                "groupChat": false,
+                "sendVoice": false,
+            },
+        },
+        "total": 1,
+    }))
 }
 
 /// 获取 AI 当前生活状态描述（世界线：此刻在做什么，时间与真实时钟同步）。
@@ -3891,14 +3851,13 @@ pub fn wechat_mood_record() -> bool {
     true
 }
 
-/// 设置指定槽位微信的人设（system prompt，保存到 D 盘 persona.md）
+/// 设置微信的人设（system prompt，保存到 D 盘 persona.md）
 #[tauri::command]
 pub fn wechat_set_persona(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
     persona: String,
 ) -> AppResult<()> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let text = persona.trim().to_string();
     if text.is_empty() {
         *inner.persona.lock() = None;
@@ -3918,15 +3877,14 @@ pub fn wechat_set_persona(
     Ok(())
 }
 
-/// 读取指定槽位微信的聊天记录（D 盘 history.jsonl，供前端展示/导出）
+/// 读取微信聊天记录（D 盘 history.jsonl，供前端展示/导出）
 #[tauri::command]
 pub fn wechat_history(
     state: tauri::State<'_, WechatBotState>,
-    slot: Option<usize>,
 ) -> AppResult<serde_json::Value> {
-    let inner = state.bot(slot.unwrap_or(0));
+    let inner = state.bot();
     let recs = read_history(&inner);
-    Ok(serde_json::json!({ "slot": inner.slot, "count": recs.len(), "records": recs }))
+    Ok(serde_json::json!({ "count": recs.len(), "records": recs }))
 }
 
 /// 生成真实二维码（SVG 字符串），内容为可扫描的 URL。

@@ -454,11 +454,11 @@ pub fn run() {
             {
                 let wc = app.state::<wechat::WechatBotState>();
                 wechat::init_data_dir(app.handle(), &wc);
-                // 克隆全部槽位实例（与 app.state 共享同一批 Arc，操作同一份状态）
-                let bots = wc.bots();
+                // 克隆唯一微信实例（与 app.state 共享同一 Arc，操作同一份状态）
+                let inner = wc.bot();
                 let app_h = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let state_ref = wechat::WechatBotState(parking_lot::Mutex::new(bots));
+                    let state_ref = wechat::WechatBotState(inner);
                     wechat::auto_resume(app_h, &state_ref).await;
                 });
             }

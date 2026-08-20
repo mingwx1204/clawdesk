@@ -13,17 +13,13 @@ import { chatApi, wechatApi } from "../utils/api";
 
 /** 微信自动回复器：构造一次，挂载监听，可随时按开关/Key 跳过 */
 export function useWechatAutoReply(getApiKey: () => string) {
-  // ★ 微信消息并发锁（单账号固定槽位 0）：多条消息串行回复，防止并发 agent_chat
-  //   对同一会话（wechat-{slot}）读-改-写竞争导致记忆丢失/回复乱序
-  const slotLocks = new Map<number, Promise<unknown>>();
+  // ★ 微信消息串行锁：单账号多条消息串行回复，防止并发 agent_chat
+  //   对 wechat-0 会话读-改-写竞争导致记忆丢失/回复乱序。
+  let replyChain: Promise<void> = Promise.resolve();
 
-  function withSlotLock(slot: number, fn: () => Promise<void>): Promise<void> {
-    const prev = slotLocks.get(slot) ?? Promise.resolve();
-    const next = prev.then(fn, fn);
-    slotLocks.set(slot, next);
-    next.finally(() => {
-      if (slotLocks.get(slot) === next) slotLocks.delete(slot);
-    }).catch(() => {});
+  function withReplyLock(fn: () => Promise<void>): Promise<void> {
+    const next = replyChain.then(fn, fn);
+    replyChain = next.finally(() => {}).catch(() => {});
     return next;
   }
 
@@ -33,7 +29,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
    *   content      文本（含语音云端转写 `[语音] …`、引用消息注记）
    *   images       图片本地路径（AI 用 analyze_image 读取）
    *   attachments  文件/语音/视频本地路径（AI 用 file_read 读取）
-   *   botSlot      所属微信槽位（单账号固定 0）
+   *   botSlot      固定 0（单账号）
    */
   async function autoReplyWechat(msg: any) {
     if (!msg || !msg.fromUser) return;
@@ -45,15 +41,11 @@ export function useWechatAutoReply(getApiKey: () => string) {
     if (localStorage.getItem("clawdesk_wechat_autoreply") === "off") return;
     const apiKey = getApiKey().trim();
     if (!apiKey) return;
-    // ★ 所属微信槽位（单账号固定 0）
-    const slot = typeof msg.botSlot === "number" ? msg.botSlot : 0;
-    // 读取该微信的人设（后端 wechat 槽位 persona，已随账号恢复）
+    // 读取该微信的人设（已随账号恢复）
     let persona: string | null = null;
     try {
       const st = await wechatApi.botStatus();
-      const bots = st?.bots || [];
-      const b = bots.find((x: any) => x.slot === slot);
-      if (b?.personaText) persona = b.personaText;
+      persona = st?.bot?.personaText || null;
     } catch { /* 读取失败忽略 */ }
     try {
       // ★ 时间感知：把当前时间告诉 AI，让它根据时间决定说话方式（如深夜说"这么晚找我什么事"）
@@ -99,10 +91,10 @@ export function useWechatAutoReply(getApiKey: () => string) {
           "\n请调用 analyze_image 工具读取图片内容、file_read 工具读取文件内容（zip 压缩包可直接用 file_read 读取，超过 2MB 的压缩包不支持并如实告知）。";
       }
       // ★ AI 生成期间显示"对方正在输入"（后端保活，回复后 finally 关闭）
-      startWechatTyping(msg.fromUser, slot);
+      startWechatTyping(msg.fromUser);
       const outcome = await chatApi.chat({
         apiKey,
-        sessionId: `wechat-${slot}`, // ★ 每个微信独立会话记忆（wechat-0 / wechat-1 …）
+        sessionId: "wechat-0", // 单微信的独立会话记忆
         runId: `wechat-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         prompt: promptText,
         resume: true,
@@ -123,7 +115,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       if (generatedImages.length) {
         for (const imgPath of generatedImages) {
           try {
-            await wechatApi.sendImage(msg.fromUser, imgPath, slot);
+            await wechatApi.sendImage(msg.fromUser, imgPath);
             console.log(`[wechat] 已发送图片到 ${msg.fromUser}: ${imgPath}`);
           } catch (e) {
             console.error("[wechat] 发送图片失败", e);
@@ -135,9 +127,8 @@ export function useWechatAutoReply(getApiKey: () => string) {
         msgId: msg.msgId,
         toUser: msg.fromUser,
         content: reply,
-        slot,
       });
-      console.log(`[wechat] 微信${slot + 1} 已自动回复 ${msg.fromUser}: ${reply.slice(0, 60)}`);
+      console.log(`[wechat] 微信已自动回复 ${msg.fromUser}: ${reply.slice(0, 60)}`);
       // ★ AI 语音回复（可选，默认关）：开关开启时，AI 回复文本后再发一条
       //   Edge TTS 真人音色合成的语音文件（微信 iLink 官方协议不支持语音条，
       //   发文件是官方协议下的最佳近似——对方点开即可播放真人语音）。
@@ -145,7 +136,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
         // 不传 voice：后端按已保存的 voice_id 合成（Edge/CosyVoice 共用同一字段），
         // 避免旧代码硬编码 Edge 默认音色覆盖用户选择的 CosyVoice 音色
         try {
-          await wechatApi.sendVoice(msg.fromUser, reply, slot);
+          await wechatApi.sendVoice(msg.fromUser, reply);
           console.log(`[wechat] 语音回复已发送 ${msg.fromUser}`);
         } catch (e) {
           console.error("[wechat] 语音回复发送失败", e);
@@ -155,7 +146,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
       console.error("微信自动回复失败", e);
     } finally {
       // ★ 停止"正在输入"保活（无论成功/失败都结束输入态，避免对方一直看到输入中）
-      void wechatApi.typing(msg.fromUser, false, slot).catch(() => {});
+      void wechatApi.typing(msg.fromUser, false).catch(() => {});
     }
   }
 
@@ -164,15 +155,14 @@ export function useWechatAutoReply(getApiKey: () => string) {
    * 后端 wechat_typing 启动保活任务（每 10s 发一次 typing），agent_chat 结束后由
    * autoReplyWechat 的 finally 关闭。生成前调用一次即可（保活由后端维持）。
    */
-  function startWechatTyping(toUser: string, slot: number) {
-    void wechatApi.typing(toUser, true, slot).catch(() => {});
+  function startWechatTyping(toUser: string) {
+    void wechatApi.typing(toUser, true).catch(() => {});
   }
 
   /** 挂载微信消息监听（组件 onMounted 时调用，返回解除函数） */
   function listenWechatMessages(): Promise<UnlistenFn> {
     return listen<any>("wechat-message", (e) => {
-      const slot = typeof e.payload?.botSlot === "number" ? e.payload.botSlot : 0;
-      void withSlotLock(slot, () => autoReplyWechat(e.payload));
+      void withReplyLock(() => autoReplyWechat(e.payload));
     });
   }
 
