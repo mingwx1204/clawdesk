@@ -11,6 +11,8 @@ export const sessionsApi = {
   rename: (sessionId: string, newName: string) => invoke("agent_session_rename", { sessionId, newName }),
   delete: (id: string) => invoke("agent_session_delete", { sessionId: id }),
   clear: (sessionId: string) => invoke<boolean>("agent_session_clear", { sessionId }),
+  compact: (sessionId: string, apiKey: string) =>
+    invoke<any>("agent_session_compact", { sessionId, apiKey }),
   usage: (sessionId: string) => invoke<any>("agent_session_usage", { sessionId }),
   branches: (parentId: string) => invoke<string[]>("agent_branches", { parentId }),
   checkpoint: (sessionId: string) => invoke<unknown>("agent_checkpoint", { sessionId }),

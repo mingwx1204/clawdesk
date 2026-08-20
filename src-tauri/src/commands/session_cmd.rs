@@ -4,9 +4,12 @@
 //! agent_session_messages / agent_session_delete / agent_session_usage / session_export /
 //! session_search / agent_fork / agent_checkpoint / agent_branches。
 
+use serde_json::{json, Value};
 use tauri::State;
 
 use crate::commands::AppState;
+use crate::llm::runner::ChatProvider;
+use crate::llm::{truncate, LlmMessage, Role};
 
 /// 列出全部 Agent 会话 ID。
 #[tauri::command]
@@ -72,6 +75,118 @@ pub fn agent_session_delete(state: State<'_, AppState>, session_id: String) -> b
 #[tauri::command]
 pub fn agent_session_clear(state: State<'_, AppState>, session_id: String) -> bool {
     state.sessions.clear_context(&session_id)
+}
+
+/// 把对话历史转成可送给 LLM 的压缩素材。
+/// 从最新消息往回收集，单条截断 1200 字，总量控制在 24K 字以内（保住最近上下文）。
+fn compact_transcript(messages: &[LlmMessage]) -> String {
+    const BUDGET_CHARS: usize = 24_000;
+    let mut entries: Vec<String> = Vec::new();
+    let mut used = 0usize;
+
+    for m in messages.iter().rev() {
+        let label = match &m.role {
+            Role::User => "用户",
+            Role::Assistant => "ClawDesk",
+            Role::Tool => "工具结果",
+            Role::System => continue,
+        };
+        let body = if !m.content.trim().is_empty() {
+            truncate(&m.content, 1_200)
+        } else if matches!(&m.role, Role::Assistant) {
+            match m.tool_calls.as_ref() {
+                Some(tcs) if !tcs.is_empty() => {
+                    let names: Vec<String> = tcs
+                        .iter()
+                        .map(|t| t.function.name.replace("__", ":"))
+                        .collect();
+                    format!("调用工具：{}", names.join("、"))
+                }
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+
+        let entry = format!("{label}：{body}
+");
+        let len = entry.chars().count();
+        if used + len > BUDGET_CHARS {
+            break; // 预算用尽：更早的历史舍弃（与 runner 的 32K token 截断策略一致）
+        }
+        used += len;
+        entries.push(entry);
+    }
+    entries.reverse();
+    entries.concat()
+}
+
+/// 手动压缩指定会话：用主模型生成历史摘要，调用 `SessionManager::compact_with`
+/// 保留最近 keep_last 条原始消息，并用 system 摘要替代更早的历史。
+#[tauri::command]
+pub async fn agent_session_compact(
+    state: State<'_, AppState>,
+    session_id: String,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("请先在「设置 → 模型 API」中填写 DeepSeek API Key".into());
+    }
+
+    let mut session = state.sessions.get_or_create(&session_id);
+    if !state.sessions.can_compact(&session) {
+        return Err(format!(
+            "当前会话只有 {} 条历史消息，不足以压缩（压缩后仍需保留最近消息）",
+            session.messages.len()
+        ));
+    }
+
+    let transcript = compact_transcript(&session.messages);
+    if transcript.trim().len() < 40 {
+        return Err("可压缩的对话内容太少，无需压缩".into());
+    }
+
+    state.router.ensure_main_key(api_key);
+    let messages = vec![
+        LlmMessage {
+            role: Role::System,
+            content: "你是会话压缩器。请把用户与 ClawDesk 的对话历史压缩成一份简洁的上下文摘要，供后续对话继续使用。必须保留：1) 用户目标与未完成任务；2) 关键事实、偏好和约束；3) 重要文件路径、代码位置；4) 已做决策及原因。忽略寒暄、重复内容与已完成的中间过程。直接输出摘要正文，不要加任何前缀或解释。".into(),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        LlmMessage {
+            role: Role::User,
+            content: format!("[对话历史]
+{transcript}"),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    ];
+    let response = state
+        .router
+        .chat(&messages, &Value::Array(vec![]))
+        .map_err(|e| format!("生成摘要失败：{e}"))?;
+
+    let summary = response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if summary.is_empty() {
+        return Err("模型返回了空摘要，请稍后重试".into());
+    }
+    let summary = truncate(&summary, 6_000);
+
+    state.sessions.compact_with(&mut session, summary.clone());
+    Ok(json!({
+        "ok": true,
+        "summary": summary,
+        "messages": session.messages.len(),
+        "compactions": session.compacted_count,
+    }))
 }
 
 /// 输出会话用量统计（上下文窗口占用 + 累计 token 用量）。

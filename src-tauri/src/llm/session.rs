@@ -299,6 +299,12 @@ impl SessionManager {
         ids
     }
 
+    /// 手动压缩的最低条件：消息数必须明显多于「压缩后保留的最近消息」，
+    /// 否则摘要 + 全量消息反而会让上下文更长。
+    pub fn can_compact(&self, session: &AgentSession) -> bool {
+        session.messages.len() > self.keep_last + 2
+    }
+
     /// 判断是否触发压缩（消息数或字符数超阈值）。
     #[allow(dead_code)]
     pub fn needs_compaction(&self, session: &AgentSession) -> bool {
@@ -494,6 +500,23 @@ mod tests {
         assert_eq!(cleared.total_input_tokens, 1234);
         assert_eq!(cleared.total_output_tokens, 567);
         assert_eq!(mgr.len(), 1);
+    }
+
+    #[test]
+    fn can_compact_requires_enough_history() {
+        let mgr = SessionManager::new();
+        let mut s = mgr.create("s-compact-check".into());
+        assert!(!mgr.can_compact(&s));
+        // keep_last=10：12 条以内不需要手动压缩，13 条才值得
+        for i in 0..12 {
+            s.messages.push(msg(Role::User, &format!("msg{}", i)));
+            mgr.update(s.clone());
+        }
+        assert!(!mgr.can_compact(&mgr.get_or_create("s-compact-check")));
+        let mut s2 = mgr.get_or_create("s-compact-check");
+        s2.messages.push(msg(Role::User, "msg12"));
+        mgr.update(s2);
+        assert!(mgr.can_compact(&mgr.get_or_create("s-compact-check")));
     }
 
     #[test]

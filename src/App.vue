@@ -120,6 +120,7 @@ const searchResults = ref<{ sessionId: string; role: string; content: string }[]
 const searching = ref(false);
 const exporting = ref(false);
 const clearingContext = ref(false);
+const compactingContext = ref(false);
 
 // ── v6 交互状态 ──
 // 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
@@ -630,6 +631,30 @@ async function clearContext() {
     window.alert(`❌ 清空上下文失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
   } finally {
     clearingContext.value = false;
+  }
+}
+
+/** 手动压缩上下文：主模型生成历史摘要，保留最近消息（后端 compact_with）。 */
+async function compactContext() {
+  if (running.value) {
+    window.alert("AI 正在运行中，请先停止或等待完成后再压缩上下文");
+    return;
+  }
+  if (!apiKey.value.trim()) {
+    window.alert("请先在「设置 → 模型 API」中填写 DeepSeek API Key");
+    return;
+  }
+  if (!window.confirm("将用主模型把较早的对话历史压缩成摘要（保留最近消息）。压缩会调用模型并产生少量 token 费用，确定继续吗？")) return;
+  compactingContext.value = true;
+  try {
+    const r = await sessionsApi.compact(sessionId.value, apiKey.value.trim());
+    await loadSessionMessages(sessionId.value); // 较早历史被摘要替代，刷新当前视图
+    await loadSessionUsage();
+    window.alert(`✅ 上下文已压缩 · 摘要 ${r?.summary?.length ?? 0} 字 · 当前 ${r?.messages ?? 0} 条 · 累计压缩 ${r?.compactions ?? 0} 次`);
+  } catch (e) {
+    window.alert(`❌ 压缩失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  } finally {
+    compactingContext.value = false;
   }
 }
 
@@ -1231,8 +1256,11 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
           <div class="rp-head">📊 上下文</div>
           <div class="rp-actions">
             <button class="rp-action" title="重新加载当前会话的真实用量统计和文件快照" @click="refreshRightPanel">↻ 刷新</button>
+            <button class="rp-action" title="用主模型生成历史摘要并压缩上下文" :disabled="running || compactingContext || !apiKey.trim()" @click="compactContext">
+              {{ compactingContext ? "压缩中…" : "🗜 压缩" }}
+            </button>
             <button class="rp-action rp-action-danger" title="删除当前会话全部对话记忆" :disabled="running || clearingContext" @click="clearContext">
-              {{ clearingContext ? "清空中…" : "🧹 清空上下文" }}
+              {{ clearingContext ? "清空中…" : "🧹 清空" }}
             </button>
           </div>
           <div class="rp-body">
