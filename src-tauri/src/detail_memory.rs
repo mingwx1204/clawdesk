@@ -306,10 +306,17 @@ pub fn details_context_for_prompt_mood(recent_max: usize, max_chars: usize) -> S
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
+    // ★ 沉默权（借鉴 mnemo）：低于阈值 0.35 的记忆不塞入上下文，
+    //   避免弱匹配污染 prompt——真人不会每句话都翻遍所有记忆。
+    const SCORE_THRESHOLD: f64 = 0.35;
+
     let mut parts: Vec<String> = Vec::new();
     let mut used_bumped: Vec<String> = Vec::new();
     let mut used_chars = 0usize;
-    for (_, d) in scored.iter().take(recent_max) {
+    for (score, d) in scored.iter().take(recent_max) {
+        if *score < SCORE_THRESHOLD {
+            continue; // 弱匹配，沉默（mnemo 风格）
+        }
         let line = fmt_line(d);
         if used_chars + line.chars().count() > max_chars {
             break;
