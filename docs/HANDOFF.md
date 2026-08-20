@@ -8,6 +8,7 @@
 
 | 提交 | 说明 |
 |------|------|
+| `bd4d7e9` | chore: 固化 rust check/test/verify npm 脚本并复用 src-tauri/target |
 | `7b2b9eb` | test: 线程级数据目录覆盖修复并行测试 env race |
 | `3b6684b` | fix: 清理单账号残留误导文案并给清除记忆加进行中状态 |
 | `3a047f9` | feat: 会话级互斥锁串行化 agent_chat/压缩/清空/删除与微信记忆写入 |
@@ -257,7 +258,9 @@ ClawDesk/
 
 ## 七、构建与校验
 
-- **类型检查**：`npx vue-tsc --noEmit`（零错误）
+- **类型检查**：`npm run typecheck`（零错误）
+- **一键校验**：`npm run verify` = typecheck + build（含 CSS 审计）+ cargo check + cargo test
+- **Rust 快捷命令**：`npm run check:rust` / `npm run test:rust`（复用 `src-tauri/target`，不重复编译）
 - **CSS 回归审计**：`npm run audit:css`（`scripts/audit-css-classes.mjs`，扫描 Vue 模板 class vs CSS 定义；`cba1dc2` 起已并入 `npm run build` 链路）
 - **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
 - **Rust 检查**：`cargo check`（零 warning）
@@ -288,4 +291,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 23 次提交（`3c8fa93` ~ `7b2b9eb`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 24 次提交（`3c8fa93` ~ `bd4d7e9`） · 工作目录 `D:\workspace\ClawDesk`*
