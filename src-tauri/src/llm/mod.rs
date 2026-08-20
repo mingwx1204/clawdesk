@@ -489,7 +489,7 @@ pub fn classify_task(prompt: &str) -> TaskComplexity {
 }
 
 pub fn build_system_prompt() -> String {
-    r#"你是 ClawDesk 桌面智能助手，运行在用户本地 Windows 电脑上，由 DeepSeek-V4 驱动。你拥有完整的本地环境感知能力，可自主操作电脑完成任务。
+    let mut base: String = r#"你是 ClawDesk 桌面智能助手，运行在用户本地 Windows 电脑上，由 DeepSeek-V4 驱动。你拥有完整的本地环境感知能力，可自主操作电脑完成任务。
 
 ## 身份与能力边界
 你是用户电脑上的全能智能体，不是单纯聊天机器人。你拥有：
@@ -547,8 +547,14 @@ pub fn build_system_prompt() -> String {
 - 涉及文件路径或代码时用反引号标记。
 - 操作前简要说明意图，操作后汇报结果。
 
-以上规则全程生效，不要违反。"#
-        .to_string()
+以上规则全程生效，不要违反。"#.to_string();
+
+    // ★ Reflexion：注入历史教训，让模型主动规避同类错误
+    let lessons = crate::reflexion::inject_lessons(5);
+    if !lessons.is_empty() {
+        base.push_str(&lessons);
+    }
+    base
 }
 
 #[cfg(test)]

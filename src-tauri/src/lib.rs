@@ -20,6 +20,8 @@ mod mood;
 mod detail_memory;
 // ── 自进化系统（AI 自动学习生成技能） ──
 mod self_evolve;
+// ── Reflexion 反思记忆层（从失败中学习，避免重复犯错） ──
+mod reflexion;
 // ── 生命叙事（睡前巩固 + 梦境 · 一生的故事线） ──
 mod life_narrative;
 // ── 主观关系叙事（我们之间的故事 · 关系记忆） ──
@@ -360,6 +362,7 @@ pub fn run() {
     crate::persona_traits::init();
     crate::ghost::init();
     crate::affinity::init();
+    crate::reflexion::init();
 
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {

@@ -724,6 +724,13 @@ pub async fn run_agent_loop(
             };
             record_usage(sessions, session_id, &usage);
 
+            // ★ Reflexion：评估最终回复是否失败，失败则抽取教训入库
+            if let Some((mistake, lesson)) =
+                crate::reflexion::evaluate_failure(&turn.final_text, user_prompt)
+            {
+                crate::reflexion::record(user_prompt, &mistake, &lesson);
+            }
+
             Ok(ToolLoopOutcome {
                 used_rounds: turn.used_tool_calls,
                 rounds: vec![RoundRecord {
@@ -739,6 +746,12 @@ pub async fn run_agent_loop(
         }
         Err(e) => {
             eprintln!("[RUNNER] turn 失败: {e}");
+            // ★ Reflexion：工具循环整体失败，记录教训避免重蹈覆辙
+            crate::reflexion::record(
+                user_prompt,
+                &format!("任务执行报错：{}", &e[..e.len().min(160)]),
+                "任务执行报错，请拆解步骤、先验证每步前置条件（API Key / 路径 / 权限）再逐段推进。",
+            );
             Err(e)
         }
     }
