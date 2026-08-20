@@ -117,7 +117,8 @@
 
 - `analyze_image.rs` 新增 `local_vision_fallback()`：云端视觉未配置/失败时，自动探测 `http://127.0.0.1:8088/health`（300ms 超时），在线则走本地 Qwen2.5-VL-7B，不在线则降级元信息（零配置）。
 - 环境变量 `CLAWDESK_DISABLE_LOCAL_VISION=1` 可显式禁用本地视觉。
-- 启动服务命令：`llama-server -m Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf -ngl 22 -c 2048 --host 127.0.0.1 --port 8088`
+- **自动启动（零配置）**：`commands/llama_server.rs` 封装 llama-server 生命周期——ClawDesk 启动时自动 `spawn`（后台、非阻塞，检测模型文件存在 + 端口占用），退出 `RunEvent::Exit` 时自动 `kill` 回收。关键实现细节：`spawn` 时必须 `current_dir` 设为 llama-server 所在目录（新版 llama.cpp 预编译版把主逻辑拆到 `llama-server-impl.dll` + `ggml-cuda.dll` 等，不设 cwd 会找不到 DLL）。实测 8 秒就绪。
+- 手动启动命令（兜底）：`llama-server -m Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf -ngl 22 -c 2048 --host 127.0.0.1 --port 8088`
 
 ---
 
