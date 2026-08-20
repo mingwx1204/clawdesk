@@ -661,6 +661,22 @@ async function testReply() {
         <button class="wc-close" @click="emit('close')">✕</button>
       </div>
 
+      <!-- 多账号槽位切换（后端每个槽位独立登录/人设/聊天记录/AI 记忆） -->
+      <div class="wc-slots">
+        <button
+          v-for="b in bots"
+          :key="b.slot"
+          class="wc-slot"
+          :class="{ active: b.slot === curSlot }"
+          :title="`槽位 ${b.slot + 1}：${b.personaText ? '已配置人设 · ' : ''}${b.loggedIn ? '已登录' : '未登录'}`"
+          @click="selectSlot(b.slot)"
+        >
+          <span class="wc-slot-dot" :class="{ on: b.connected, idle: b.loggedIn && !b.connected }"></span>
+          <span>{{ b.botName || b.name }}</span>
+          <span v-if="b.personaText" class="wc-slot-persona">有人设</span>
+        </button>
+      </div>
+
       <div class="wc-body">
         <!-- 左：登录 / 控制 / 人设 -->
         <div class="wc-left">
@@ -1127,7 +1143,11 @@ async function testReply() {
   min-width: 0;
 }
 .wc-chat-item:hover { border-color: var(--color-border-light); }
-.wc-chat-item.active { border-color: var(--color-accent); background: var(--color-surface-hover); }
+.wc-chat-item.active {
+  border-color: var(--color-accent);
+  background: var(--color-surface-hover);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
 .wc-chat-name {
   font-size: 12px;
   color: var(--color-text);

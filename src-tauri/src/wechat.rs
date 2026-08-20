@@ -246,8 +246,9 @@ impl WechatInner {
     }
 }
 
-/// 微信 Bot 数量（只绑定一个微信）
-pub const MAX_BOTS: usize = 1;
+/// 微信 Bot 数量：最多同时登录 3 个微信（槽位 0/1/2 = 微信1/2/3）。
+/// 每个槽位独立：登录凭据 / 人设 / 聊天记录 / AI 会话记忆。
+pub const MAX_BOTS: usize = 3;
 
 /// 多微信 Bot 状态：槽位数组，每个槽位一个独立 WechatInner
 pub struct WechatBotState(pub Mutex<Vec<Arc<WechatInner>>>);
