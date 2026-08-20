@@ -8,10 +8,11 @@
 
 | 提交 | 说明 |
 |------|------|
+| `c074faf` | revert: 微信恢复单账号并清理多槽位误导性死代码 |
 | `cba1dc2` | build: CSS 类名审计纳入 npm run build 链路 |
 | `18ac9a7` | perf: 微信灵魂面板改为展开时按需拉取快照 |
 | `51d3cbf` | chore: 新增 CSS 类名回归审计脚本并修复 3 个缺失样式 |
-| `1fe30e3` | feat: 微信槽位标签显示最近消息时间与非当前槽位未读计数 |
+| `1fe30e3` | ~~feat: 微信槽位标签显示最近消息时间与非当前槽位未读计数~~（❌ 已由 `c074faf` 回滚） |
 | `f4c8610` | feat: 手动上下文压缩接入 LLM 摘要链 |
 | `7d1a19f` | feat: 文件快照差异预览支持一键回滚与删除 |
 | `a762167` | refactor: 微信面板剩余内联色值改为语义 CSS 类 |
@@ -19,7 +20,7 @@
 | `d7589aa` | feat: 右侧面板接入文件快照列表与差异预览 |
 | `665bdf7` | fix: 恢复权限/新建会话/搜索弹窗的 overlay 样式（game.css 删除回归） |
 | `0a4b333` | feat: 右侧面板新增清空上下文快捷操作 |
-| `b37ef0a` | feat: 微信面板支持 3 槽位多账号切换 |
+| `b37ef0a` | ~~feat: 微信面板支持 3 槽位多账号切换~~（❌ 已由 `c074faf` 回滚） |
 | `8a4c6d2` | feat: 暗色/亮色主题切换 + 外观设置面板即时生效 |
 | `3c8fa93` | feat: 窗口缩窄时右侧面板自动折叠（<1020 收起 / >1080 恢复 / 手动展开覆盖） |
 | `16d350b` | refactor: 三栏布局 + 右侧上下文监测面板 + 微信面板主题统一 |
@@ -171,7 +172,7 @@
 
 ---
 
-## 五、微信面板主题统一与多槽位
+## 五、微信面板主题统一（单账号）
 
 **文件**：`src/components/WechatPanel.vue`
 
@@ -183,14 +184,17 @@
 
 剩余的语义色（success/warning/danger/soul-panel 渐变）保持原样。
 
-### 多槽位支持（`b37ef0a`）
+### ★ 重要澄清：产品定位是单微信（`c074faf`）
 
-- 后端 `src-tauri/src/wechat.rs`：`MAX_BOTS` 由 1 放开到 **3**（微信1/2/3），每个槽位独立登录凭据/人设/聊天记录/AI 会话
-- 前端 `WechatPanel.vue`：标题栏下新增槽位标签条（在线状态点 + 人设标记），点击切换；`selectSlot` 原本已具备全部切换逻辑，这次补上模板入口
-- `App.vue` 微信在线圆点改为多槽位聚合：任一微信连接即亮灯；启动时主动拉取一次 `wechat_bot_status`
+- `7ceaea8`（2026-08-19）已明确把微信从 10 槽位**收敛为 1 个**（`MAX_BOTS = 1`），并删除了前端槽位列表
+- 但 `slot` 参数、`selectSlot`、`.wc-slots` CSS 等历史兼容残留仍在，HANDOFF 旧条目「后端已支持多账号」是**过期信息**
+- 本会话早期误据死代码把 `MAX_BOTS` 扩到 3，并重新渲染了槽位标签；`c074faf` 已全部回滚，并清理了 `selectSlot` / `.wc-slot*` 等误导性残留
+- 当前状态：**单微信（槽位 0）**，标题改为「内置微信（独立于电脑上的微信）」；`wechat_bot_status` 不再返回 `lastMessageAt` / `lastMessagePreview`
+
+### 微信面板其他改动
+
 - `.wc-chat-item.active` 微调：accent 边框 + 3px 左侧 accent 指示条
 - `a762167`：灵魂面板 / 主动聊天的内联颜色改为 `.wc-soul-sub` / `.wc-ghost-text` / `.wc-tip-warn`，并使用 `--color-warning` 等变量
-- `1fe30e3`：`wechat_bot_status` 增加 `lastMessageAt` / `lastMessagePreview`；槽位标签显示最近消息时间，非当前槽位来消息时显示未读红点（切过去清零）
 - `18ac9a7`：灵魂全景快照改为「展开灵魂面板时按需拉取」，不再随 5 秒轮询重复读取八层状态
 
 ---
@@ -206,7 +210,7 @@ ClawDesk/
 │   ├── components/
 │   │   ├── BottomInput.vue # 底部输入框（附件/模型选择/发送）
 │   │   ├── SettingsView.vue # 设置弹窗（模型/外观配置）
-│   │   └── WechatPanel.vue # 微信 Bot 面板（多账号/聊天/人设/灵魂面板）
+│   │   └── WechatPanel.vue # 微信 Bot 面板（单账号/聊天/人设/灵魂面板）
 │   ├── styles/
 │   │   ├── variables.css   # CSS 变量（主题色/字体/间距）
 │   │   ├── base.css        # 基础控件样式
@@ -227,7 +231,7 @@ ClawDesk/
 │   ├── llm/
 │   │   ├── mod.rs          # 构建 system prompt + 工具注册
 │   │   └── session.rs      # 会话管理器（持久化 + clear_context）
-│   └── wechat.rs           # 微信 Bot（MAX_BOTS=3 多槽位）
+│   └── wechat.rs           # 微信 Bot（单账号，slot 参数仅历史兼容）
 └── docs/
     ├── inspiration.md      # 本地视觉模型调研笔记
     ├── DEV_SPEC.md         # 开发规范
@@ -255,16 +259,16 @@ ClawDesk/
 2. **微信面板 active 微调**：✅ 已完成（`b37ef0a`，accent 边框 + 左指示条）
 3. **响应式适配**：✅ 已完成（`3c8fa93`，窗口缩窄时右侧面板自动折叠）
 4. **暗色/亮色主题切换**：✅ 已完成（`8a4c6d2`，设置面板即时切换并持久化）
-5. **微信面板多槽位**：✅ 已完成（`b37ef0a`，后端 3 槽位 + 前端槽位标签切换）
+5. **微信面板多槽位**：✅ 澄清完成——产品是单微信（`7ceaea8` 收敛；`c074faf` 回滚误扩并清理死代码）
 
 后续可选方向（已完成的已并入正文）：
 
 - ✅ **文件变动预览**：已完成（`d7589aa` 列表+差异，`7d1a19f` 回滚/删除）
 - ✅ **亮色主题基础打磨**：已完成（`a762167`，微信面板内联色值清理）
 - ✅ **真正的手动压缩**：已完成（`f4c8610`，`agent_session_compact` 命令 + 右栏「🗜 压缩」按钮）
-- ✅ **多槽位细节（第一版）**：已完成（`1fe30e3`，最近消息时间 + 非当前槽位未读计数；soul 状态按槽位隔离仍留作后续）
+- ✅ **多槽位细节**：不适用——已确认单账号定位，槽位未读/最近消息时间已随 `c074faf` 回滚；soul 状态全局唯一是正确的，无需按槽位隔离
 - ✅ **弹窗/CSS 回归审计**：已完成（`51d3cbf`，`npm run audit:css` 并修复 `.tc-fold-on` / `.wc-living` / `.wc-msg-time`）
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 18 次提交（`3c8fa93` ~ `cba1dc2`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 19 次提交（`3c8fa93` ~ `c074faf`） · 工作目录 `D:\workspace\ClawDesk`*
