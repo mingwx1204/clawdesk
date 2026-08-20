@@ -3682,7 +3682,20 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 .unwrap_or(0);
             let persona_text = inner.persona.lock().clone().unwrap_or_default();
             // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
-            let history_count = read_history_limit(inner, 200).len();
+            let history = read_history_limit(inner, 200);
+            let history_count = history.len();
+            let last_message_at = history
+                .last()
+                .and_then(|r| r.get("timestamp").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            let last_message_preview = history
+                .last()
+                .and_then(|r| r.get("content").and_then(|v| v.as_str()))
+                .map(|c| {
+                    let head: String = c.chars().take(40).collect();
+                    if c.chars().count() > 40 { format!("{head}…") } else { head.to_string() }
+                })
+                .unwrap_or_default();
             serde_json::json!({
                 "slot": inner.slot,
                 "name": format!("微信{}", inner.slot + 1),
@@ -3696,6 +3709,8 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 "personaLen": persona_len,
                 "personaText": persona_text,
                 "historyCount": history_count,
+                "lastMessageAt": last_message_at,
+                "lastMessagePreview": last_message_preview,
                 "proactiveEnabled": inner.proactive_enabled.load(Ordering::SeqCst),
                 "proactiveIntervalMin": *inner.proactive_interval_min.lock(),
                 "proactiveIntervalMax": *inner.proactive_interval_max.lock(),

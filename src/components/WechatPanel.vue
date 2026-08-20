@@ -28,6 +28,8 @@ interface BotStatus {
   personaLen: number;
   personaText?: string;
   historyCount: number;
+  lastMessageAt?: number;
+  lastMessagePreview?: string;
   proactiveEnabled?: boolean;
   proactiveIntervalMin?: number;
   proactiveIntervalMax?: number;
@@ -45,9 +47,11 @@ const emit = defineEmits<{ close: [] }>();
 
 // ── 账号列表状态 ──
 const bots = ref<BotStatus[]>([]);
-/** 当前微信槽位（单 Bot 固定为 0） */
+/** 当前微信槽位 */
 const curSlot = ref(0);
 const cur = computed(() => bots.value.find((b) => b.slot === curSlot.value) ?? bots.value[0]);
+/** 非当前槽位的未读消息数（面板打开期间收到即累计，切换过去后清零） */
+const unreadCounts = ref<Record<number, number>>({});
 
 // ── 当前槽位登录状态 ──
 const qrcodeUrl = ref("");
@@ -298,6 +302,7 @@ async function genQrSvg(text: string): Promise<string> {
 /** 切换当前选中的微信槽位 */
 function selectSlot(slot: number) {
   curSlot.value = slot;
+  unreadCounts.value = { ...unreadCounts.value, [slot]: 0 };
   qrState.value = "idle";
   qrcodeUrl.value = "";
   qrSvg.value = "";
@@ -330,6 +335,9 @@ onMounted(async () => {
         messages.value.unshift(m);
         if (messages.value.length > 30) messages.value.pop();
         void reloadChats();
+      } else {
+        // 其他槽位来消息：槽位标签显示未读红点数字
+        unreadCounts.value = { ...unreadCounts.value, [slot]: (unreadCounts.value[slot] ?? 0) + 1 };
       }
     });
     unlistenStatus = await listen<any>("wechat-bot-status", (e) => {
@@ -674,6 +682,8 @@ async function testReply() {
           <span class="wc-slot-dot" :class="{ on: b.connected, idle: b.loggedIn && !b.connected }"></span>
           <span>{{ b.botName || b.name }}</span>
           <span v-if="b.personaText" class="wc-slot-persona">有人设</span>
+          <span v-if="b.lastMessageAt" class="wc-slot-time">{{ fmtTs(b.lastMessageAt) }}</span>
+          <span v-if="unreadCounts[b.slot]" class="wc-slot-unread">{{ unreadCounts[b.slot] > 99 ? '99+' : unreadCounts[b.slot] }}</span>
         </button>
       </div>
 
@@ -1481,6 +1491,12 @@ async function testReply() {
 .wc-slot-dot.idle { background: #f59e0b; }
 .wc-slot-dot.on { background: #34d399; box-shadow: 0 0 5px #34d399; }
 .wc-slot-persona { font-size: 11px; }
+.wc-slot-time { font-size: 10.5px; color: var(--color-text-muted); font-family: var(--font-mono); }
+.wc-slot-unread {
+  min-width: 16px; height: 16px; padding: 0 5px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--red); color: #fff; font-size: 10px; font-weight: 700;
+}
 
 /* ── 人设编辑区 ── */
 .wc-persona {
