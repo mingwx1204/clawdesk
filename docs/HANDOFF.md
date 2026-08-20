@@ -8,6 +8,7 @@
 
 | 提交 | 说明 |
 |------|------|
+| `585216d` | refactor: 移除微信 slot 兼容层，前后端单账号直连 |
 | `bd4d7e9` | chore: 固化 rust check/test/verify npm 脚本并复用 src-tauri/target |
 | `7b2b9eb` | test: 线程级数据目录覆盖修复并行测试 env race |
 | `3b6684b` | fix: 清理单账号残留误导文案并给清除记忆加进行中状态 |
@@ -204,7 +205,9 @@
 - `7ceaea8`（2026-08-19）已明确把微信从 10 槽位**收敛为 1 个**（`MAX_BOTS = 1`），并删除了前端槽位列表
 - 但 `slot` 参数、`selectSlot`、`.wc-slots` CSS 等历史兼容残留仍在，HANDOFF 旧条目「后端已支持多账号」是**过期信息**
 - 本会话早期误据死代码把 `MAX_BOTS` 扩到 3，并重新渲染了槽位标签；`c074faf` 已全部回滚，并清理了 `selectSlot` / `.wc-slot*` 等误导性残留
-- 当前状态：**单微信（槽位 0）**，标题改为「内置微信（独立于电脑上的微信）」；`wechat_bot_status` 不再返回 `lastMessageAt` / `lastMessagePreview`
+- 当前状态：**单微信**，标题为「内置微信（独立于电脑上的微信）」
+- `585216d`：正式移除 slot 兼容层——后端 `WechatBotState` 直接持有唯一 `Arc<WechatInner>`；所有 `wechat_*` 命令签名、前端 `wechatApi`、`WechatPanel`、`useWechat` 均不再传 `slot`；`wechat_bot_status` 改为返回单个 `bot` 对象
+- 数据兼容保留：账号/人设/聊天记录仍在 `wechat/slot0/` 目录，无需迁移
 - `3b6684b`：继续清理 README / 面板说明 / types / useWechat 中的多槽位残留文案；「清除 AI 记忆」增加清空中状态（后端会等待运行中的回复结束）
 
 ### 微信面板其他改动
@@ -278,7 +281,7 @@ ClawDesk/
 2. **微信面板 active 微调**：✅ 已完成（`b37ef0a`，accent 边框 + 左指示条）
 3. **响应式适配**：✅ 已完成（`3c8fa93`，窗口缩窄时右侧面板自动折叠）
 4. **暗色/亮色主题切换**：✅ 已完成（`8a4c6d2`，设置面板即时切换并持久化）
-5. **微信面板多槽位**：✅ 澄清完成——产品是单微信（`7ceaea8` 收敛；`c074faf` 回滚误扩并清理死代码）
+5. **微信面板多槽位**：✅ 完成收敛——产品单微信，slot 兼容层已由 `585216d` 移除（仅保留 slot0 数据目录兼容）
 
 后续可选方向（已完成的已并入正文）：
 
@@ -291,4 +294,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 24 次提交（`3c8fa93` ~ `bd4d7e9`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 25 次提交（`3c8fa93` ~ `585216d`） · 工作目录 `D:\workspace\ClawDesk`*
