@@ -709,7 +709,7 @@ async function testReply() {
                   <div class="wc-bar-row"><span>分享欲</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.drives.share*100)+'%'}"></span></span></div>
                   <div class="wc-bar-row"><span>安全感</span><span class="wc-bar"><span class="wc-bar-fill" :style="{width: (soulSnap.drives.safety*100)+'%'}"></span></span></div>
                   <div class="wc-bar-row"><span>顽皮</span><span class="wc-bar"><span class="wc-bar-fill wc-bar-fun" :style="{width: (soulSnap.drives.playful*100)+'%'}"></span></span></div>
-                  <div class="wc-bar-row"><span>小执拗</span><span class="wc-bar"><span :style="{width: (soulSnap.drives.stubborn*100)+'%', fontSize:'80%',color:'#999'}">{{ soulSnap.drives.stubborn > 0.2 ? '今天有点小脾气' : '—' }}</span></span></div>
+                  <div class="wc-bar-row"><span>小执拗</span><span class="wc-bar"><span class="wc-bar-text" :style="{width: (soulSnap.drives.stubborn*100)+'%'}">{{ soulSnap.drives.stubborn > 0.2 ? '今天有点小脾气' : '—' }}</span></span></div>
                 </div>
                 <!-- 好感度（affinity） -->
                 <div class="wc-soul-card" v-if="soulSnap.affinity">
@@ -734,9 +734,9 @@ async function testReply() {
                 <div class="wc-soul-card">
                   <div class="wc-soul-title">🌱 生活 · 记忆</div>
                   <div class="wc-soul-text">{{ soulSnap.living }}</div>
-                  <div v-if="soulSnap.narrative" class="wc-soul-text" style="color:#999;margin-top:4px">📖 {{ soulSnap.narrative }}</div>
+                  <div v-if="soulSnap.narrative" class="wc-soul-text wc-soul-sub">📖 {{ soulSnap.narrative }}</div>
                   <div class="wc-soul-text" style="margin-top:4px">💞 关系记忆 {{ soulSnap.relationship }} 条 · 📌 细节记忆 {{ soulSnap.details?.total ?? 0 }} 条（稳定事实 {{ soulSnap.details?.profile ?? 0 }} · 会话时刻 {{ soulSnap.details?.relationship ?? 0 }}）</div>
-                  <div v-if="soulSnap.ghost" class="wc-soul-text" style="margin-top:4px;color:#c0a060">
+                  <div v-if="soulSnap.ghost" class="wc-soul-text wc-ghost-text">
                     👻 连续沉默 {{ soulSnap.ghost.streak }} 次 <span v-if="soulSnap.ghost.last_ghost_ms">· 上次 {{ fmtGhostAgo(soulSnap.ghost.last_ghost_ms) }}</span>
                   </div>
                 </div>
@@ -830,7 +830,7 @@ async function testReply() {
               <div class="wc-row"><span>目标用户</span><b style="max-width:55%; overflow:hidden; text-overflow:ellipsis;">{{ proactiveTarget || "自动（最近聊过的人）" }}</b></div>
               <div class="wc-row"><span>上次主动</span><b>{{ proactiveLastAt ? fmtTs(proactiveLastAt) : "—" }}</b></div>
             </div>
-            <p class="wc-tip" style="margin: 0 10px 10px; color: #f59e0b;">
+            <p class="wc-tip wc-tip-warn">
               🎲 每次发送后随机等 最短~最长 分钟（真随机，不固定）；⏰ 仅 08:00~23:00 主动找（晚上11点后不打扰）；用户深夜发消息时 AI 会带"这么晚找我"的关心语气。
             </p>
           </div>
@@ -1563,6 +1563,9 @@ async function testReply() {
   line-height: 1.5;
   word-break: break-all;
 }
+.wc-soul-sub { margin-top: 4px; color: var(--color-text-muted); }
+.wc-ghost-text { margin-top: 4px; color: var(--color-warning); }
+.wc-tip-warn { margin: 0 10px 10px; color: var(--color-warning); }
 .wc-bar-row {
   display: flex;
   align-items: center;
@@ -1586,9 +1589,14 @@ async function testReply() {
 .wc-bar-fill {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, var(--color-accent), #8bbdff);
+  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-hover));
   border-radius: 4px;
   transition: width 0.4s ease;
+}
+.wc-bar-text {
+  display: block; width: 100%;
+  font-size: 80%; color: var(--color-text-muted);
+  white-space: nowrap;
 }
 .wc-bar-fill.wc-bar-warm { background: linear-gradient(90deg, #ff7aa8, #ff9ec0); }
 .wc-bar-fill.wc-bar-sens { background: linear-gradient(90deg, #8b7aff, #b3a8ff); }
