@@ -50,6 +50,12 @@ export const searchApi = {
   export: (sessionId: string) => invoke<string>("session_export", { sessionId }),
 };
 
+// ── 文件快照（右侧面板文件变动预览）──
+export const snapshotApi = {
+  list: () => invoke<any[]>("snapshot_list"),
+  diff: (snapshotId: string) => invoke<any>("snapshot_diff", { snapshotId }),
+};
+
 // ── 系统 / 诊断 ──
 export const systemApi = {
   lastError: () => invoke<{ message: string; location: string; logPath: string; timestamp?: string } | null>("app_last_error"),

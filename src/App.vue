@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { sessionsApi, chatApi, settingsApi, routerApi, searchApi, systemApi, wechatApi } from "./utils/api";
+import { sessionsApi, chatApi, settingsApi, routerApi, searchApi, systemApi, wechatApi, snapshotApi } from "./utils/api";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
@@ -166,6 +166,15 @@ const ctxTokens = ref("493.4K / 1M 个令牌");
 const ctxItems = ref({ sys: [1.4, 4.7], usr: [19.3, 20.2, 2.8] });
 // 右侧面板：会话完整用量（累计 token / 消息数 / 压缩次数）
 const usageInfo = ref<{ totalInput?: number; totalOutput?: number; totalTokens?: number; messages?: number; compactions?: number }>({});
+// 右侧面板：文件快照列表 + 差异预览（snapshot_list / snapshot_diff）
+const snapshots = ref<any[]>([]);
+const snapDiffOpen = ref(false);
+const snapDiffLoading = ref(false);
+const snapDiffInfo = ref<any>(null);
+const snapDiffText = computed(() => {
+  const arr = Array.isArray(snapDiffInfo.value?.diff) ? snapDiffInfo.value.diff : [];
+  return arr.join(String.fromCharCode(10));
+});
 let clockTimer: number | null = null;
 let glowEl: HTMLElement | null = null;
 let artEl: HTMLElement | null = null;
@@ -201,6 +210,7 @@ onMounted(async () => {
   await Promise.all([refreshSessions(), loadConfig()]);
   await loadSessionMessages(sessionId.value); // 启动时加载默认会话历史
   await loadSessionUsage(); // 启动时加载真实上下文占用
+  void loadSnapshots(); // 右侧面板文件变动预览
   // 恢复内存态 API Key（后端 AppState 持有）；未配置时自动填入用户提供的 DeepSeek Key
   try {
     const k = await settingsApi.getKeys();
@@ -619,6 +629,47 @@ async function clearContext() {
     window.alert(`❌ 清空上下文失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
   } finally {
     clearingContext.value = false;
+  }
+}
+
+/** 加载文件快照列表（file_write 修改文件前的自动备份索引，最新在前）。 */
+async function loadSnapshots() {
+  try {
+    snapshots.value = await snapshotApi.list();
+  } catch {
+    snapshots.value = [];
+  }
+}
+
+/** 刷新右侧面板：上下文用量 + 文件快照。 */
+async function refreshRightPanel() {
+  await Promise.all([loadSessionUsage(), loadSnapshots()]);
+}
+
+function snapFileName(p: string): string {
+  const s = String(p ?? "");
+  const idx = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
+  return idx >= 0 ? s.slice(idx + 1) : s;
+}
+
+function snapTime(ts: string): string {
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? String(ts ?? "") : d.toLocaleString();
+}
+
+/** 打开快照差异预览：后端返回行级 +/- diff（最多 100 行）。 */
+async function showSnapshotDiff(sn: any) {
+  if (!sn?.id) return;
+  snapDiffOpen.value = true;
+  snapDiffLoading.value = true;
+  snapDiffInfo.value = null;
+  try {
+    snapDiffInfo.value = await snapshotApi.diff(sn.id);
+  } catch (e) {
+    window.alert(`❌ 读取文件差异失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+    snapDiffOpen.value = false;
+  } finally {
+    snapDiffLoading.value = false;
   }
 }
 
@@ -1134,7 +1185,7 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
         <aside class="right-panel" :class="{ collapsed: rightCollapsed }">
           <div class="rp-head">📊 上下文</div>
           <div class="rp-actions">
-            <button class="rp-action" title="重新加载当前会话的真实用量统计" @click="loadSessionUsage">↻ 刷新</button>
+            <button class="rp-action" title="重新加载当前会话的真实用量统计和文件快照" @click="refreshRightPanel">↻ 刷新</button>
             <button class="rp-action rp-action-danger" title="删除当前会话全部对话记忆" :disabled="running || clearingContext" @click="clearContext">
               {{ clearingContext ? "清空中…" : "🧹 清空上下文" }}
             </button>
@@ -1162,6 +1213,22 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
                 <div class="rp-stat"><span class="rp-stat-val">{{ fmtK(usageInfo.totalOutput ?? 0) }}</span><span class="rp-stat-key">输出</span></div>
                 <div class="rp-stat"><span class="rp-stat-val">{{ usageInfo.messages ?? 0 }}</span><span class="rp-stat-key">消息</span></div>
                 <div class="rp-stat"><span class="rp-stat-val">{{ usageInfo.compactions ?? 0 }}</span><span class="rp-stat-key">压缩</span></div>
+              </div>
+            </div>
+            <div class="rp-card">
+              <div class="rp-label">文件快照（{{ snapshots.length }}）</div>
+              <div class="rp-snap-list">
+                <button
+                  v-for="sn in snapshots.slice(0, 5)"
+                  :key="sn.id"
+                  class="rp-snap-item"
+                  :title="sn.original"
+                  @click="showSnapshotDiff(sn)"
+                >
+                  <span class="rp-snap-name">📄 {{ snapFileName(sn.original) }}</span>
+                  <span class="rp-snap-time">{{ snapTime(sn.createdAt) }}</span>
+                </button>
+                <p v-if="!snapshots.length" class="rp-empty">暂无文件快照</p>
               </div>
             </div>
             <div class="rp-card">
@@ -1239,6 +1306,23 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
         <div class="pc-actions">
           <button class="pc-no" @click="newSessionOpen = false">取消</button>
           <button class="pc-yes" @click="confirmNewSession">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 文件变动预览弹窗（快照 vs 当前文件） -->
+    <div class="perm-overlay" :class="{ open: snapDiffOpen }">
+      <div class="perm-card snap-card">
+        <div class="pc-title">📄 文件变动预览</div>
+        <div class="pc-sub snap-path">{{ snapDiffInfo?.original }}</div>
+        <p v-if="snapDiffLoading" class="sc-loading">正在对比文件差异…</p>
+        <pre v-else-if="snapDiffInfo" class="snap-diff-pre">{{ snapDiffText }}</pre>
+        <div v-if="snapDiffInfo && !snapDiffLoading" class="snap-diff-meta">
+          快照 {{ snapDiffInfo.snapshotLines }} 行 → 当前 {{ snapDiffInfo.currentLines }} 行 · 差异 {{ snapDiffInfo.diffCount }} 行
+          <span v-if="snapDiffInfo.truncated">（仅显示前 100 行）</span>
+        </div>
+        <div class="pc-actions">
+          <button class="pc-no" @click="snapDiffOpen = false">关闭</button>
         </div>
       </div>
     </div>

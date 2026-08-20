@@ -362,6 +362,27 @@
   font-size: 10px; color: var(--txt-3);
   margin-top: 1px;
 }
+.rp-snap-list {
+  max-height: 168px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.rp-snap-item {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 5px 8px;
+  background: var(--color-surface);
+  border: 1px solid transparent;
+  border-radius: 6px; cursor: pointer; text-align: left;
+  font-family: var(--font); transition: .15s;
+}
+.rp-snap-item:hover { border-color: var(--color-accent); background: var(--color-surface-hover); }
+.rp-snap-name {
+  font-size: 11.5px; color: var(--txt-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.rp-snap-time {
+  flex-shrink: 0; font-size: 10px; color: var(--txt-3);
+  font-family: var(--font-mono);
+}
 .rp-tool-list {
   max-height: 200px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 4px;
@@ -390,5 +411,24 @@
 .rp-empty {
   font-size: 11px; color: var(--txt-3);
   text-align: center; padding: 8px 0;
+}
+.snap-card {
+  width: min(720px, 92vw); text-align: left;
+}
+.snap-path {
+  font-family: var(--font-mono); font-size: 11.5px;
+  word-break: break-all; margin: 4px 0 12px;
+}
+.snap-diff-pre {
+  width: 100%; max-height: 46vh; overflow: auto;
+  background: var(--color-code-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 10px; padding: 10px 12px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  color: var(--txt); text-align: left; white-space: pre-wrap;
+}
+.snap-diff-meta {
+  margin-top: 8px; font-size: 11.5px; color: var(--txt-2);
+  text-align: left;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
