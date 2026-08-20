@@ -8,6 +8,8 @@
 
 | 提交 | 说明 |
 |------|------|
+| `cba1dc2` | build: CSS 类名审计纳入 npm run build 链路 |
+| `18ac9a7` | perf: 微信灵魂面板改为展开时按需拉取快照 |
 | `51d3cbf` | chore: 新增 CSS 类名回归审计脚本并修复 3 个缺失样式 |
 | `1fe30e3` | feat: 微信槽位标签显示最近消息时间与非当前槽位未读计数 |
 | `f4c8610` | feat: 手动上下文压缩接入 LLM 摘要链 |
@@ -189,6 +191,7 @@
 - `.wc-chat-item.active` 微调：accent 边框 + 3px 左侧 accent 指示条
 - `a762167`：灵魂面板 / 主动聊天的内联颜色改为 `.wc-soul-sub` / `.wc-ghost-text` / `.wc-tip-warn`，并使用 `--color-warning` 等变量
 - `1fe30e3`：`wechat_bot_status` 增加 `lastMessageAt` / `lastMessagePreview`；槽位标签显示最近消息时间，非当前槽位来消息时显示未读红点（切过去清零）
+- `18ac9a7`：灵魂全景快照改为「展开灵魂面板时按需拉取」，不再随 5 秒轮询重复读取八层状态
 
 ---
 
@@ -236,7 +239,7 @@ ClawDesk/
 ## 七、构建与校验
 
 - **类型检查**：`npx vue-tsc --noEmit`（零错误）
-- **CSS 回归审计**：`npm run audit:css`（`scripts/audit-css-classes.mjs`，扫描 Vue 模板 class vs CSS 定义）
+- **CSS 回归审计**：`npm run audit:css`（`scripts/audit-css-classes.mjs`，扫描 Vue 模板 class vs CSS 定义；`cba1dc2` 起已并入 `npm run build` 链路）
 - **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
 - **Rust 检查**：`cargo check`（零 warning）
 - **Rust 全量测试**：`cargo test`（376 passed / 0 failed / 1 ignored，含新增 clear_context 单测）
@@ -264,4 +267,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 15 次提交（`3c8fa93` ~ `51d3cbf`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 18 次提交（`3c8fa93` ~ `cba1dc2`） · 工作目录 `D:\workspace\ClawDesk`*
