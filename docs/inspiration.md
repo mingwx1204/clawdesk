@@ -73,4 +73,52 @@
 
 ---
 
-*最后更新：2026-08-14（第二轮灵感深挖 + sccache/rust-lld 接入完成）*
+## 本地视觉模型（识图）—— 2026-08-20 落地
+
+> 目标：给 ClawDesk 的 `analyze_image` 工具加本地识图能力，不依赖云端视觉 API（GLM-5V）。
+> 结论：**Qwen2.5-VL-7B（Q4_K_M 量化）+ llama-server 常驻服务**，6GB 显存即可，识图 1~15 秒，精度无损。
+
+### 关键发现（重要，避免重蹈覆辙）
+
+1. **`--no-mmproj-offload` 是陷阱**：它把视觉投影器(mmproj)不仅权重放 CPU，**连 ViT 计算也在 CPU 跑**，导致图片编码 29.7s。放回 GPU（默认 offload）后，编码 **29.7s → 1.3s（快 23 倍）**，精度 0 损失。
+2. **不牺牲精度也能提速**：之前误以为只能「限 token / 降精度换速度」，实际只要 mmproj 上 GPU 即可。最优配置 `-ngl 22`（主体 22 层 + mmproj 全 GPU，6GB 显存刚好）。
+3. **常驻服务省掉冷加载**：每次 CLI 冷启动要重载 4.5GB 模型（~5s），用 `llama-server` 常驻后，端到端从 47s → 3~15s。
+4. **环境已有 Ollama**：本机 `D:\AppData\ollama` 已有 qwen2.5vl:3b、minicpm-v-4.6 等 6 个模型，可直接复用（但 3B 精度低于 7B，最终选 7B）。
+
+### 模型选型对比
+
+| 模型 | 量化 | 体积 | 中文识图/OCR | 6GB 显存 | 取舍 |
+|------|------|------|------|------|------|
+| Qwen2.5-VL-7B | Q4_K_M | 4.4GB + mmproj 1.3GB | ⭐ 最强 | ✅ 刚好 | 本模块最终选择 |
+| Qwen2.5-VL-3B (ollama) | — | 3.2GB | 良好 | ✅ 宽松 | 精度略逊，速度快 |
+| MiniCPM-V-4.6 (ollama) | — | 1.5GB | 中 | ✅ 很宽松 | 轻量备选 |
+| Moondream2 (1.8B) | 4-bit | 1.5GB | 弱（中文差） | ✅ | 边缘设备用 |
+
+### 基准数据（本机 RTX 2060 6GB + Ryzen 4800H）
+
+- 图片编码（mmproj GPU）：29.7s → **1.3s**（真实复杂截图）
+- 端到端识图（含冷加载 CLI）：47s → **26s**
+- 端到端识图（llama-server 常驻）：**简单图 3.1s，复杂截图 14.6s**
+- Rust 集成测试实测：`local_vision_fallback` 7.4s / 250 字符
+
+### 相关链接
+
+- 模型/量化：https://huggingface.co/lmstudio-community/Qwen2.5-VL-7B-Instruct-GGUF （bartowski 官方量化，含 mmproj）
+- 运行引擎：https://github.com/ggml-org/llama.cpp （预编译 Windows CUDA 版 `llama-b10507-bin-win-cuda-13.3-x64.zip`）
+- HF 镜像（国内加速）：https://hf-mirror.com
+- 低显存高分辨率优化参考：https://github.com/ggml-org/llama.cpp/issues/17801 （`deepshnv/mtmd_vram_opti`：权重留 CPU 但计算 stream 到 GPU）
+- 视觉编码器设备选择 PR：https://github.com/ggml-org/llama.cpp/pull/14236
+
+### 已排除的方向（评估后不采用）
+
+- **thecodacus/llama.cpp fork**（https://github.com/thecodacus/llama.cpp）：只针对 **MoE 模型 + CPU offload** 场景（`GGML_CUDA_REGISTER_HOST` / `GGML_SCHED_PREFETCH_EXPERTS` / pin CPU weights 三连），对**稠密 VLM（Qwen2.5-VL-7B）+ 显存够装**的场景**零作用**。混淆点：它 README 标榜的 MoE offload 加速 64%，仅适用于专家权重超显存的 MoE 模型。
+
+### 接入实现
+
+- `analyze_image.rs` 新增 `local_vision_fallback()`：云端视觉未配置/失败时，自动探测 `http://127.0.0.1:8088/health`（300ms 超时），在线则走本地 Qwen2.5-VL-7B，不在线则降级元信息（零配置）。
+- 环境变量 `CLAWDESK_DISABLE_LOCAL_VISION=1` 可显式禁用本地视觉。
+- 启动服务命令：`llama-server -m Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf -ngl 22 -c 2048 --host 127.0.0.1 --port 8088`
+
+---
+
+*最后更新：2026-08-20（本地视觉模型 Qwen2.5-VL-7B 接入落地 + 识图速度优化）*
