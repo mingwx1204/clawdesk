@@ -171,6 +171,7 @@ const snapshots = ref<any[]>([]);
 const snapDiffOpen = ref(false);
 const snapDiffLoading = ref(false);
 const snapDiffInfo = ref<any>(null);
+const snapActionLoading = ref(false);
 const snapDiffText = computed(() => {
   const arr = Array.isArray(snapDiffInfo.value?.diff) ? snapDiffInfo.value.diff : [];
   return arr.join(String.fromCharCode(10));
@@ -670,6 +671,50 @@ async function showSnapshotDiff(sn: any) {
     snapDiffOpen.value = false;
   } finally {
     snapDiffLoading.value = false;
+  }
+}
+
+/** 回滚当前预览的文件到快照版本（覆盖当前文件，双重确认）。 */
+async function restoreSnapshot() {
+  const id = snapDiffInfo.value?.id;
+  if (!id || snapActionLoading.value) return;
+  const original = snapDiffInfo.value?.original || "该文件";
+  if (!window.confirm(`确定回滚吗？
+
+${original}
+
+当前文件内容将被替换为快照版本，覆盖之后的修改。`)) return;
+  snapActionLoading.value = true;
+  try {
+    const r = await snapshotApi.restore(id);
+    const bytes = r?.restoredBytes ?? 0;
+    window.alert(`✅ 已回滚到快照版本（${bytes} 字节）`);
+    snapDiffOpen.value = false;
+    snapDiffInfo.value = null;
+    await loadSnapshots();
+  } catch (e) {
+    window.alert(`❌ 回滚失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  } finally {
+    snapActionLoading.value = false;
+  }
+}
+
+/** 删除当前预览的快照（快照文件 + 索引，双重确认）。 */
+async function deleteSnapshot() {
+  const id = snapDiffInfo.value?.id;
+  if (!id || snapActionLoading.value) return;
+  if (!window.confirm("确定删除这条文件快照吗？删除后无法恢复该历史版本。")) return;
+  snapActionLoading.value = true;
+  try {
+    await snapshotApi.remove(id);
+    window.alert("🗑 快照已删除");
+    snapDiffOpen.value = false;
+    snapDiffInfo.value = null;
+    await loadSnapshots();
+  } catch (e) {
+    window.alert(`❌ 删除失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  } finally {
+    snapActionLoading.value = false;
   }
 }
 
@@ -1323,6 +1368,12 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
         </div>
         <div class="pc-actions">
           <button class="pc-no" @click="snapDiffOpen = false">关闭</button>
+          <button class="pc-no pc-danger" :disabled="snapActionLoading || !snapDiffInfo" @click="deleteSnapshot">
+            {{ snapActionLoading ? "处理中…" : "🗑 删除快照" }}
+          </button>
+          <button class="pc-yes" :disabled="snapActionLoading || !snapDiffInfo" @click="restoreSnapshot">
+            ↩ 回滚到此快照
+          </button>
         </div>
       </div>
     </div>

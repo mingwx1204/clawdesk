@@ -54,6 +54,8 @@ export const searchApi = {
 export const snapshotApi = {
   list: () => invoke<any[]>("snapshot_list"),
   diff: (snapshotId: string) => invoke<any>("snapshot_diff", { snapshotId }),
+  restore: (snapshotId: string) => invoke<any>("snapshot_restore", { snapshotId }),
+  remove: (snapshotId: string) => invoke<boolean>("snapshot_delete", { snapshotId }),
 };
 
 // ── 系统 / 诊断 ──

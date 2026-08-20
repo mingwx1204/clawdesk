@@ -222,6 +222,7 @@
 }
 .pc-no { background: var(--color-surface-hover); color: var(--txt-2); border: 1px solid var(--color-border); }
 .pc-no:hover { background: rgba(224, 85, 85, 0.10); color: var(--red); border-color: rgba(224, 85, 85, 0.4); }
+.pc-no.pc-danger { color: var(--red); border-color: rgba(224, 85, 85, 0.35); background: rgba(224, 85, 85, 0.08); }
 .pc-yes { color: #fff; background: linear-gradient(180deg, #8bbdff, #6daaff); box-shadow: 0 3px 10px rgba(109, 170, 255, 0.35); }
 .pc-yes:hover { filter: brightness(1.08); }
 .pc-yes:disabled { opacity: .5; cursor: not-allowed; }
