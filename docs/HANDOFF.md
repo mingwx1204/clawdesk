@@ -8,6 +8,7 @@
 
 | 提交 | 说明 |
 |------|------|
+| `7b2b9eb` | test: 线程级数据目录覆盖修复并行测试 env race |
 | `3b6684b` | fix: 清理单账号残留误导文案并给清除记忆加进行中状态 |
 | `3a047f9` | feat: 会话级互斥锁串行化 agent_chat/压缩/清空/删除与微信记忆写入 |
 | `c074faf` | revert: 微信恢复单账号并清理多槽位误导性死代码 |
@@ -262,7 +263,7 @@ ClawDesk/
 - **Rust 检查**：`cargo check`（零 warning）
 - **Rust 全量测试**：`cargo test`（378 passed / 0 failed / 1 ignored，含 clear_context / can_compact / session_locks 单测）
 - **完整运行（冒烟）**：`timeout 120s npx tauri dev` 实测通过——Vite ready、Rust 编译、窗口创建、SQLite/知识库/沙箱初始化、llama-server 模型加载并监听 8088，无 panic；超时自动退出后端口已释放
-- **测试稳定性**：全量并行测试偶发日志目录 env race（`CLAWDESK_DATA_DIR`）；建议用 `cargo test -- --test-threads=1`（378 passed / 0 failed / 1 ignored）
+- **测试稳定性**：✅ 已修复（`7b2b9eb`）——原全量并行偶发 `CLAWDESK_DATA_DIR` env race，改为 `settings.rs` 的线程级 `DATA_DIR_THREAD_OVERRIDE`；logging / tool_log / self_check 测试不再改全局环境变量，默认并行全量 378 passed / 0 failed / 1 ignored
 
 ---
 
@@ -287,4 +288,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 22 次提交（`3c8fa93` ~ `3b6684b`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 23 次提交（`3c8fa93` ~ `7b2b9eb`） · 工作目录 `D:\workspace\ClawDesk`*
