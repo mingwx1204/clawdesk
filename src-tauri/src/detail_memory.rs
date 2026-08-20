@@ -41,7 +41,15 @@ pub struct DetailMemory {
     /// 旧数据无此字段 → serde 用 default 补 "relationship"（向前兼容）。
     #[serde(default = "default_layer")]
     pub layer: String,
+    /// 情绪效价（-1~1）：-1=负面记忆，0=中性，1=正面记忆。旧数据 default 0.0。
+    #[serde(default)]
+    pub valence: f64,
+    /// 记忆可信度 / 精度（0~1）：情绪检索加权用。旧数据 default 0.5。
+    #[serde(default = "default_precision")]
+    pub precision: f64,
 }
+
+fn default_precision() -> f64 { 0.5 }
 
 fn default_layer() -> String {
     "relationship".to_string()
@@ -49,22 +57,22 @@ fn default_layer() -> String {
 
 /// 抽取规则：主人消息里出现这些关键词 → 值得记住的细节
 /// （每个条目 = 一组关键词 + 标签；命中任一关键词即抽取该句）
-const RULES: &[(&[&str], &str)] = &[
-    (&["我不吃", "我不爱", "讨厌吃", "不喜欢吃"], "食物,忌口"),
-    (&["我最喜欢", "我爱吃", "超喜欢吃", "最爱吃"], "食物,偏好"),
-    (&["我生日", "生日是", "过生日"], "日期,生日"),
-    (&["我养了", "我家猫", "我家狗", "我有一只"], "宠物,生活"),
-    (&["我住", "住在", "搬家", "新家"], "居住,生活"),
-    (&["我上班", "我公司", "我同事"], "工作"),
-    (&["我对象", "我女朋友", "我男朋友", "我老婆", "我老公", "我媳妇", "我丈夫", "我妻子"], "关系,亲密"),
-    (&["我爸妈", "我父母", "我妈", "我爸", "我家人"], "关系,家人"),
-    (&["我最近在", "我这几天", "我打算", "我想学", "我准备"], "计划,生活"),
-    (&["我睡不着", "失眠", "又熬夜", "睡不着觉"], "状态,睡眠"),
-    (&["我难受", "我不舒服", "生病", "感冒", "发烧"], "状态,健康"),
-    (&["我考试", "我面试", "我答辩"], "事件,压力"),
-    (&["我减肥", "我在健身", "跑步", "锻炼"], "习惯,健康"),
-    (&["我最怕", "我怕"], "心理,恐惧"),
-    (&["我小时候", "我童年"], "回忆,童年"),
+const RULES: &[(&[&str], &str, f64)] = &[
+    (&["我不吃", "我不爱", "讨厌吃", "不喜欢吃"], "食物,忌口", -0.4),
+    (&["我最喜欢", "我爱吃", "超喜欢吃", "最爱吃"], "食物,偏好", 0.5),
+    (&["我生日", "生日是", "过生日"], "日期,生日", 0.6),
+    (&["我养了", "我家猫", "我家狗", "我有一只"], "宠物,生活", 0.6),
+    (&["我住", "住在", "搬家", "新家"], "居住,生活", 0.3),
+    (&["我上班", "我公司", "我同事"], "工作", 0.1),
+    (&["我对象", "我女朋友", "我男朋友", "我老婆", "我老公", "我媳妇", "我丈夫", "我妻子"], "关系,亲密", 0.7),
+    (&["我爸妈", "我父母", "我妈", "我爸", "我家人"], "关系,家人", 0.5),
+    (&["我最近在", "我这几天", "我打算", "我想学", "我准备"], "计划,生活", 0.4),
+    (&["我睡不着", "失眠", "又熬夜", "睡不着觉"], "状态,睡眠", -0.3),
+    (&["我难受", "我不舒服", "生病", "感冒", "发烧"], "状态,健康", -0.5),
+    (&["我考试", "我面试", "我答辩"], "事件,压力", -0.3),
+    (&["我减肥", "我在健身", "跑步", "锻炼"], "习惯,健康", 0.4),
+    (&["我最怕", "我怕"], "心理,恐惧", -0.6),
+    (&["我小时候", "我童年"], "回忆,童年", 0.3),
 ];
 
 static DETAILS: OnceLock<Mutex<Vec<DetailMemory>>> = OnceLock::new();
@@ -109,6 +117,18 @@ pub fn init() {
 /// 去重后追加一条细节（同内容不重复记）。
 /// `layer`：「profile」（稳定事实，永久保留）或「relationship」（会话时刻）。
 pub fn remember_with_layer(text: &str, source: &str, tags: &str, layer: &str) -> bool {
+    remember_with_valence(text, source, tags, layer, 0.0, 0.5)
+}
+
+/// 记录一条带情绪效价的细节（layer + valence + precision），真正的落盘/去重入口。
+fn remember_with_valence(
+    text: &str,
+    source: &str,
+    tags: &str,
+    layer: &str,
+    valence: f64,
+    precision: f64,
+) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
@@ -130,6 +150,8 @@ pub fn remember_with_layer(text: &str, source: &str, tags: &str, layer: &str) ->
         tags: tags.to_string(),
         used: 0,
         layer,
+        valence: valence.clamp(-1.0, 1.0),
+        precision: precision.clamp(0.0, 1.0),
     });
     // 落盘
     let path = details_file();
@@ -149,14 +171,14 @@ pub fn extract_from_message(msg: &str, source: &str) -> usize {
         return 0;
     }
     let mut added = 0;
-    for (keywords, tags) in RULES {
+    for (keywords, tags, valence) in RULES {
         for kw in *keywords {
             if let Some(pos) = msg.find(kw) {
                 // 提取该关键词所在的一句（前后各截 ~40 字）
                 let start = pos.saturating_sub(30);
                 let end = (pos + kw.len() + 50).min(msg.len());
                 let sentence = msg[start..end].trim().to_string();
-                if !sentence.is_empty() && remember(&sentence, source, tags) {
+                if !sentence.is_empty() && remember_with_valence(&sentence, source, tags, "relationship", *valence, 0.5) {
                     added += 1;
                 }
                 break; // 该组命中一次即可
@@ -253,8 +275,65 @@ fn flush_disk() {
     }
 }
 
+/// 情绪键控记忆检索：读取当前 mood，按「情绪一致性 × 精度 × 遗忘度」重排
+/// 所有记忆（profile 稳定事实有少量优先）。返回空表示还没有值得说的细节。
+pub fn details_context_for_prompt_mood(recent_max: usize, max_chars: usize) -> String {
+    let mood = crate::mood::mood_snapshot();
+    // 当下心情效价：joy 高偏正面；loneliness/longing 高时，更想去碰那些软的记忆。
+    let mood_valence = (mood.joy - mood.loneliness * 0.6 - mood.longing * 0.4).clamp(-1.0, 1.0);
+
+    let all = all_details();
+    if all.is_empty() {
+        return String::new();
+    }
+
+    let now = now_ms();
+    let mut scored: Vec<(f64, &DetailMemory)> = all
+        .iter()
+        .map(|d| {
+            let age_days = (now.saturating_sub(d.ts_ms)) as f64 / 86_400_000.0;
+            let recency = 1.0 / (age_days + 1.0);
+            let used = (d.used as f64 + 1.0).ln_1p();
+            // 情绪一致性：0 = 完全不一致，1 = 与当下心情同频
+            let congruence = 1.0 - (d.valence - mood_valence).abs().clamp(0.0, 2.0) / 2.0;
+            let precision = d.precision.clamp(0.1, 1.0);
+            // profile 稳定事实少量优先，但仍受情绪一致性调制
+            let layer_bonus = if d.layer == "profile" { 0.3 } else { 0.0 };
+            let score =
+                used * 0.25 + recency * 0.35 + congruence * 0.50 + precision * 0.20 + layer_bonus;
+            (score, d)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut used_bumped: Vec<String> = Vec::new();
+    let mut used_chars = 0usize;
+    for (_, d) in scored.iter().take(recent_max) {
+        let line = fmt_line(d);
+        if used_chars + line.chars().count() > max_chars {
+            break;
+        }
+        used_chars += line.chars().count();
+        parts.push(line);
+        used_bumped.push(d.text.clone());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    for t in used_bumped {
+        mark_used(&t);
+    }
+    flush_disk();
+    format!("【你记得的关于主人的事（被看见：这些是他随口提过、你放在心上的。自然聊天时可以提起，但不要一口气全说出来，像真人一样在合适的时机提到）】
+{}", parts.join("
+"))
+}
+
 /// 注入 prompt 的"你记得主人的事"：按时间倒序取最近 N 条（去重、限长）。
 /// 返回空表示还没有值得说的细节。
+/// 保留旧入口（无情绪排序的确定性检索）供测试与无 mood 依赖的调用方。
+#[allow(dead_code)]
 pub fn details_context_for_prompt(recent_max: usize, max_chars: usize) -> String {
     // ══ 语义分层检索 ══
     // 1. profile 层（稳定事实）优先——「任何情境都该知道」，永远先注入；

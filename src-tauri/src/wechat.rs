@@ -2941,7 +2941,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
             mood_raw
         );
         // ★ 细节记忆注入（被看见）：你记得主人随口提过的事，合适的时机自然提起
-        let details_raw = crate::detail_memory::details_context_for_prompt(5, 400);
+        let details_raw = crate::detail_memory::details_context_for_prompt_mood(5, 400);
         let details_note = if details_raw.is_empty() {
             String::new()
         } else {
@@ -3734,7 +3734,7 @@ pub fn wechat_mood_state() -> serde_json::Value {
 #[tauri::command]
 pub fn wechat_soul_context() -> String {
     let mood_raw = crate::mood::mood_context_for_prompt();
-    let details_raw = crate::detail_memory::details_context_for_prompt(5, 400);
+    let details_raw = crate::detail_memory::details_context_for_prompt_mood(5, 400);
     let mood_note = format!(
         "【你的心情（这是你真实的心情状态，说话时让它自然地流露，不要刻意表演，也不要每一句都提到它）】\n{}",
         mood_raw
