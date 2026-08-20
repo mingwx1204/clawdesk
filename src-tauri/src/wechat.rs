@@ -246,9 +246,9 @@ impl WechatInner {
     }
 }
 
-/// 微信 Bot 数量：最多同时登录 3 个微信（槽位 0/1/2 = 微信1/2/3）。
-/// 每个槽位独立：登录凭据 / 人设 / 聊天记录 / AI 会话记忆。
-pub const MAX_BOTS: usize = 3;
+/// 微信 Bot 数量：只保留一个微信（2026-08-19 `7ceaea8` 已明确收敛多槽位）。
+/// `slot` 参数 / 槽位数组结构仅为历史兼容保留，不表示多账号能力。
+pub const MAX_BOTS: usize = 1;
 
 /// 多微信 Bot 状态：槽位数组，每个槽位一个独立 WechatInner
 pub struct WechatBotState(pub Mutex<Vec<Arc<WechatInner>>>);
@@ -3682,20 +3682,7 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 .unwrap_or(0);
             let persona_text = inner.persona.lock().clone().unwrap_or_default();
             // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
-            let history = read_history_limit(inner, 200);
-            let history_count = history.len();
-            let last_message_at = history
-                .last()
-                .and_then(|r| r.get("timestamp").and_then(|v| v.as_u64()))
-                .unwrap_or(0);
-            let last_message_preview = history
-                .last()
-                .and_then(|r| r.get("content").and_then(|v| v.as_str()))
-                .map(|c| {
-                    let head: String = c.chars().take(40).collect();
-                    if c.chars().count() > 40 { format!("{head}…") } else { head.to_string() }
-                })
-                .unwrap_or_default();
+            let history_count = read_history_limit(inner, 200).len();
             serde_json::json!({
                 "slot": inner.slot,
                 "name": format!("微信{}", inner.slot + 1),
@@ -3709,8 +3696,6 @@ pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<s
                 "personaLen": persona_len,
                 "personaText": persona_text,
                 "historyCount": history_count,
-                "lastMessageAt": last_message_at,
-                "lastMessagePreview": last_message_preview,
                 "proactiveEnabled": inner.proactive_enabled.load(Ordering::SeqCst),
                 "proactiveIntervalMin": *inner.proactive_interval_min.lock(),
                 "proactiveIntervalMax": *inner.proactive_interval_max.lock(),

@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { sessionsApi, chatApi, settingsApi, routerApi, searchApi, systemApi, wechatApi, snapshotApi } from "./utils/api";
+import { sessionsApi, chatApi, settingsApi, routerApi, searchApi, systemApi, snapshotApi } from "./utils/api";
 import BottomInput from "./components/BottomInput.vue";
 import SettingsView from "./components/SettingsView.vue";
 import WechatPanel from "./components/WechatPanel.vue";
@@ -97,21 +97,6 @@ const showSettings = ref(false);
 const showWechat = ref(false);
 /** 微信 Bot 在线状态（顶栏圆点显示） */
 const wechatOnline = ref(false);
-/** 多槽位在线状态表：任一微信连接中即视为在线 */
-const wechatSlotOnline = new Map<number, boolean>();
-
-async function refreshWechatOnline() {
-  try {
-    const r = await wechatApi.botStatus();
-    const bots: any[] = Array.isArray(r?.bots) ? r.bots : [];
-    wechatSlotOnline.clear();
-    for (const b of bots) {
-      const slot = typeof b?.slot === "number" ? b.slot : 0;
-      wechatSlotOnline.set(slot, !!b.connected);
-    }
-    wechatOnline.value = [...wechatSlotOnline.values()].some(Boolean);
-  } catch { /* 查询失败保持现状 */ }
-}
 // 消息操作 / 搜索 / 导出
 const bottomInputRef = ref<InstanceType<typeof BottomInput> | null>(null);
 const searchOpen = ref(false);
@@ -198,12 +183,9 @@ onMounted(async () => {
     unlistenWechat = await listenWechatMessages();
     unlistenWechatStatus = await listen<any>("wechat-bot-status", (e) => {
       const t = e.payload?.type;
-      const slot = typeof e.payload?.slot === "number" ? e.payload.slot : 0;
-      if (t === "connected" || t === "resumed") wechatSlotOnline.set(slot, true);
-      if (t === "session_expired") wechatSlotOnline.set(slot, false);
-      wechatOnline.value = [...wechatSlotOnline.values()].some(Boolean);
+      wechatOnline.value = t === "connected" || t === "resumed";
+      if (t === "session_expired") wechatOnline.value = false;
     });
-    void refreshWechatOnline(); // 启动时主动拉取一次（多槽位任意连接即亮灯）
     // 全局异常兜底（项目 13）：启动轮询最近一次未捕获异常，弹中文报错并自动取消任务
     checkLastError();
   } catch (e) {

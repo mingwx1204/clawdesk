@@ -28,8 +28,6 @@ interface BotStatus {
   personaLen: number;
   personaText?: string;
   historyCount: number;
-  lastMessageAt?: number;
-  lastMessagePreview?: string;
   proactiveEnabled?: boolean;
   proactiveIntervalMin?: number;
   proactiveIntervalMax?: number;
@@ -45,13 +43,10 @@ interface BotStatus {
 
 const emit = defineEmits<{ close: [] }>();
 
-// ── 账号列表状态 ──
+// ── 账号列表状态（单 Bot，固定槽位 0） ──
 const bots = ref<BotStatus[]>([]);
-/** 当前微信槽位 */
 const curSlot = ref(0);
 const cur = computed(() => bots.value.find((b) => b.slot === curSlot.value) ?? bots.value[0]);
-/** 非当前槽位的未读消息数（面板打开期间收到即累计，切换过去后清零） */
-const unreadCounts = ref<Record<number, number>>({});
 
 // ── 当前槽位登录状态 ──
 const qrcodeUrl = ref("");
@@ -299,31 +294,27 @@ async function genQrSvg(text: string): Promise<string> {
   }
 }
 
-/** 切换当前选中的微信槽位 */
-function selectSlot(slot: number) {
-  curSlot.value = slot;
-  unreadCounts.value = { ...unreadCounts.value, [slot]: 0 };
+/** 初始化当前（唯一）微信槽位的面板状态。 */
+function initCurrentSlot() {
   qrState.value = "idle";
   qrcodeUrl.value = "";
   qrSvg.value = "";
   personaText.value = "";
   personaSaved.value = false;
-  personaDirty.value = false; // 切换槽位 = 放弃未保存编辑，重新进入同步状态
-  voiceDirty.value = false; // ★ 切换槽位重置语音设置编辑态，防止把 A 槽位的值写进 B
+  personaDirty.value = false;
+  voiceDirty.value = false;
   historyList.value = [];
-  messages.value = []; // ★ 清空最近消息，防止残留上一槽位的消息
-  const b = bots.value.find((x) => x.slot === slot);
+  messages.value = [];
+  const b = bots.value.find((x) => x.slot === curSlot.value) ?? bots.value[0];
   if (b?.personaText) personaText.value = b.personaText;
   syncProactive(b);
-  void loadHistory(slot);
-  reloadChats(); // 内置微信聊天界面：切换槽位重建会话列表
-  if (soulOpen.value) void refreshSoul(); // 灵魂面板展开中：切换槽位后刷新一次
-  pushLog(`已切换到 ${b?.name || `微信${slot + 1}`}`);
+  void loadHistory(curSlot.value);
+  reloadChats();
 }
 
 onMounted(async () => {
   await refreshStatus();
-  selectSlot(0);
+  initCurrentSlot();
   statusTimer.value = window.setInterval(refreshStatus, 5000);
   // 内置聊天界面：每 5 秒同步一次聊天记录（新消息自动出现）
   chatTimer.value = window.setInterval(() => void reloadChats(), 5000);
@@ -336,9 +327,6 @@ onMounted(async () => {
         messages.value.unshift(m);
         if (messages.value.length > 30) messages.value.pop();
         void reloadChats();
-      } else {
-        // 其他槽位来消息：槽位标签显示未读红点数字
-        unreadCounts.value = { ...unreadCounts.value, [slot]: (unreadCounts.value[slot] ?? 0) + 1 };
       }
     });
     unlistenStatus = await listen<any>("wechat-bot-status", (e) => {
@@ -654,7 +642,7 @@ async function testReply() {
       <div class="wc-head">
         <div class="wc-title">
           <span class="wc-logo">💬</span>
-          <span>内置微信（多账号 · 独立于电脑上的微信）</span>
+          <span>内置微信（独立于电脑上的微信）</span>
           <span
             class="wc-dot"
             :class="{
@@ -676,24 +664,6 @@ async function testReply() {
           </span>
         </div>
         <button class="wc-close" @click="emit('close')">✕</button>
-      </div>
-
-      <!-- 多账号槽位切换（后端每个槽位独立登录/人设/聊天记录/AI 记忆） -->
-      <div class="wc-slots">
-        <button
-          v-for="b in bots"
-          :key="b.slot"
-          class="wc-slot"
-          :class="{ active: b.slot === curSlot }"
-          :title="`槽位 ${b.slot + 1}：${b.personaText ? '已配置人设 · ' : ''}${b.loggedIn ? '已登录' : '未登录'}`"
-          @click="selectSlot(b.slot)"
-        >
-          <span class="wc-slot-dot" :class="{ on: b.connected, idle: b.loggedIn && !b.connected }"></span>
-          <span>{{ b.botName || b.name }}</span>
-          <span v-if="b.personaText" class="wc-slot-persona">有人设</span>
-          <span v-if="b.lastMessageAt" class="wc-slot-time">{{ fmtTs(b.lastMessageAt) }}</span>
-          <span v-if="unreadCounts[b.slot]" class="wc-slot-unread">{{ unreadCounts[b.slot] > 99 ? '99+' : unreadCounts[b.slot] }}</span>
-        </button>
       </div>
 
       <div class="wc-body">
@@ -1468,45 +1438,6 @@ async function testReply() {
   color: var(--color-text);
   word-break: break-all;
   white-space: pre-wrap;
-}
-
-/* ── 多账号：槽位列表 ── */
-.wc-slots {
-  display: flex;
-  gap: 6px;
-  padding: 10px 16px 0;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-.wc-slot {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--color-card);
-  border: 1px solid var(--glass-border);
-  color: var(--color-text-secondary);
-  border-radius: 20px;
-  padding: 5px 12px;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: 0.15s;
-}
-.wc-slot:hover { background: var(--glass-border); }
-.wc-slot.active { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
-.wc-slot-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-text-muted);
-}
-.wc-slot-dot.idle { background: #f59e0b; }
-.wc-slot-dot.on { background: #34d399; box-shadow: 0 0 5px #34d399; }
-.wc-slot-persona { font-size: 11px; }
-.wc-slot-time { font-size: 10.5px; color: var(--color-text-muted); font-family: var(--font-mono); }
-.wc-slot-unread {
-  min-width: 16px; height: 16px; padding: 0 5px; border-radius: 9px;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--red); color: #fff; font-size: 10px; font-weight: 700;
 }
 
 /* ── 人设编辑区 ── */
