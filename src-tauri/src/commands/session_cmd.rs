@@ -68,6 +68,12 @@ pub fn agent_session_delete(state: State<'_, AppState>, session_id: String) -> b
     state.sessions.delete(&session_id).is_some()
 }
 
+/// 清空指定会话的上下文（删除全部消息，保留会话本身与累计用量统计）。
+#[tauri::command]
+pub fn agent_session_clear(state: State<'_, AppState>, session_id: String) -> bool {
+    state.sessions.clear_context(&session_id)
+}
+
 /// 输出会话用量统计（上下文窗口占用 + 累计 token 用量）。
 ///
 /// 数据源：

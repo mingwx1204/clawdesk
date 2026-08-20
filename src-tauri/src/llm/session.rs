@@ -273,6 +273,16 @@ impl SessionManager {
         self.persist(&session);
     }
 
+    /// 清空会话上下文：保留会话本身，删除全部消息并把窗口占用归零。
+    /// 累计 token 统计保留（右侧面板的「累计用量」是历史事实，不清零）。
+    pub fn clear_context(&self, id: &str) -> bool {
+        let mut session = self.get_or_create(id);
+        session.messages.clear();
+        session.last_input_tokens = 0;
+        self.update(session);
+        true
+    }
+
     /// 删除会话（内存 + 磁盘）。
     pub fn delete(&self, id: &str) -> Option<AgentSession> {
         let removed = self.sessions.write().unwrap().remove(id);
@@ -464,6 +474,26 @@ mod tests {
 
         assert!(mgr.delete("s1").is_some());
         assert!(mgr.is_empty());
+    }
+
+    #[test]
+    fn clear_context_keeps_session_and_totals() {
+        let mgr = SessionManager::new();
+        let mut s = mgr.create("s-clear".into());
+        s.messages.push(msg(Role::User, "你好"));
+        s.total_input_tokens = 1234;
+        s.total_output_tokens = 567;
+        s.last_input_tokens = 888;
+        mgr.update(s);
+
+        assert!(mgr.clear_context("s-clear"));
+        let cleared = mgr.get_or_create("s-clear");
+        assert!(cleared.messages.is_empty());
+        assert_eq!(cleared.last_input_tokens, 0);
+        // 累计用量是历史事实，清空上下文时保留
+        assert_eq!(cleared.total_input_tokens, 1234);
+        assert_eq!(cleared.total_output_tokens, 567);
+        assert_eq!(mgr.len(), 1);
     }
 
     #[test]

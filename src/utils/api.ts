@@ -10,6 +10,7 @@ export const sessionsApi = {
   metas: () => invoke<{ id: string; name?: string | null }[]>("agent_session_metas"),
   rename: (sessionId: string, newName: string) => invoke("agent_session_rename", { sessionId, newName }),
   delete: (id: string) => invoke("agent_session_delete", { sessionId: id }),
+  clear: (sessionId: string) => invoke<boolean>("agent_session_clear", { sessionId }),
   usage: (sessionId: string) => invoke<any>("agent_session_usage", { sessionId }),
   branches: (parentId: string) => invoke<string[]>("agent_branches", { parentId }),
   checkpoint: (sessionId: string) => invoke<unknown>("agent_checkpoint", { sessionId }),

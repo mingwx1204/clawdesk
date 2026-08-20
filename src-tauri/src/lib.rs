@@ -252,6 +252,7 @@ pub fn run() {
             commands::session_cmd::agent_session_rename,
             commands::session_cmd::agent_session_metas,
             commands::session_cmd::agent_session_delete,
+            commands::session_cmd::agent_session_clear,
             commands::sandbox::sandbox_roots,
             commands::sandbox::sandbox_add_root,
             commands::sandbox::sandbox_remove_root,

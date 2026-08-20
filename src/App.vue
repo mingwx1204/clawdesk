@@ -119,6 +119,7 @@ const searchKeyword = ref("");
 const searchResults = ref<{ sessionId: string; role: string; content: string }[]>([]);
 const searching = ref(false);
 const exporting = ref(false);
+const clearingContext = ref(false);
 
 // ── v6 交互状态 ──
 // 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
@@ -598,6 +599,26 @@ function stopTypewriter(): void {
   if (streamingMsgId.value) {
     const msg = messages.value.find((m) => m.id === streamingMsgId.value);
     if (msg && pendingText.value) msg.content = pendingText.value;
+  }
+}
+
+/** 清空当前会话上下文：删除全部消息（保留会话与累计用量统计），随后刷新界面。 */
+async function clearContext() {
+  if (running.value) {
+    window.alert("AI 正在运行中，请先停止或等待完成后再清空上下文");
+    return;
+  }
+  if (!window.confirm("确定清空当前会话的上下文吗？\n\n将删除该会话的全部对话记忆（不影响会话名、导出文件与累计用量统计）。")) return;
+  clearingContext.value = true;
+  try {
+    const ok = await sessionsApi.clear(sessionId.value);
+    if (!ok) throw new Error("后端未确认清空");
+    await loadSessionMessages(sessionId.value);
+    await loadSessionUsage();
+  } catch (e) {
+    window.alert(`❌ 清空上下文失败：${typeof e === "string" ? e : JSON.stringify(e)}`);
+  } finally {
+    clearingContext.value = false;
   }
 }
 
@@ -1112,6 +1133,12 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
         <!-- 右侧面板：上下文监测 -->
         <aside class="right-panel" :class="{ collapsed: rightCollapsed }">
           <div class="rp-head">📊 上下文</div>
+          <div class="rp-actions">
+            <button class="rp-action" title="重新加载当前会话的真实用量统计" @click="loadSessionUsage">↻ 刷新</button>
+            <button class="rp-action rp-action-danger" title="删除当前会话全部对话记忆" :disabled="running || clearingContext" @click="clearContext">
+              {{ clearingContext ? "清空中…" : "🧹 清空上下文" }}
+            </button>
+          </div>
           <div class="rp-body">
             <div class="rp-card">
               <div class="rp-label">窗口占用</div>
