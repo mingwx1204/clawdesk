@@ -4,9 +4,148 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ClawDesk</title>
+    <style>
+      /* ── 启动动画（Splash）──
+         参考 GitHub 热门 loading 动画（epic-spinners、terminal boot sequence），
+         设计为「终端打字 + 脉冲光晕」风格，匹配 ClawDesk 深色主题。 */
+      :root { --splash-bg: #0a0a0f; --splash-text: #a0b8d0; --splash-accent: #6daaff; }
+      body { margin: 0; overflow: hidden; }
+      #splash {
+        position: fixed; inset: 0; z-index: 99999;
+        background: var(--splash-bg);
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+        transition: opacity 0.5s ease, visibility 0.5s ease;
+      }
+      #splash.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+      /* ── 脉冲环（双层旋转光环）── */
+      .splash-ring {
+        position: relative; width: 72px; height: 72px; margin-bottom: 28px;
+      }
+      .splash-ring::before, .splash-ring::after {
+        content: ""; position: absolute; inset: 0;
+        border-radius: 50%; border: 2.5px solid transparent;
+      }
+      .splash-ring::before {
+        border-top-color: var(--splash-accent);
+        animation: spin 1.2s linear infinite;
+      }
+      .splash-ring::after {
+        inset: 8px;
+        border-right-color: color-mix(in srgb, var(--splash-accent) 60%, transparent);
+        animation: spin 1.8s linear infinite reverse;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* ── 中心光点（脉冲呼吸）── */
+      .splash-dot {
+        position: absolute; inset: 0; margin: auto;
+        width: 14px; height: 14px; border-radius: 50%;
+        background: var(--splash-accent);
+        box-shadow: 0 0 18px 4px var(--splash-accent);
+        animation: pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); opacity: 0.8; }
+        50%      { transform: scale(1.5); opacity: 0.3; }
+      }
+
+      /* ── 启动文字（打字机逐字）── */
+      .splash-text {
+        color: var(--splash-text); font-size: 15px; letter-spacing: 0.08em;
+        min-height: 1.5em; text-align: center;
+      }
+      .splash-text .cursor {
+        display: inline-block; width: 1px; height: 1em; margin-left: 2px;
+        background: var(--splash-accent);
+        animation: blink 0.8s step-end infinite;
+      }
+      @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+      /* ── 粒子背景（微光浮动）── */
+      .splash-particles {
+        position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+      }
+      .splash-particle {
+        position: absolute; width: 2px; height: 2px; border-radius: 50%;
+        background: var(--splash-accent);
+        animation: floatUp 4s ease-in infinite;
+        opacity: 0;
+      }
+      @keyframes floatUp {
+        0%   { transform: translateY(0) scale(0); opacity: 0; }
+        10%  { opacity: 0.5; }
+        90%  { opacity: 0.3; }
+        100% { transform: translateY(-120px) scale(1.5); opacity: 0; }
+      }
+    </style>
   </head>
   <body>
+    <div id="splash">
+      <div class="splash-particles" id="splashParticles"></div>
+      <div class="splash-ring">
+        <div class="splash-dot"></div>
+      </div>
+      <div class="splash-text" id="splashText"></div>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
+    <script>
+      // ── 内联启动动画（Vue 挂载前立即渲染，不依赖任何框架）──
+      (function() {
+        var splash = document.getElementById("splash");
+        var textEl = document.getElementById("splashText");
+        var particles = document.getElementById("splashParticles");
+
+        // 打字机文字
+        var lines = [
+          "ClawDesk · 正在启动...",
+          "加载本地视觉模型...",
+          "准备就绪"
+        ];
+        var lineIdx = 0;
+        var charIdx = 0;
+        var typing = true;
+
+        function typeNext() {
+          if (!typing || lineIdx >= lines.length) return;
+          var line = lines[lineIdx];
+          if (charIdx <= line.length) {
+            textEl.innerHTML = line.slice(0, charIdx) + '<span class="cursor"></span>';
+            charIdx++;
+            setTimeout(typeNext, charIdx > line.length ? 800 : 40 + Math.random() * 30);
+          } else {
+            lineIdx++;
+            charIdx = 0;
+            if (lineIdx < lines.length) {
+              setTimeout(typeNext, 600);
+            } else {
+              // 最后一行保持显示，光标持续闪烁
+              textEl.innerHTML = lines[lines.length - 1] + '<span class="cursor"></span>';
+            }
+          }
+        }
+        typeNext();
+
+        // 粒子背景
+        for (var i = 0; i < 20; i++) {
+          var p = document.createElement("div");
+          p.className = "splash-particle";
+          p.style.left = (Math.random() * 100) + "%";
+          p.style.bottom = (Math.random() * 30) + "%";
+          p.style.animationDelay = (Math.random() * 4) + "s";
+          p.style.animationDuration = (3 + Math.random() * 3) + "s";
+          particles.appendChild(p);
+        }
+
+        // 暴露 hide 方法供 Vue 侧调用
+        window.__splashHide = function() {
+          typing = false;
+          splash.classList.add("hidden");
+          setTimeout(function() { splash.style.display = "none"; }, 600);
+        };
+      })();
+    </script>
   </body>
 </html>

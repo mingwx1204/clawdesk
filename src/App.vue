@@ -128,6 +128,8 @@ let streamBuf = "";
 let thinkingBuf = "";
 
 onMounted(async () => {
+  // ★ 兜底：无论初始化是否异常，最多 6 秒后强制淡出启动动画，防止卡死
+  window.setTimeout(() => window.__splashHide?.(), 6000);
   try {
     unlisten = await listen<any>("agent://progress", (e) => handleProgress(e.payload));
     // 缺陷2修复：监听引擎 SSE 流式事件（harness_start_task 新路径）
@@ -179,6 +181,10 @@ onMounted(async () => {
   } catch { /* 静默 */ }
   // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
   void import("./lib/tts").then(({ loadTtsSettings }) => void loadTtsSettings());
+
+  // ★ 初始化完成 → 淡出启动动画（index.html 内联 splash）
+  //   延迟一点让用户看到完整的开场动画，再切入主界面
+  setTimeout(() => window.__splashHide?.(), 300);
 });
 
 onUnmounted(() => {
