@@ -8,6 +8,7 @@
 
 | 提交 | 说明 |
 |------|------|
+| `3a047f9` | feat: 会话级互斥锁串行化 agent_chat/压缩/清空/删除与微信记忆写入 |
 | `c074faf` | revert: 微信恢复单账号并清理多槽位误导性死代码 |
 | `cba1dc2` | build: CSS 类名审计纳入 npm run build 链路 |
 | `18ac9a7` | perf: 微信灵魂面板改为展开时按需拉取快照 |
@@ -162,6 +163,17 @@
   - `SessionManager::can_compact` 守卫：消息数必须 > keep_last+2，避免摘要反而变长
   - 压缩完成后自动刷新消息列表与用量面板，弹窗显示摘要长度 / 当前消息数 / 累计压缩次数
 
+### 会话级互斥（`3a047f9`）
+
+- 新增 `SessionLocks`：`session_id -> Arc<tokio::sync::Mutex<()>>` 常驻锁表
+- 以下路径持有同一把会话锁，同一会话的读-改-写不再并发覆盖：
+  - `agent_chat`（主界面聊天 + 微信自动回复，覆盖整个 run_agent_loop）
+  - `agent_session_compact` / `agent_session_clear` / `agent_session_delete`
+  - `harness_start_task`（引擎路径，同样读写会话）
+  - 微信主动聊天的记忆读取与写入（等待自动回复完成后再追加）
+- `agent_session_delete` / `clear` 改为 async 并返回 `Result<bool, String>`（Tauri 约束）
+- 新增单测 `session_locks_reuse_same_mutex_for_same_id`
+
 ### 文件变动预览（`d7589aa` / `7d1a19f`）
 
 - 右侧面板新增「文件快照」卡片：展示最近 5 条 `file_write` 自动备份（原文件 + 时间）
@@ -246,7 +258,7 @@ ClawDesk/
 - **CSS 回归审计**：`npm run audit:css`（`scripts/audit-css-classes.mjs`，扫描 Vue 模板 class vs CSS 定义；`cba1dc2` 起已并入 `npm run build` 链路）
 - **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
 - **Rust 检查**：`cargo check`（零 warning）
-- **Rust 全量测试**：`cargo test`（376 passed / 0 failed / 1 ignored，含新增 clear_context 单测）
+- **Rust 全量测试**：`cargo test`（378 passed / 0 failed / 1 ignored，含 clear_context / can_compact / session_locks 单测）
 - **完整运行**：`npx tauri dev`（llama-server 自动加载 ~5s）
 
 ---
@@ -268,7 +280,8 @@ ClawDesk/
 - ✅ **真正的手动压缩**：已完成（`f4c8610`，`agent_session_compact` 命令 + 右栏「🗜 压缩」按钮）
 - ✅ **多槽位细节**：不适用——已确认单账号定位，槽位未读/最近消息时间已随 `c074faf` 回滚；soul 状态全局唯一是正确的，无需按槽位隔离
 - ✅ **弹窗/CSS 回归审计**：已完成（`51d3cbf`，`npm run audit:css` 并修复 `.tc-fold-on` / `.wc-living` / `.wc-msg-time`）
+- ✅ **会话操作并发锁**：已完成（`3a047f9`，`SessionLocks` 覆盖 agent_chat / 压缩 / 清空 / 删除 / 微信记忆写入）
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 19 次提交（`3c8fa93` ~ `c074faf`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 20 次提交（`3c8fa93` ~ `3a047f9`） · 工作目录 `D:\workspace\ClawDesk`*
