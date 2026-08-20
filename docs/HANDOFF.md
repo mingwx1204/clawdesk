@@ -8,6 +8,11 @@
 
 | 提交 | 说明 |
 |------|------|
+| `7d1a19f` | feat: 文件快照差异预览支持一键回滚与删除 |
+| `a762167` | refactor: 微信面板剩余内联色值改为语义 CSS 类 |
+| `9e72692` | fix: 补齐设置面板按钮/状态提示/页脚样式 |
+| `d7589aa` | feat: 右侧面板接入文件快照列表与差异预览 |
+| `665bdf7` | fix: 恢复权限/新建会话/搜索弹窗的 overlay 样式（game.css 删除回归） |
 | `0a4b333` | feat: 右侧面板新增清空上下文快捷操作 |
 | `b37ef0a` | feat: 微信面板支持 3 槽位多账号切换 |
 | `8a4c6d2` | feat: 暗色/亮色主题切换 + 外观设置面板即时生效 |
@@ -76,6 +81,7 @@
 - 亮色模式复用同一套 CSS 变量（`--bar`/`--glass-border`/`--txt` 等全部切换）
 - `theme-light.css` 用 `html[data-theme="light"]` 前缀覆盖仍硬编码的暗色局部样式（壁纸/气泡/代码块/微信面板等），保证能压过 scoped 样式
 - `#app { opacity: var(--ui-op) }` 让不透明度滑块真实生效
+- `a762167`：`WechatPanel` 剩余内联色值（`#999` / `#f59e0b` / `#c0a060`）改为语义 CSS 类，亮暗主题都使用变量
 
 ### 关键 CSS 变量（variables.css）
 
@@ -146,6 +152,14 @@
   - 前端二次确认、运行中禁用，完成后自动刷新消息列表和用量面板
 - 未做假「手动压缩」按钮：自动压缩由引擎接管，真正的手动压缩需接入 LLM 摘要链，留作后续
 
+### 文件变动预览（`d7589aa` / `7d1a19f`）
+
+- 右侧面板新增「文件快照」卡片：展示最近 5 条 `file_write` 自动备份（原文件 + 时间）
+- 点击快照 → 弹窗调用 `snapshot_diff` 显示行级 +/- 差异（快照行数 / 当前行数 / 差异数，最多 100 行）
+- 弹窗内可一键「回滚到此快照」或「删除快照」（均二次确认；回滚覆盖当前文件属高危操作）
+- 前端新增 `snapshotApi`（list / diff / restore / remove）封装四个已有后端命令
+- ★ 附带修复：`889c901` 删除 game.css 时误删了仍在使用的 `.perm-overlay` / `.perm-card` 弹窗样式，导致权限确认 / 新建会话 / 历史搜索弹窗无 overlay，已按当前主题重建（`665bdf7`）
+
 ---
 
 ## 五、微信面板主题统一与多槽位
@@ -166,6 +180,7 @@
 - 前端 `WechatPanel.vue`：标题栏下新增槽位标签条（在线状态点 + 人设标记），点击切换；`selectSlot` 原本已具备全部切换逻辑，这次补上模板入口
 - `App.vue` 微信在线圆点改为多槽位聚合：任一微信连接即亮灯；启动时主动拉取一次 `wechat_bot_status`
 - `.wc-chat-item.active` 微调：accent 边框 + 3px 左侧 accent 指示条
+- `a762167`：灵魂面板 / 主动聊天的内联颜色改为 `.wc-soul-sub` / `.wc-ghost-text` / `.wc-tip-warn`，并使用 `--color-warning` 等变量
 
 ---
 
@@ -190,7 +205,7 @@ ClawDesk/
 │   │   ├── menu.css        # 侧边栏 + 搜索弹窗 + 会话列表
 │   │   └── theme-light.css # 亮色主题精细补偿层
 │   ├── utils/
-│   │   ├── api.ts          # IPC 调用封装层
+│   │   ├── api.ts          # IPC 封装（session / chat / settings / snapshot / wechat…）
 │   │   ├── messageFormat.ts # 消息/工具格式化
 │   │   └── markdown.ts     # Markdown 渲染 + HTML 转义
 │   └── composables/        # useSessions / useWechat / useImageViewer / useClock
@@ -213,8 +228,9 @@ ClawDesk/
 ## 七、构建与校验
 
 - **类型检查**：`npx vue-tsc --noEmit`（零错误）
-- **前端构建**：`npx vite build`（~1.4s，约 52kB CSS / 290kB JS）
-- **Rust 检查**：`cargo check`（零 warning）+ `cargo test`（新增 clear_context 单测通过）
+- **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
+- **Rust 检查**：`cargo check`（零 warning）
+- **Rust 全量测试**：`cargo test`（376 passed / 0 failed / 1 ignored，含新增 clear_context 单测）
 - **完整运行**：`npx tauri dev`（llama-server 自动加载 ~5s）
 
 ---
@@ -229,13 +245,14 @@ ClawDesk/
 4. **暗色/亮色主题切换**：✅ 已完成（`8a4c6d2`，设置面板即时切换并持久化）
 5. **微信面板多槽位**：✅ 已完成（`b37ef0a`，后端 3 槽位 + 前端槽位标签切换）
 
-后续可选方向：
+后续可选方向（已完成的已并入正文）：
 
-- **亮色主题打磨**：部分语义色/内联色仍为深色优化（如 `WechatPanel` 内联 `#999`），可按需继续替换
+- ✅ **文件变动预览**：已完成（`d7589aa` 列表+差异，`7d1a19f` 回滚/删除）
+- ✅ **亮色主题基础打磨**：已完成（`a762167`，微信面板内联色值清理）
 - **真正的手动压缩**：`SessionManager::needs_compaction` / `compact_with` 已就绪但未接线，可加「LLM 摘要 → 压缩」命令
-- **文件变动预览**：右侧面板可接入快照 diff（后端已有 `snapshot_diff` 命令）
-- **多槽位细节**：槽位标签可显示未读消息数；微信面板轮询可按当前槽位拆分，避免三槽位重复拉取全局 soul 状态
+- **多槽位细节**：槽位标签可显示最近消息时间/未读数；soul 状态可考虑按槽位隔离
+- **弹窗回归审计**：本次已修复 perm 弹窗；建议用脚本再审计一遍其他从 game.css 丢失但仍被引用的样式类
 
 ---
 
-*最后更新：2026-08-20 · 本次新增 4 次提交（`3c8fa93` / `8a4c6d2` / `b37ef0a` / `0a4b333`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 11 次提交（`3c8fa93` ~ `7d1a19f`） · 工作目录 `D:\workspace\ClawDesk`*
