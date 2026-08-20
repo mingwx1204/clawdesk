@@ -364,6 +364,10 @@ pub fn run() {
     crate::affinity::init();
     crate::reflexion::init();
 
+            // ★ 本地视觉模型（llama-server）自动启动
+            //   （后台 spawn，不阻塞；模型缺失/端口占用时安全跳过）
+            crate::commands::llama_server::start();
+
             // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──            // ── 方案B追加：权限桥初始化（harness ↔ Vue 弹窗）──
             {
                 use harness::hooks::bridge::{TauriPermissionBridge, PERMISSION_BRIDGE};
@@ -539,6 +543,7 @@ pub fn run() {
         .expect("error while building tauri application");
     app.run(|_app_handle, event| {
         if let tauri::RunEvent::Exit = event {
+            crate::commands::llama_server::stop();
             destroy_tray();
         }
     });

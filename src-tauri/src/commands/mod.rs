@@ -21,6 +21,8 @@ pub mod export_cmd;
 pub mod skill_cmd;
 // ── 方案B追加：harness 引擎命令 ──
 pub mod harness_cmd;
+// ── 本地视觉模型（llama-server）生命周期管理 ──
+pub mod llama_server;
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};

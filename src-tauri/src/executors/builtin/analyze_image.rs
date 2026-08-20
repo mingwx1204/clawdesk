@@ -173,11 +173,13 @@ fn local_vision_fallback(image_b64: &str, mime: &str) -> Result<String, String> 
     if std::env::var("CLAWDESK_DISABLE_LOCAL_VISION").as_deref() == Ok("1") {
         return Err("本地视觉已禁用（CLAWDESK_DISABLE_LOCAL_VISION=1）".to_string());
     }
-    const LOCAL_VISION_URL: &str = "http://127.0.0.1:8088/v1/chat/completions";
     const PROMPT: &str = "请用简体中文详细描述这张图片的内容：画面主体、场景、文字内容（若有）、颜色构成与整体风格。返回结构化描述。";
+    let local_url = crate::commands::llama_server::LOCAL_VISION_URL.to_string();
+    let local_model = crate::commands::llama_server::LOCAL_VISION_MODEL.to_string();
+    let local_health = crate::commands::llama_server::LOCAL_VISION_HEALTH.to_string();
 
     let body = json!({
-        "model": "qwen2.5-vl-7b",
+        "model": local_model,
         "messages": [ { "role": "user", "content": [
             { "type": "text", "text": PROMPT },
             { "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", mime, image_b64) } }
@@ -193,7 +195,7 @@ fn local_vision_fallback(image_b64: &str, mime: &str) -> Result<String, String> 
 
     // 先做一次极轻量 health 探测（本地服务不在时 150ms 内失败）
     let health = agent
-        .get("http://127.0.0.1:8088/health")
+        .get(&local_health)
         .timeout(std::time::Duration::from_millis(300))
         .call();
     if health.is_err() {
@@ -202,7 +204,7 @@ fn local_vision_fallback(image_b64: &str, mime: &str) -> Result<String, String> 
 
     let body_str = serde_json::to_string(&body).map_err(|e| format!("序列化失败: {}", e))?;
     match agent
-        .post(LOCAL_VISION_URL)
+        .post(&local_url)
         .set("Content-Type", "application/json")
         .send_string(&body_str)
     {
