@@ -37,3 +37,5 @@ pnpm-workspace.yaml
 # ── Windows ────────────────────────────────
 Thumbs.db
 Desktop.ini
+probe.pdb
+probe.exe
