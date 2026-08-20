@@ -317,6 +317,7 @@ function selectSlot(slot: number) {
   syncProactive(b);
   void loadHistory(slot);
   reloadChats(); // 内置微信聊天界面：切换槽位重建会话列表
+  if (soulOpen.value) void refreshSoul(); // 灵魂面板展开中：切换槽位后刷新一次
   pushLog(`已切换到 ${b?.name || `微信${slot + 1}`}`);
 }
 
@@ -452,10 +453,18 @@ async function refreshStatus() {
     const m = await wechatApi.moodState();
     if (m?.label) moodState.value = m.label;
   } catch { /* 静默 */ }
-  // ★ 灵魂全景：一次性拉取八层状态
+}
+
+/** 灵魂全景按需拉取：面板展开时请求一次，避免 5 秒轮询重复读取八层状态。 */
+async function refreshSoul() {
   try {
     soulSnap.value = await wechatApi.soulSnapshot();
   } catch { /* 静默 */ }
+}
+
+async function toggleSoul() {
+  soulOpen.value = !soulOpen.value;
+  if (soulOpen.value) await refreshSoul();
 }
 
 async function startQr() {
@@ -700,7 +709,7 @@ async function testReply() {
             <hr class="wc-split" />
             <!-- ★ 灵魂面板（折叠展开） -->
             <div class="wc-soul" v-if="soulSnap">
-              <button class="wc-soul-toggle" @click="soulOpen = !soulOpen">{{ soulOpen ? '▾' : '▸' }} 💗 灵魂面板</button>
+              <button class="wc-soul-toggle" @click="toggleSoul">{{ soulOpen ? '▾' : '▸' }} 💗 灵魂面板</button>
               <div v-show="soulOpen" class="wc-soul-body">
                 <!-- OCEAN 人格底色 -->
                 <div class="wc-soul-card">
