@@ -1023,7 +1023,10 @@ function onKeysSaved(keys: { main?: string }) {
 function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?: number } | null | undefined) {
   document.documentElement.setAttribute("data-theme", s?.darkTheme === false ? "light" : "dark");
   if (typeof s?.uiOpacity === "number") {
-    document.documentElement.style.setProperty("--ui-op", String(s.uiOpacity));
+    // ★ 与设置面板滑块一致：只允许 0.6~1.0。
+    //   旧版本曾持久化过 0.2 这类值但当时未生效；若直接应用会让整个 UI 几乎透明（白屏）。
+    const op = Math.min(1, Math.max(0.6, s.uiOpacity));
+    document.documentElement.style.setProperty("--ui-op", String(op));
   }
   if (typeof s?.fontSize === "number" && s.fontSize >= 12 && s.fontSize <= 22) {
     document.documentElement.style.fontSize = s.fontSize + "px";
