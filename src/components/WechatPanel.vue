@@ -799,7 +799,7 @@ async function testReply() {
                   title="最短间隔（分钟）"
                   @change="(e: any) => { proactiveIntervalMin = Number((e.target as HTMLInputElement).value) || 1; saveProactive(); }"
                 />
-                <span style="color:#94a3b8;">~</span>
+                <span style="color:var(--color-text-secondary);">~</span>
                 <input
                   :value="proactiveIntervalMax"
                   type="number"
@@ -809,7 +809,7 @@ async function testReply() {
                   title="最长间隔（分钟）"
                   @change="(e: any) => { proactiveIntervalMax = Number((e.target as HTMLInputElement).value) || 180; saveProactive(); }"
                 />
-                <span style="font-size:11px; color:#64748b;">分钟</span>
+                <span style="font-size:11px; color:var(--color-text-muted);">分钟</span>
               </b></div>
               <div class="wc-row"><span>目标用户</span><b style="max-width:55%; overflow:hidden; text-overflow:ellipsis;">{{ proactiveTarget || "自动（最近聊过的人）" }}</b></div>
               <div class="wc-row"><span>上次主动</span><b>{{ proactiveLastAt ? fmtTs(proactiveLastAt) : "—" }}</b></div>
@@ -872,7 +872,7 @@ async function testReply() {
             </div>
             <div style="padding: 0 10px 10px;">
               <button class="wc-btn wc-primary" @click="saveRules">保存规则</button>
-              <span style="font-size:11px; color:#64748b; margin-left:8px;">白名单外的消息不回复、不主动找</span>
+              <span style="font-size:11px; color:var(--color-text-muted); margin-left:8px;">白名单外的消息不回复、不主动找</span>
             </div>
           </div>
 
@@ -880,12 +880,12 @@ async function testReply() {
           <div class="wc-persona">
             <div class="wc-log-title">💎 内置微信（账号跑在软件里，不影响电脑上的微信）</div>
             <div class="wc-info" style="margin: 0 10px;">
-              <p style="font-size:11px; color:#94a3b8; margin:2px 0; line-height:1.6;">
+              <p style="font-size:11px; color:var(--color-text-secondary); margin:2px 0; line-height:1.6;">
                 每个槽位 = 一个独立的微信账号：用手机微信扫码登录后，该账号完全在
                 ClawDesk 内收发消息（中栏聊天界面），<b>不需要多开、不需要在电脑上装第二个微信</b>，
                 也不影响你电脑上正常运行的微信。
               </p>
-              <p style="font-size:11px; color:#94a3b8; margin:2px 0; line-height:1.6;">
+              <p style="font-size:11px; color:var(--color-text-secondary); margin:2px 0; line-height:1.6;">
                 👉 建议用专用小号登录作为 AI 的独立微信；AI 自动回复与你手动聊天（中栏）
                 共用同一账号同一会话，互不冲突。
               </p>
@@ -996,7 +996,7 @@ async function testReply() {
             </div>
             <p v-if="!messages.length" class="wc-log-empty">暂无消息</p>
           </div>
-          <div class="wc-log-title" style="border-top: 1px solid #2a3752;">📜 D 盘聊天记录（{{ historyList.length }} 条）</div>
+          <div class="wc-log-title" style="border-top: 1px solid var(--glass-border);">📜 D 盘聊天记录（{{ historyList.length }} 条）</div>
           <div class="wc-msgs">
             <div v-for="(h, i) in historyList.slice(-20).reverse()" :key="i" class="wc-msg">
               <div class="wc-msg-meta">
@@ -1027,8 +1027,8 @@ async function testReply() {
 .wc-card {
   width: min(1180px, 96vw);
   height: min(640px, 88vh);
-  background: linear-gradient(180deg, #1b2233 0%, #141a28 100%);
-  border: 1px solid #2c3a55;
+  background: linear-gradient(180deg, #12131d 0%, #0d0d14 100%);
+  border: 1px solid var(--color-border-light);
   border-radius: 14px;
   display: flex;
   flex-direction: column;
@@ -1040,7 +1040,7 @@ async function testReply() {
   align-items: center;
   justify-content: space-between;
   padding: 14px 18px;
-  border-bottom: 1px solid #26324a;
+  border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
 }
 .wc-title {
@@ -1049,7 +1049,7 @@ async function testReply() {
   gap: 8px;
   font-size: 15px;
   font-weight: 600;
-  color: #e8edf7;
+  color: var(--color-text);
 }
 .wc-logo { font-size: 16px; }
 .wc-dot {
@@ -1060,22 +1060,22 @@ async function testReply() {
 }
 .wc-dot.green { background: #34d399; box-shadow: 0 0 6px #34d399; }
 .wc-dot.red { background: #f87171; box-shadow: 0 0 6px #f87171; }
-.wc-dot.gray { background: #64748b; }
+.wc-dot.gray { background: var(--color-text-muted); }
 .wc-state {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--color-text-secondary);
   font-weight: 400;
 }
 .wc-close {
   background: none;
   border: none;
-  color: #94a3b8;
+  color: var(--color-text-secondary);
   font-size: 15px;
   cursor: pointer;
   padding: 4px 8px;
   border-radius: 6px;
 }
-.wc-close:hover { background: #26324a; color: #fff; }
+.wc-close:hover { background: var(--glass-border); color: #fff; }
 .wc-body {
   display: flex;
   flex: 1;
@@ -1083,7 +1083,7 @@ async function testReply() {
 }
 .wc-left {
   width: 32%;
-  border-right: 1px solid #26324a;
+  border-right: 1px solid var(--glass-border);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -1099,15 +1099,15 @@ async function testReply() {
 /* ── 中栏：内置微信聊天界面 ── */
 .wc-mid {
   width: 38%;
-  border-right: 1px solid #26324a;
+  border-right: 1px solid var(--glass-border);
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #121826;
+  background: var(--color-surface);
 }
 .wc-chat-list {
   height: 34%;
-  border-bottom: 1px solid #26324a;
+  border-bottom: 1px solid var(--glass-border);
   padding: 10px 8px;
   overflow-y: auto;
   display: flex;
@@ -1122,15 +1122,15 @@ async function testReply() {
   padding: 7px 10px;
   border-radius: 8px;
   cursor: pointer;
-  background: #1b2436;
+  background: var(--color-surface-hover);
   border: 1px solid transparent;
   min-width: 0;
 }
-.wc-chat-item:hover { border-color: #2c3a55; }
-.wc-chat-item.active { border-color: #3b82f6; background: #1f2b41; }
+.wc-chat-item:hover { border-color: var(--color-border-light); }
+.wc-chat-item.active { border-color: var(--color-accent); background: var(--color-surface-hover); }
 .wc-chat-name {
   font-size: 12px;
-  color: #e8edf7;
+  color: var(--color-text);
   font-weight: 600;
   flex-shrink: 0;
   max-width: 34%;
@@ -1142,12 +1142,12 @@ async function testReply() {
   flex: 1;
   min-width: 0;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--color-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.wc-chat-time { font-size: 10px; color: #64748b; flex-shrink: 0; }
+.wc-chat-time { font-size: 10px; color: var(--color-text-muted); flex-shrink: 0; }
 .wc-chat-main {
   flex: 1;
   min-height: 0;
@@ -1158,9 +1158,9 @@ async function testReply() {
 .wc-chat-head {
   font-size: 13px;
   font-weight: 600;
-  color: #e8edf7;
+  color: var(--color-text);
   padding-bottom: 8px;
-  border-bottom: 1px solid #26324a;
+  border-bottom: 1px solid var(--glass-border);
   margin-bottom: 8px;
   flex-shrink: 0;
 }
@@ -1188,23 +1188,23 @@ async function testReply() {
   word-break: break-word;
   white-space: pre-wrap;
 }
-.wc-bubble-row.them .wc-bubble { background: #26324a; color: #e8edf7; border-bottom-left-radius: 3px; }
-.wc-bubble-row.me .wc-bubble { background: #1d4ed8; color: #fff; border-bottom-right-radius: 3px; }
+.wc-bubble-row.them .wc-bubble { background: var(--glass-border); color: var(--color-text); border-bottom-left-radius: 3px; }
+.wc-bubble-row.me .wc-bubble { background: var(--color-accent-hover); color: #fff; border-bottom-right-radius: 3px; }
 .wc-chat-input {
   display: flex;
   gap: 8px;
   align-items: flex-end;
   padding-top: 8px;
-  border-top: 1px solid #26324a;
+  border-top: 1px solid var(--glass-border);
   flex-shrink: 0;
 }
 .wc-chat-input textarea {
   flex: 1;
   resize: none;
-  background: #1b2436;
-  border: 1px solid #2c3a55;
+  background: var(--color-surface-hover);
+  border: 1px solid var(--color-border-light);
   border-radius: 8px;
-  color: #e8edf7;
+  color: var(--color-text);
   font-size: 12px;
   padding: 8px 10px;
   outline: none;
@@ -1213,7 +1213,7 @@ async function testReply() {
   min-height: 54px;
   max-height: 120px;
 }
-.wc-chat-input textarea:focus { border-color: #3b82f6; }
+.wc-chat-input textarea:focus { border-color: var(--color-accent); }
 /* ── 中栏登录面板（未登录时） ── */
 .wc-mid-login {
   display: flex;
@@ -1225,7 +1225,7 @@ async function testReply() {
 }
 .wc-login-desc {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--color-text-secondary);
   text-align: center;
   line-height: 1.7;
   margin: 0;
@@ -1237,7 +1237,7 @@ async function testReply() {
 }
 .wc-login-tip {
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-text-muted);
   text-align: center;
   margin: 0;
   line-height: 1.6;
@@ -1250,8 +1250,8 @@ async function testReply() {
   min-width: 0;
 }
 .wc-info {
-  background: #1e2739;
-  border: 1px solid #2a3752;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   padding: 10px 14px;
   display: flex;
@@ -1262,15 +1262,15 @@ async function testReply() {
   display: flex;
   justify-content: space-between;
   font-size: 12.5px;
-  color: #94a3b8;
+  color: var(--color-text-secondary);
 }
-.wc-row b { color: #e8edf7; font-weight: 500; }
+.wc-row b { color: var(--color-text); font-weight: 500; }
 .wc-switch { position: relative; display: inline-block; width: 34px; height: 19px; vertical-align: middle; }
 .wc-switch input { opacity: 0; width: 0; height: 0; }
 .wc-knob {
   position: absolute;
   inset: 0;
-  background: #334155;
+  background: var(--color-border-light);
   border-radius: 19px;
   transition: 0.2s;
   cursor: pointer;
@@ -1282,7 +1282,7 @@ async function testReply() {
   height: 13px;
   left: 3px;
   top: 3px;
-  background: #cbd5e1;
+  background: var(--color-text);
   border-radius: 50%;
   transition: 0.2s;
 }
@@ -1290,8 +1290,8 @@ async function testReply() {
 .wc-switch input:checked + .wc-knob::before { transform: translateX(15px); background: #fff; }
 
 .wc-qr {
-  background: #1e2739;
-  border: 1px solid #2a3752;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   padding: 16px;
   display: flex;
@@ -1304,10 +1304,10 @@ async function testReply() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #64748b;
+  color: var(--color-text-muted);
   font-size: 13px;
   width: 100%;
-  border: 1px dashed #334155;
+  border: 1px dashed var(--color-border-light);
   border-radius: 8px;
 }
 .wc-qr-img {
@@ -1334,56 +1334,56 @@ async function testReply() {
   height: 100%;
   display: block;
 }
-.wc-qr-hint { font-size: 12.5px; color: #94a3b8; }
+.wc-qr-hint { font-size: 12.5px; color: var(--color-text-secondary); }
 .wc-qr-ops { display: flex; gap: 8px; }
 .wc-verify { display: flex; gap: 8px; width: 100%; }
 .wc-input {
   flex: 1;
-  background: #141a28;
-  border: 1px solid #2c3a55;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-border-light);
   border-radius: 8px;
-  color: #e8edf7;
+  color: var(--color-text);
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
 }
-.wc-input:focus { border-color: #3b82f6; }
+.wc-input:focus { border-color: var(--color-accent); }
 
 .wc-btn {
-  background: #26324a;
-  color: #dbe4f0;
-  border: 1px solid #33415e;
+  background: var(--glass-border);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-light);
   border-radius: 8px;
   padding: 7px 14px;
   font-size: 13px;
   cursor: pointer;
   transition: 0.15s;
 }
-.wc-btn:hover { background: #2f3d59; }
+.wc-btn:hover { background: var(--color-surface-hover); }
 .wc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.wc-primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-.wc-primary:hover { background: #1d4ed8; }
+.wc-primary { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
+.wc-primary:hover { background: var(--color-accent-hover); }
 .wc-danger { background: #7f1d1d; border-color: #991b1b; color: #fecaca; }
 .wc-danger:hover { background: #991b1b; }
 .wc-ctrl { display: flex; flex-direction: column; gap: 10px; }
 .wc-ctrl-btns { display: flex; flex-wrap: wrap; gap: 8px; }
-.wc-tip { font-size: 12px; color: #64748b; margin: 0; }
+.wc-tip { font-size: 12px; color: var(--color-text-muted); margin: 0; }
 
 .wc-log {
   flex: 1;
   min-height: 90px;
   display: flex;
   flex-direction: column;
-  background: #1e2739;
-  border: 1px solid #2a3752;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   overflow: hidden;
 }
 .wc-log-title {
   padding: 8px 12px;
   font-size: 12px;
-  color: #94a3b8;
-  border-bottom: 1px solid #2a3752;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
 }
 .wc-log-body {
@@ -1394,11 +1394,11 @@ async function testReply() {
 }
 .wc-log-line {
   margin: 2px 0;
-  color: #a5b4cb;
+  color: var(--color-text-secondary);
   word-break: break-all;
   font-family: Consolas, monospace;
 }
-.wc-log-empty { color: #4b5563; font-size: 12px; }
+.wc-log-empty { color: var(--color-text-muted); font-size: 12px; }
 
 .wc-msgs {
   flex: 1;
@@ -1409,8 +1409,8 @@ async function testReply() {
   padding-top: 8px;
 }
 .wc-msg {
-  background: #1e2739;
-  border: 1px solid #2a3752;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
   border-radius: 9px;
   padding: 8px 12px;
 }
@@ -1418,13 +1418,13 @@ async function testReply() {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-text-muted);
   margin-bottom: 3px;
 }
-.wc-msg-from { color: #38bdf8; }
+.wc-msg-from { color: var(--color-accent); }
 .wc-msg-content {
   font-size: 13px;
-  color: #e8edf7;
+  color: var(--color-text);
   word-break: break-all;
   white-space: pre-wrap;
 }
@@ -1441,22 +1441,22 @@ async function testReply() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: #1e2739;
-  border: 1px solid #2a3752;
-  color: #a5b4cb;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
+  color: var(--color-text-secondary);
   border-radius: 20px;
   padding: 5px 12px;
   font-size: 12.5px;
   cursor: pointer;
   transition: 0.15s;
 }
-.wc-slot:hover { background: #26324a; }
-.wc-slot.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+.wc-slot:hover { background: var(--glass-border); }
+.wc-slot.active { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
 .wc-slot-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #64748b;
+  background: var(--color-text-muted);
 }
 .wc-slot-dot.idle { background: #f59e0b; }
 .wc-slot-dot.on { background: #34d399; box-shadow: 0 0 5px #34d399; }
@@ -1467,17 +1467,17 @@ async function testReply() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: #1e2739;
-  border: 1px solid #2a3752;
+  background: var(--color-card);
+  border: 1px solid var(--glass-border);
   border-radius: 10px;
   overflow: hidden;
 }
 .wc-persona-input {
   width: 100%;
-  background: #141a28;
-  border: 1px solid #2c3a55;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-border-light);
   border-radius: 8px;
-  color: #e8edf7;
+  color: var(--color-text);
   padding: 8px 10px;
   font-size: 12.5px;
   outline: none;
@@ -1488,45 +1488,45 @@ async function testReply() {
   width: calc(100% - 20px);
   flex-shrink: 0; /* ★ 防止在 .wc-persona 内被压缩成一行 */
 }
-.wc-persona-input:focus { border-color: #3b82f6; }
+.wc-persona-input:focus { border-color: var(--color-accent); }
 .wc-persona .wc-btn { margin: 0 10px 10px; }
 
 /* 主动聊天数字输入 */
 .wc-num-input {
   width: 64px;
-  background: #141a28;
-  border: 1px solid #2c3a55;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-border-light);
   border-radius: 6px;
-  color: #e8edf7;
+  color: var(--color-text);
   padding: 3px 6px;
   font-size: 12px;
   text-align: right;
   outline: none;
 }
-.wc-num-input:focus { border-color: #3b82f6; }
+.wc-num-input:focus { border-color: var(--color-accent); }
 
 /* ── 灵魂面板 ── */
-.wc-split { border: none; border-top: 1px solid #2c3a55; margin: 8px 0; }
+.wc-split { border: none; border-top: 1px solid var(--color-border-light); margin: 8px 0; }
 .wc-soul { margin: 4px 0; }
 .wc-soul-toggle {
   width: 100%;
   background: transparent;
   border: none;
-  color: #f0b7d0;
+  color: #f5a8c8;
   cursor: pointer;
   font-size: 12px;
   padding: 4px 0;
   text-align: left;
 }
-.wc-soul-toggle:hover { color: #f5c9dc; }
+.wc-soul-toggle:hover { color: #fab5d6; }
 .wc-soul-body {
   margin-top: 6px;
   max-height: 480px;
   overflow-y: auto;
 }
 .wc-soul-card {
-  background: #1a2236;
-  border: 1px solid #2c3a55;
+  background: var(--color-card);
+  border: 1px solid var(--color-border-light);
   border-radius: 8px;
   padding: 8px 10px;
   margin-bottom: 8px;
@@ -1534,12 +1534,12 @@ async function testReply() {
 .wc-soul-title {
   font-size: 11px;
   font-weight: 600;
-  color: #a8b6d4;
+  color: var(--color-text-secondary);
   margin-bottom: 6px;
 }
 .wc-soul-text {
   font-size: 11px;
-  color: #cfd9ec;
+  color: var(--color-text-secondary);
   line-height: 1.5;
   word-break: break-all;
 }
@@ -1549,7 +1549,7 @@ async function testReply() {
   gap: 6px;
   margin: 3px 0;
   font-size: 10px;
-  color: #8b99b8;
+  color: var(--color-text-muted);
 }
 .wc-bar-row > span:first-child {
   flex: 0 0 52px;
@@ -1559,20 +1559,20 @@ async function testReply() {
   position: relative;
   flex: 1;
   height: 8px;
-  background: #0e1424;
+  background: var(--color-code-bg);
   border-radius: 4px;
   overflow: hidden;
 }
 .wc-bar-fill {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #4f7cff, #7aa0ff);
+  background: linear-gradient(90deg, var(--color-accent), #8bbdff);
   border-radius: 4px;
   transition: width 0.4s ease;
 }
 .wc-bar-fill.wc-bar-warm { background: linear-gradient(90deg, #ff7aa8, #ff9ec0); }
 .wc-bar-fill.wc-bar-sens { background: linear-gradient(90deg, #8b7aff, #b3a8ff); }
 .wc-bar-fill.wc-bar-fun { background: linear-gradient(90deg, #ffb34f, #ffcf7a); }
-.wc-anchor-tag { font-size: 9px; color: #6b7b9e; font-weight: normal; margin-left: 4px; }
+.wc-anchor-tag { font-size: 9px; color: var(--color-text-muted); font-weight: normal; margin-left: 4px; }
 .wc-anchor-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #e8eefc; opacity: 0.7; z-index: 2; pointer-events: none; }
 </style>

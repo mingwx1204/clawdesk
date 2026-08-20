@@ -108,6 +108,7 @@ const exporting = ref(false);
 // ── v6 交互状态 ──
 // 侧边栏折叠状态（左侧会话列表，可用标题栏按钮切换）
 const sidebarCollapsed = ref(false);
+const rightCollapsed = ref(false); // 右侧「上下文监测」面板折叠状态
 const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
 const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
 // ── 壁纸时钟（时区感知，localStorage 持久化） ──
@@ -115,6 +116,8 @@ const { clockTime, clockDate, tz, updateClock, onTzChange } = useClock();
 const ctxPct = ref(47);
 const ctxTokens = ref("493.4K / 1M 个令牌");
 const ctxItems = ref({ sys: [1.4, 4.7], usr: [19.3, 20.2, 2.8] });
+// 右侧面板：会话完整用量（累计 token / 消息数 / 压缩次数）
+const usageInfo = ref<{ totalInput?: number; totalOutput?: number; totalTokens?: number; messages?: number; compactions?: number }>({});
 let clockTimer: number | null = null;
 let glowEl: HTMLElement | null = null;
 let artEl: HTMLElement | null = null;
@@ -564,6 +567,13 @@ async function loadSessionUsage() {
       sys: [r.sys?.[0] ?? 0, r.sys?.[1] ?? 0],
       usr: [r.usr?.[0] ?? 0, r.usr?.[1] ?? 0, r.usr?.[2] ?? 0],
     };
+    usageInfo.value = {
+      totalInput: r.totalInput ?? 0,
+      totalOutput: r.totalOutput ?? 0,
+      totalTokens: r.totalTokens ?? 0,
+      messages: r.messages ?? 0,
+      compactions: r.compactions ?? 0,
+    };
   } catch {
     /* 静默 */
   }
@@ -826,6 +836,13 @@ function onMouseMove(e: MouseEvent) {
 // ★ 后端会话引擎已具备自动压缩（超阈值自动摘要压缩），此处不再提供假的手动压缩按钮。
 // 保留 loadSessionUsage 展示真实上下文占用（底部进度环）。
 
+/** 格式化 token 数量为 K/M 单位（右侧面板累计统计用） */
+function fmtK(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+  return String(n);
+}
+
 // ── v6：设置密钥回调 ──
 function onKeysSaved(keys: { main?: string }) {
   if (keys.main) apiKey.value = keys.main;
@@ -856,6 +873,9 @@ function onKeysSaved(keys: { main?: string }) {
         <div class="tb-brand">
           <button class="tb-btn sidebar-toggle-btn" title="侧边栏" @mousedown.stop @click="sidebarCollapsed = !sidebarCollapsed">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          </button>
+          <button class="tb-btn sidebar-toggle-btn" title="上下文监测面板" @mousedown.stop @click="rightCollapsed = !rightCollapsed">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
           </button>
           <svg class="tb-logo" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1.6" fill="currentColor"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9.5" ry="3.8" transform="rotate(120 12 12)"/></svg>
           <span class="tb-title">ClawDesk</span>
@@ -936,8 +956,10 @@ function onKeysSaved(keys: { main?: string }) {
         </div>
       </div>
 
-      <!-- 消息区 -->
-      <main ref="msgsRef" class="msgs" @scroll="onMsgsScroll">
+      <div class="app-body">
+        <div class="chat-col">
+          <!-- 消息区 -->
+          <main ref="msgsRef" class="msgs" @scroll="onMsgsScroll">
         <div v-for="m in displayMessages" :key="m.id" class="msg" :class="m.role === 'user' ? 'user' : 'ai'">
           <div class="msg-wrap">
             <div class="meta">
@@ -1013,16 +1035,64 @@ function onKeysSaved(keys: { main?: string }) {
         </div>
       </main>
 
-      <!-- 底部输入（v6：模型标签 + Agent + 附件 + 进度环 + 发送） -->
-      <BottomInput
-        ref="bottomInputRef"
-        :running="running"
-        :models="MODELS"
-        :selected-model="selectedModel"
-        @send="handleSend"
-        @cancel="handleCancel"
-        @select-model="selectModel"
-      />
+          <!-- 底部输入（v6：模型标签 + Agent + 附件 + 进度环 + 发送） -->
+          <BottomInput
+            ref="bottomInputRef"
+            :running="running"
+            :models="MODELS"
+            :selected-model="selectedModel"
+            @send="handleSend"
+            @cancel="handleCancel"
+            @select-model="selectModel"
+          />
+        </div>
+        <!-- 右侧面板：上下文监测 -->
+        <aside class="right-panel" :class="{ collapsed: rightCollapsed }">
+          <div class="rp-head">📊 上下文</div>
+          <div class="rp-body">
+            <div class="rp-card">
+              <div class="rp-label">窗口占用</div>
+              <div class="rp-bar-track"><div class="rp-bar-fill" :style="{ width: ctxPct + '%' }" :class="{ 'rp-warn': ctxPct > 70, 'rp-danger': ctxPct > 90 }"></div></div>
+              <div class="rp-bar-text">{{ ctxTokens }}</div>
+            </div>
+            <div class="rp-card">
+              <div class="rp-label">系统指令</div>
+              <div class="rp-mini-track"><div class="rp-mini-fill" :style="{ width: ctxItems.sys[0] + '%' }"></div></div>
+              <div class="rp-sub">系统 prompt {{ ctxItems.sys[0] }}% · 工具定义 {{ ctxItems.sys[1] }}%</div>
+            </div>
+            <div class="rp-card">
+              <div class="rp-label">会话内容</div>
+              <div class="rp-mini-track"><div class="rp-mini-fill usr" :style="{ width: ctxItems.usr[0] + '%' }"></div></div>
+              <div class="rp-sub">消息 {{ ctxItems.usr[0] }}% · 工具输出 {{ ctxItems.usr[1] }}% · 文件 {{ ctxItems.usr[2] }}%</div>
+            </div>
+            <div class="rp-card">
+              <div class="rp-label">累计用量</div>
+              <div class="rp-stats">
+                <div class="rp-stat"><span class="rp-stat-val">{{ fmtK(usageInfo.totalInput ?? 0) }}</span><span class="rp-stat-key">输入</span></div>
+                <div class="rp-stat"><span class="rp-stat-val">{{ fmtK(usageInfo.totalOutput ?? 0) }}</span><span class="rp-stat-key">输出</span></div>
+                <div class="rp-stat"><span class="rp-stat-val">{{ usageInfo.messages ?? 0 }}</span><span class="rp-stat-key">消息</span></div>
+                <div class="rp-stat"><span class="rp-stat-val">{{ usageInfo.compactions ?? 0 }}</span><span class="rp-stat-key">压缩</span></div>
+              </div>
+            </div>
+            <div class="rp-card">
+              <div class="rp-label">工具调用</div>
+              <div class="rp-tool-list">
+                <template v-for="m in displayMessages" :key="'rp'+m.id">
+                  <template v-if="m.role === 'assistant' && m.toolCalls?.length">
+                    <div v-for="(tc, tci) in m.toolCalls" :key="'rpc'+m.id+tci" class="rp-tool-item">
+                      <span class="rp-tool-icon" :class="tc.status === 'success' ? 'ok' : tc.status === 'error' ? 'err' : 'run'">
+                        {{ tc.status === 'success' ? '✓' : tc.status === 'error' ? '✗' : '⋯' }}
+                      </span>
+                      <span class="rp-tool-id">{{ tc.toolId }}</span>
+                    </div>
+                  </template>
+                </template>
+                <p v-if="!displayMessages.some(x => x.role === 'assistant' && x.toolCalls?.length)" class="rp-empty">暂无工具调用</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
     </div>
 
     <!-- 设置弹窗（v6 左侧标签列） -->
