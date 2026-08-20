@@ -63,12 +63,14 @@
 
 ---
 
-## 优先建议（Top 3）
+## 优先建议（Top 5，含两轮深挖）
 
-1. **微信集成**：weixin-ilink + weixin-ClawBot-API 是同源协议参考，对齐长轮询 + markdown 过滤 + ACL 配对。
-2. **自进化**：Abu-Cowork（技能）+ evolvebank（记忆）+ ace-autonomous-agent（分层记忆）组合覆盖 ClawDesk 三层。
-3. **性能/体积**：以 Tauri 官方 size 文档为基准，把瘦身沉淀为可复用 skill。
+1. **min-sized-rust release profile**：改 Cargo.toml 几行，32MB→8-10MB，零风险（但 opt-level="z" 会牺牲运行速度，需权衡）。
+2. **rust-lld 链接器**：✅ 已完成，增量编译 14.8s→11.8s（-20%）。
+3. **weixin-ilink SDK 对照补全 wechat.rs**：必须支持图片/语音/文件收发+解密，补齐 ClawDesk 核心差异化。
+4. **Reflexion Agent 自进化循环**：Actor+Evaluator+Memory 架构简单，是自进化最小可行实现。
+5. **cargo-bloat + cargo-nextest**：体积监控 + 测试提速，安装即用零配置。
 
 ---
 
-*最后更新：2026-08-14（第二轮灵感深挖 + sccache 接入）*
+*最后更新：2026-08-14（第二轮灵感深挖 + sccache/rust-lld 接入完成）*
