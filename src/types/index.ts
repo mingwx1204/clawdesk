@@ -130,7 +130,7 @@ export interface WechatMessage {
   timestamp: number;
   /** iLink 消息上下文令牌（回复时必须携带） */
   contextToken?: string;
-  /** 所属微信槽位（0 = 微信1 …），每个槽位独立会话记忆/人设 */
+  /** 所属微信槽位（单账号固定为 0） */
   botSlot?: number;
   /** 图片本地路径（后端已下载解密，AI 用 analyze_image 读取） */
   images?: string[];

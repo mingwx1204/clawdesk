@@ -13,7 +13,7 @@ import { chatApi, wechatApi } from "../utils/api";
 
 /** 微信自动回复器：构造一次，挂载监听，可随时按开关/Key 跳过 */
 export function useWechatAutoReply(getApiKey: () => string) {
-  // ★ 每槽位并发锁：同一微信的多条消息串行回复，防止并发 agent_chat
+  // ★ 微信消息并发锁（单账号固定槽位 0）：多条消息串行回复，防止并发 agent_chat
   //   对同一会话（wechat-{slot}）读-改-写竞争导致记忆丢失/回复乱序
   const slotLocks = new Map<number, Promise<unknown>>();
 
@@ -28,12 +28,12 @@ export function useWechatAutoReply(getApiKey: () => string) {
   }
 
   /**
-   * 收到微信用户消息 → AI 自动回复（每槽位独立会话记忆 + 独立人设）。
+   * 收到微信用户消息 → AI 自动回复（单账号，会话记忆与人设均为该微信专属）。
    * msg 来自后端 wechat-message 事件（WechatMessage）：
    *   content      文本（含语音云端转写 `[语音] …`、引用消息注记）
    *   images       图片本地路径（AI 用 analyze_image 读取）
    *   attachments  文件/语音/视频本地路径（AI 用 file_read 读取）
-   *   botSlot      所属微信槽位（0 = 微信1 …）
+   *   botSlot      所属微信槽位（单账号固定 0）
    */
   async function autoReplyWechat(msg: any) {
     if (!msg || !msg.fromUser) return;
@@ -45,7 +45,7 @@ export function useWechatAutoReply(getApiKey: () => string) {
     if (localStorage.getItem("clawdesk_wechat_autoreply") === "off") return;
     const apiKey = getApiKey().trim();
     if (!apiKey) return;
-    // ★ 所属微信槽位（0 = 微信1 …）：每个微信独立 AI 会话记忆 + 独立人设
+    // ★ 所属微信槽位（单账号固定 0）
     const slot = typeof msg.botSlot === "number" ? msg.botSlot : 0;
     // 读取该微信的人设（后端 wechat 槽位 persona，已随账号恢复）
     let persona: string | null = null;

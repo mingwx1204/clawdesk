@@ -71,6 +71,7 @@ const soulOpen = ref(false);
 const personaText = ref("");
 const personaSaved = ref(false);
 const personaLoading = ref(false);
+const memoryClearing = ref(false);
 /** 人设编辑中标记：用户一旦手动修改（@input），5 秒轮询就不再回填后端旧值，
  *  防止「清空/输入中途被旧人设覆盖」→ 保存后才恢复同步 */
 const personaDirty = ref(false);
@@ -574,19 +575,24 @@ async function logout() {
   await refreshStatus();
 }
 
-/** 清除该微信的 AI 会话记忆（删除 wechat-{槽位} 会话，下次回复不再参考旧对话）。
- *  不影响聊天记录（history.jsonl）与人设（persona.md）。 */
+/** 清除该微信的 AI 会话记忆（删除 wechat-0 会话，下次回复不再参考旧对话）。
+ *  不影响聊天记录（history.jsonl）与人设（persona.md）。
+ *  后端会等待正在运行的自动回复结束后再删除，这里展示进行中状态。 */
 async function clearMemory() {
+  if (memoryClearing.value) return;
   const sid = `wechat-${curSlot.value}`;
+  memoryClearing.value = true;
   try {
     const ok = await sessionsApi.delete(sid);
     if (ok) {
-      pushLog(`🧹 已清除 微信 的 AI 记忆（会话 ${sid}）`);
+      pushLog(`🧹 已清除微信的 AI 记忆（会话 ${sid}）`);
     } else {
       pushLog(`⚠️ 该微信暂无记忆可清除（${sid} 不存在），AI 将从空白开始`);
     }
   } catch (e) {
     pushLog(`清除记忆失败: ${e}`);
+  } finally {
+    memoryClearing.value = false;
   }
 }
 
@@ -837,8 +843,8 @@ async function testReply() {
             <button class="wc-btn wc-primary" @click="savePersona" :disabled="personaLoading">
               {{ personaLoading ? "保存中…" : personaSaved ? "✅ 已保存" : "保存人设" }}
             </button>
-            <button class="wc-btn wc-danger" style="margin-left:8px;" @click="clearMemory" title="删除该微信的 AI 会话记忆（wechat-{槽位}），不影响聊天记录与人设">
-              🧹 清除 AI 记忆
+            <button class="wc-btn wc-danger" style="margin-left:8px;" @click="clearMemory" :disabled="memoryClearing" title="删除该微信的 AI 会话记忆（wechat-0），不影响聊天记录与人设">
+              {{ memoryClearing ? "清空中…" : "🧹 清除 AI 记忆" }}
             </button>
           </div>
 
@@ -886,9 +892,8 @@ async function testReply() {
             <div class="wc-log-title">💎 内置微信（账号跑在软件里，不影响电脑上的微信）</div>
             <div class="wc-info" style="margin: 0 10px;">
               <p style="font-size:11px; color:var(--color-text-secondary); margin:2px 0; line-height:1.6;">
-                每个槽位 = 一个独立的微信账号：用手机微信扫码登录后，该账号完全在
-                ClawDesk 内收发消息（中栏聊天界面），<b>不需要多开、不需要在电脑上装第二个微信</b>，
-                也不影响你电脑上正常运行的微信。
+                用手机微信扫码登录后，该账号完全在 ClawDesk 内收发消息（中栏聊天界面），
+                <b>不需要多开、不需要在电脑上装第二个微信</b>，也不影响你电脑上正常运行的微信。
               </p>
               <p style="font-size:11px; color:var(--color-text-secondary); margin:2px 0; line-height:1.6;">
                 👉 建议用专用小号登录作为 AI 的独立微信；AI 自动回复与你手动聊天（中栏）
