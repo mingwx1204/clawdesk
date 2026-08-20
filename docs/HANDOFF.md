@@ -8,6 +8,12 @@
 
 | 提交 | 说明 |
 |------|------|
+| `ce32d1d` | feat: 内言（inner monologue）——诗妍回复前写【心语】角色散文，面板💭可展开（参考 inner-voice / Katherine / soul-protocol） |
+| `b2ff79c` | feat: 情绪键控记忆——detail_memory 新增 valence/precision，检索与当下 mood 加权匹配 |
+| `5755381` | docs: 灵魂笔记 vs 后端现状对照清单（SOUL_GOALS.md） |
+| `f740761` | Revert: 恢复被误删的 SOUL 设计草稿笔记 |
+| `ad41d86` | feat: 应用图标全部统一为标题栏原子轨道样式 |
+| `0aaea42` | fix: 界面不透明度限制在 0.6~1.0，防止旧配置白屏 |
 | `585216d` | refactor: 移除微信 slot 兼容层，前后端单账号直连 |
 | `bd4d7e9` | chore: 固化 rust check/test/verify npm 脚本并复用 src-tauri/target |
 | `7b2b9eb` | test: 线程级数据目录覆盖修复并行测试 env race |
@@ -294,4 +300,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 25 次提交（`3c8fa93` ~ `585216d`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-21 · 本次续作最新至 `ce32d1d`（内言）+ `b2ff79c`（情绪键控记忆）· GitHub 灵感清单见 `docs/GITHUB_INSPIRATION.md` · 工作目录 `D:\workspace\ClawDesk`*
