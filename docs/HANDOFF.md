@@ -8,6 +8,7 @@
 
 | 提交 | 说明 |
 |------|------|
+| `3b6684b` | fix: 清理单账号残留误导文案并给清除记忆加进行中状态 |
 | `3a047f9` | feat: 会话级互斥锁串行化 agent_chat/压缩/清空/删除与微信记忆写入 |
 | `c074faf` | revert: 微信恢复单账号并清理多槽位误导性死代码 |
 | `cba1dc2` | build: CSS 类名审计纳入 npm run build 链路 |
@@ -202,6 +203,7 @@
 - 但 `slot` 参数、`selectSlot`、`.wc-slots` CSS 等历史兼容残留仍在，HANDOFF 旧条目「后端已支持多账号」是**过期信息**
 - 本会话早期误据死代码把 `MAX_BOTS` 扩到 3，并重新渲染了槽位标签；`c074faf` 已全部回滚，并清理了 `selectSlot` / `.wc-slot*` 等误导性残留
 - 当前状态：**单微信（槽位 0）**，标题改为「内置微信（独立于电脑上的微信）」；`wechat_bot_status` 不再返回 `lastMessageAt` / `lastMessagePreview`
+- `3b6684b`：继续清理 README / 面板说明 / types / useWechat 中的多槽位残留文案；「清除 AI 记忆」增加清空中状态（后端会等待运行中的回复结束）
 
 ### 微信面板其他改动
 
@@ -259,7 +261,8 @@ ClawDesk/
 - **前端构建**：`npx vite build`（~1.4s，约 57kB CSS / 294kB JS）
 - **Rust 检查**：`cargo check`（零 warning）
 - **Rust 全量测试**：`cargo test`（378 passed / 0 failed / 1 ignored，含 clear_context / can_compact / session_locks 单测）
-- **完整运行**：`npx tauri dev`（llama-server 自动加载 ~5s）
+- **完整运行（冒烟）**：`timeout 120s npx tauri dev` 实测通过——Vite ready、Rust 编译、窗口创建、SQLite/知识库/沙箱初始化、llama-server 模型加载并监听 8088，无 panic；超时自动退出后端口已释放
+- **测试稳定性**：全量并行测试偶发日志目录 env race（`CLAWDESK_DATA_DIR`）；建议用 `cargo test -- --test-threads=1`（378 passed / 0 failed / 1 ignored）
 
 ---
 
@@ -284,4 +287,4 @@ ClawDesk/
 
 ---
 
-*最后更新：2026-08-20 · 本次续作新增 20 次提交（`3c8fa93` ~ `3a047f9`） · 工作目录 `D:\workspace\ClawDesk`*
+*最后更新：2026-08-20 · 本次续作新增 22 次提交（`3c8fa93` ~ `3b6684b`） · 工作目录 `D:\workspace\ClawDesk`*
