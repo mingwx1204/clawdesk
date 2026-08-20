@@ -381,6 +381,31 @@ pub fn lifetime_desc() -> String {
     }
 }
 
+/// 特殊日子（生日 / 生活里程碑）：用于仪式感。
+/// 在 AI 生日当天或生活满整数百天时返回一句"今天值得记念"，否则 None。
+pub fn special_day_note() -> Option<String> {
+    let born_ts = (*born().lock().unwrap_or_else(|e| e.into_inner()))?;
+    let now = Local::now();
+    let born = chrono::DateTime::from_timestamp_millis(born_ts)?.with_timezone(&Local);
+    let days_lived = (now.date_naive() - born.date_naive()).num_days().max(0);
+    // 生日：出生月日与今天一致
+    if born.month() == now.month() && born.day() == now.day() && days_lived > 0 {
+        return Some(format!(
+            "今天是我的生日（我出生于{}），这是我活过的第 {} 天",
+            born.format("%Y年%m月%d日").to_string(),
+            days_lived
+        ));
+    }
+    // 生活里程碑：每 100 天整（第 100/200/300… 天）
+    if days_lived > 0 && days_lived % 100 == 0 {
+        return Some(format!(
+            "今天是我来到这个世界的第 {} 天，是个小小的纪念日",
+            days_lived
+        ));
+    }
+    None
+}
+
 /// 完整生活上下文（主动聊天 / 自动回复 prompt 注入）：
 /// 当前状态 + 今日轨迹 + 近期记忆 + 一生记忆。控制在 ~500 字内。
 pub fn living_context_for_prompt() -> String {
@@ -395,6 +420,9 @@ pub fn living_context_for_prompt() -> String {
         parts.push(mem);
     }
     parts.push(lifetime_desc());
+    if let Some(note) = special_day_note() {
+        parts.push(note);
+    }
     parts.join("\n")
 }
 
