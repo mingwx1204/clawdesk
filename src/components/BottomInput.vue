@@ -274,12 +274,12 @@ function removeAttachment(idx: number) {
 /* 快捷指令（提示词模板）已移除 */
 .preview-row { display: flex; gap: 8px; padding: 0 20px 8px; flex-wrap: wrap; }
 .preview-item { position: relative; width: 60px; height: 60px; }
-.preview-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; border: 1px solid rgba(255,255,255,.5); }
+.preview-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; border: 1px solid var(--glass-border); }
 .preview-del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; background: #ff453a; color: #fff; font-size: 10px; line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; }
 .attach-row { display: flex; gap: 8px; padding: 0 20px 8px; flex-wrap: wrap; }
-.attach-item { display: flex; align-items: center; gap: 6px; max-width: 280px; padding: 4px 8px 4px 6px; border-radius: 10px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.4); font-size: 11px; color: var(--txt); }
-.attach-ico { font-size: 12px; }
-.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attach-size { color: var(--txt-3); font-size: 10px; flex-shrink: 0; }
+.attach-item { display: flex; align-items: center; gap: 6px; max-width: 280px; padding: 5px 9px 5px 7px; border-radius: 10px; border: 1px solid var(--glass-border); background: var(--bar); font-size: 12px; color: var(--txt); }
+.attach-ico { font-size: 13px; }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--txt); }
+.attach-size { color: var(--txt-3); font-size: 11px; flex-shrink: 0; }
 .attach-del { width: 16px; height: 16px; border-radius: 50%; background: #ff453a; color: #fff; font-size: 9px; line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; border: none; flex-shrink: 0; }
 </style>
