@@ -85,7 +85,8 @@ html[data-theme="light"] .input-wrap:focus-within {
   box-shadow: 0 10px 30px rgba(30, 45, 80, 0.16), 0 0 0 3px rgba(61, 123, 255, 0.16);
 }
 html[data-theme="light"] .send,
-html[data-theme="light"] .cp-compress {
+html[data-theme="light"] .cp-compress,
+html[data-theme="light"] .pc-yes {
   color: #fff;
   background: linear-gradient(180deg, #5a91ff, #3d7bff);
 }

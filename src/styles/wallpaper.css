@@ -164,6 +164,69 @@
   padding: 3px 12px; border-radius: 99px;
 }
 
+/* ── 通用确认弹窗（权限确认 / 新建会话 / 历史搜索）──
+   ★ 修复：这些类原在已删除的 game.css 中，但 App.vue 一直在使用；
+   game.css 删除后弹窗 overlay 失效，本次按当前暗色玻璃主题重建。 */
+.perm-overlay {
+  position: fixed; inset: 0; z-index: 350;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.perm-overlay.open { opacity: 1; pointer-events: auto; }
+.perm-card {
+  width: 400px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+  border-radius: 18px; padding: 22px; text-align: center;
+  background: var(--bar);
+  backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  animation: menuIn 0.2s ease;
+}
+.pc-ico {
+  width: 44px; height: 44px; margin: 0 auto 10px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(109, 170, 255, 0.16); color: var(--accent);
+}
+.pc-title { font-size: 15px; font-weight: 700; color: var(--txt); }
+.pc-sub { font-size: 12px; color: var(--txt-2); margin: 4px 0 12px; }
+.pc-tool {
+  display: inline-block; font-family: var(--font-mono);
+  font-size: 12.5px; font-weight: 700; color: var(--accent);
+  background: rgba(109, 170, 255, 0.12);
+  padding: 4px 12px; border-radius: 8px; max-width: 100%;
+  word-break: break-all;
+}
+.pc-args {
+  margin-top: 8px; font-family: var(--font-mono); font-size: 11.5px;
+  color: var(--txt-2); background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px; padding: 8px 10px;
+  word-break: break-all; text-align: left; white-space: pre-wrap;
+}
+.ns-input {
+  width: 100%; margin-top: 12px; padding: 9px 12px; border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-input-bg); color: var(--txt);
+  font-family: var(--font); font-size: 13px; outline: none;
+  box-sizing: border-box; transition: border-color .15s, box-shadow .15s;
+}
+.ns-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(109, 170, 255, 0.14); }
+.pc-actions { display: flex; gap: 10px; margin-top: 16px; }
+.pc-no, .pc-yes {
+  flex: 1; padding: 9px 0; border-radius: 10px; border: none;
+  cursor: pointer; font-family: var(--font); font-size: 13px; font-weight: 700;
+  transition: .15s;
+}
+.pc-no { background: var(--color-surface-hover); color: var(--txt-2); border: 1px solid var(--color-border); }
+.pc-no:hover { background: rgba(224, 85, 85, 0.10); color: var(--red); border-color: rgba(224, 85, 85, 0.4); }
+.pc-yes { color: #fff; background: linear-gradient(180deg, #8bbdff, #6daaff); box-shadow: 0 3px 10px rgba(109, 170, 255, 0.35); }
+.pc-yes:hover { filter: brightness(1.08); }
+.pc-yes:disabled { opacity: .5; cursor: not-allowed; }
+.search-list { text-align: left; }
+
 .status-right { display:flex; align-items:center; gap:6px; }
 .settings-btn {
   width:30px; height:30px; border-radius:50%; border:1px solid var(--glass-border);
