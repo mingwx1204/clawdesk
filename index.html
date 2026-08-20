@@ -9,9 +9,13 @@
          参考 GitHub 热门 loading 动画（epic-spinners、terminal boot sequence），
          设计为「终端打字 + 脉冲光晕」风格，匹配 ClawDesk 深色主题。 */
       :root { --splash-bg: #0a0a0f; --splash-text: #a0b8d0; --splash-accent: #6daaff; }
-      body { margin: 0; overflow: hidden; }
+      /* html/body 都铺满背景色，彻底杜绝四周边缘漏出白色/主界面背景 */
+      html, body { margin: 0; padding: 0; height: 100%; width: 100%; background: #0a0a0f; overflow: hidden; }
       #splash {
-        position: fixed; inset: 0; z-index: 99999;
+        position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+        inset: 0; z-index: 99999;
+        width: 100vw; height: 100vh;
+        margin: 0; border: 0; padding: 0;
         background: var(--splash-bg);
         display: flex; flex-direction: column; align-items: center; justify-content: center;
         font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
@@ -82,7 +86,7 @@
     </style>
   </head>
   <body>
-    <div id="splash">
+    <div id="splash" data-tauri-drag-region>
       <div class="splash-particles" id="splashParticles"></div>
       <div class="splash-ring">
         <div class="splash-dot"></div>
