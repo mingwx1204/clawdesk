@@ -48,8 +48,8 @@
           "SimpChinese",
           "English"
         ],
-        "headerImage": "icons/installer/installer-header.png",
-        "sidebarImage": "icons/installer/installer-sidebar.png"
+        "headerImage": "icons/installer/installer-header.bmp",
+        "sidebarImage": "icons/installer/installer-sidebar.bmp"
       }
     },
     "category": "DeveloperTool",
