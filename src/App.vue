@@ -143,7 +143,9 @@ function toggleRightPanel() {
     rightManualOverride.value = true;
   }
 }
-const selectedModel = ref("auto"); // auto / deepseek-v4-flash / deepseek-v4-pro
+const selectedModel = ref("");
+const configuredModel = ref("");
+const availableModels = ref<{ id: string; label: string; desc: string }[]>([]);
 const permRequest = ref<{ toolId: string; args: string; callId?: string } | null>(null);
 // ── 壁纸时钟（时区感知，localStorage 持久化） ──
 const { clockTime, clockDate, tz, updateClock, onTzChange } = useClock();
@@ -219,6 +221,8 @@ onMounted(async () => {
   // 恢复外观设置（重启后保持）：深色/亮色主题 + 界面不透明度 + 字号
   try {
     const s = await settingsApi.get();
+    configuredModel.value = typeof s?.model === "string" ? s.model : "";
+    selectedModel.value = configuredModel.value;
     applyAppearance(s);
   } catch { /* 静默 */ }
   // 预加载 TTS 设置与音色列表（Edge TTS 引擎：提前加载避免首次朗读等待）
@@ -968,17 +972,24 @@ async function deleteSession(id: string) {
   }
 }
 
-// ── v6：模型选择（智能路由 / V4-Flash / V4-Pro） ──
-const MODELS = [
-  { id: "auto", label: "自动", desc: "智能路由 · 简单任务用 Flash，复杂任务用 Pro" },
-  { id: "deepseek-v4-flash", label: "DeepSeek-V4-Flash", desc: "快速响应 · 日常对话 / 简单任务" },
-  { id: "deepseek-v4-pro", label: "DeepSeek-V4-Pro", desc: "深度推理 · 复杂任务 / 代码 / 规划" },
-];
-function selectModel(m: string) {
+// ── 模型选择：只显示 API 检测成功返回的模型 ──
+async function selectModel(m: string) {
+  if (!availableModels.value.some((model) => model.id === m)) return;
   selectedModel.value = m;
-  if (m === "deepseek-v4-flash" || m === "deepseek-v4-pro") {
-    void routerApi.setMainModel(m).catch(() => {});
+  configuredModel.value = m;
+  try {
+    await settingsApi.set({ model: m });
+    await routerApi.setMainModel(m);
+  } catch (e) {
+    console.error("保存模型失败", e);
   }
+}
+
+function onAvailableModels(models: { id: string; label: string; desc: string }[]) {
+  availableModels.value = models;
+  selectedModel.value = models.some((model) => model.id === configuredModel.value)
+    ? configuredModel.value
+    : "";
 }
 // ── v6：权限确认弹窗 ──
 function requestPermission(toolId: string, args: string, callId?: string) {
@@ -1229,7 +1240,7 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
           <BottomInput
             ref="bottomInputRef"
             :running="running"
-            :models="MODELS"
+            :models="availableModels"
             :selected-model="selectedModel"
             @send="handleSend"
             @cancel="handleCancel"
@@ -1316,6 +1327,7 @@ function applyAppearance(s: { darkTheme?: boolean; uiOpacity?: number; fontSize?
       :tz="tz"
       @close="showSettings = false"
       @keys="onKeysSaved"
+      @models="onAvailableModels"
       @tz="onTzChange"
       @appearance="applyAppearance"
     />

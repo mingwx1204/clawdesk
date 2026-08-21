@@ -283,6 +283,13 @@ pub async fn run_turn_loop(
                             let _ = tx_event.send(EngineEvent::ThinkingDelta(content)).await;
                         }
                         SseEvent::ToolCallStart { id, name, index } => {
+                            // 部分 OpenAI 兼容网关可能在首个流式片段省略 id。
+                            // 按 index 生成稳定兜底 ID，后续工具结果沿用同一 ID。
+                            let id = if id.trim().is_empty() {
+                                format!("call_clawdesk_{}", index)
+                            } else {
+                                id
+                            };
                             eprintln!("[SSE] ToolCallStart: id={:?} name={} index={}", id, name, index);
                             let _ = tx_event
                                 .send(EngineEvent::ToolCallStart { name: name.clone() })
@@ -368,6 +375,23 @@ pub async fn run_turn_loop(
                         Value::String(assistant_text.clone())
                     },
                 );
+                // 丢弃流式 index 造成的空槽位，并保证每个工具调用都有 id/name。
+                let valid_tool_calls: Vec<(String, String, String)> = tool_calls
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (tid, tname, targs))| {
+                        if tname.trim().is_empty() {
+                            return None;
+                        }
+                        let id = if tid.trim().is_empty() {
+                            format!("call_clawdesk_{}", index)
+                        } else {
+                            tid.clone()
+                        };
+                        Some((id, tname.clone(), targs.clone()))
+                    })
+                    .collect();
+                tool_calls = valid_tool_calls;
                 if !tool_calls.is_empty() {
                     assistant_msg.insert(
                         "tool_calls".into(),

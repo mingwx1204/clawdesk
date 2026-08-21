@@ -11,7 +11,8 @@ import { settingsApi, routerApi } from "../utils/api";
 defineProps<{ tz?: string }>();
 const emit = defineEmits<{
   (e: "close"): void;
-  (e: "keys", keys: { main?: string; vision?: string; image?: string }): void;
+  (e: "keys", keys: { main?: string }): void;
+  (e: "models", models: { id: string; label: string; desc: string }[]): void;
   (e: "tz", v: string): void;
   (e: "appearance", s: AppSettings): void;
 }>();
@@ -20,10 +21,6 @@ const emit = defineEmits<{
 interface AppSettings {
   model: string;
   modelEndpoint: string;
-  visionModel: string;
-  visionEndpoint: string;
-  imageModel: string;
-  imageEndpoint: string;
   // 外观（后端已持久化，这里补充类型与控件）
   darkTheme: boolean;
   uiOpacity: number;
@@ -37,8 +34,6 @@ const saving = ref(false);
 
 // API Key（仅内存态，不持久化 —— 与后端安全红线一致）
 const mainKey = ref("");
-const visionKey = ref("");
-const imageKey = ref("");
 const keysSavedTip = ref("");
 
 // ── Key 余额追踪（后端 check_balance，根据端点自动识别提供商）──
@@ -50,11 +45,26 @@ const detectModelsText = ref("");
 const detectModelsLoading = ref(false);
 const detectedModels = ref<string[]>([]);
 
+/** API Key 或地址改变后，旧端点的模型列表立即失效。 */
+function clearDetectedModels() {
+  if (detectedModels.value.length) {
+    detectedModels.value = [];
+    emit("models", []);
+  }
+}
+
+function onEndpointInput(value: string) {
+  if (settings.value) settings.value.modelEndpoint = value;
+  clearDetectedModels();
+}
+
 async function detectModels() {
   const key = mainKey.value.trim();
-  const endpoint = settings.value?.modelEndpoint ?? "";
-  if (!key) {
-    detectModelsText.value = "请先填写主模型 Key";
+  const endpoint = settings.value?.modelEndpoint?.trim() ?? "";
+  if (!key || !endpoint) {
+    detectedModels.value = [];
+    emit("models", []);
+    detectModelsText.value = !key ? "请先填写主模型 Key" : "请先填写 API 地址";
     return;
   }
   detectModelsLoading.value = true;
@@ -63,9 +73,14 @@ async function detectModels() {
   try {
     const r = await routerApi.listModels(key, endpoint);
     const arr: any[] = Array.isArray(r?.models) ? r.models : [];
-    detectedModels.value = arr
-      .map((m) => (typeof m.id === "string" ? m.id : ""))
-      .filter((id) => id);
+    detectedModels.value = [...new Set(arr
+      .map((m) => (typeof m.id === "string" ? m.id.trim() : ""))
+      .filter((id) => id))];
+    emit("models", detectedModels.value.map((id) => ({
+      id,
+      label: id,
+      desc: `${r?.provider ?? "兼容 API"} · 已检测可用`,
+    })));
     detectModelsText.value = `检测到 ${detectedModels.value.length} 个模型（${r?.provider ?? ""}）`;
   } catch (e) {
     detectModelsText.value = `检测失败：${typeof e === "string" ? e : JSON.stringify(e)}`;
@@ -117,8 +132,6 @@ async function loadKeys(): Promise<void> {
   try {
     const k = await settingsApi.getKeys();
     if (k?.main) mainKey.value = k.main;
-    if (k?.vision) visionKey.value = k.vision;
-    if (k?.image) imageKey.value = k.image;
   } catch { /* 静默 */ }
 }
 
@@ -144,9 +157,7 @@ function field(key: keyof AppSettings, value: unknown): void {
 
 async function saveKeys(): Promise<void> {
   const m = mainKey.value.trim();
-  const v = visionKey.value.trim();
-  const i = imageKey.value.trim();
-  if (!m && !v && !i) {
+  if (!m) {
     keysSavedTip.value = "请至少填写一个 Key";
     setTimeout(() => { keysSavedTip.value = ""; }, 2000);
     return;
@@ -154,15 +165,15 @@ async function saveKeys(): Promise<void> {
   try {
     const p: Record<string, unknown> = {};
     if (m) p.mainKey = m;
-    if (v) p.visionKey = v;
-    if (i) p.imageKey = i;
     settings.value = await settingsApi.set(p);
-    emit("keys", { main: m, vision: v, image: i });
-    keysSavedTip.value = "✅ Key 已保存";
-    setTimeout(() => { keysSavedTip.value = ""; }, 2500);
-    mainKey.value = "";
-    visionKey.value = "";
-    imageKey.value = "";
+    emit("keys", { main: m });
+    keysSavedTip.value = "✅ Key 已保存，正在检测模型…";
+    // 保留当前 Key，并在保存成功后直接检测模型，避免“保存后 Key 消失、无法检测”的死循环。
+    await detectModels();
+    if (detectedModels.value.length) {
+      keysSavedTip.value = `✅ Key 已保存，检测到 ${detectedModels.value.length} 个模型`;
+    }
+    setTimeout(() => { keysSavedTip.value = ""; }, 3000);
   } catch (e) {
     keysSavedTip.value = `❌ 保存失败：${String(e)}`;
   }
@@ -192,21 +203,17 @@ onMounted(async () => {
             <p class="sc-desc">文本推理 / 规划 / 工具选择走主模型（思考 + Agent 已默认开启）</p>
             <label class="sc-label">模型</label>
             <select :value="settings.model" class="sc-select" @change="field('model', ($event.target as HTMLSelectElement).value)">
-              <optgroup v-if="detectedModels.length" label="✅ 该 Key 可用（自动检测）">
+              <option v-if="!detectedModels.length" value="" disabled>请先检测 API 可用模型</option>
+              <optgroup v-else label="✅ 该 API 实际返回的模型">
                 <option v-for="m in detectedModels" :key="m" :value="m">{{ m }}</option>
-              </optgroup>
-              <optgroup label="常用模型（未检测时手动选）">
-                <option value="deepseek-v4-pro">deepseek-v4-pro（DeepSeek V4 Pro）</option>
-                <option value="deepseek-v4-flash">deepseek-v4-flash（DeepSeek V4 Flash）</option>
-                <option value="deepseek-chat">deepseek-chat（DeepSeek-V3 对话）</option>
-                <option value="deepseek-reasoner">deepseek-reasoner（DeepSeek-R1 思考）</option>
               </optgroup>
             </select>
             <label class="sc-label">API 地址</label>
-            <input :value="settings.modelEndpoint" class="sc-input" @change="field('modelEndpoint', ($event.target as HTMLInputElement).value)" />
+            <input :value="settings.modelEndpoint" class="sc-input" @input="onEndpointInput(($event.target as HTMLInputElement).value)"
+              @change="field('modelEndpoint', ($event.target as HTMLInputElement).value)" />
 
             <h4>API Key</h4>
-            <input v-model="mainKey" type="password" class="sc-input" placeholder="主模型 Key（如 sk-…）" />
+            <input v-model="mainKey" type="password" class="sc-input" placeholder="主模型 Key（如 sk-…）" @input="clearDetectedModels" />
             <div class="sc-balance-row">
               <button class="sc-btn" :disabled="detectModelsLoading" @click="detectModels">
                 {{ detectModelsLoading ? "检测中…" : "🔍 检测支持的模型" }}
@@ -224,21 +231,7 @@ onMounted(async () => {
               <span v-if="tip" style="color:var(--accent);font-size:12px">{{ tip }}</span>
             </div>
 
-            <h4 style="margin-top:14px">视觉模型（识图 · 可忽略）</h4>
-            <p class="sc-desc">analyze_image 路由至视觉专用模型，未配置时模型会尝试直接用图片输入</p>
-            <label class="sc-label">模型</label>
-            <input :value="settings.visionModel" class="sc-input" @change="field('visionModel', ($event.target as HTMLInputElement).value)" />
-            <label class="sc-label">API 地址</label>
-            <input :value="settings.visionEndpoint" class="sc-input" @change="field('visionEndpoint', ($event.target as HTMLInputElement).value)" />
-            <input v-model="visionKey" type="password" class="sc-input" placeholder="视觉模型 Key（可留空）" style="margin-top:6px" />
-
-            <h4 style="margin-top:14px">绘图模型（生图 · 可忽略）</h4>
-            <p class="sc-desc">generate_image 路由至绘图 API，未配置时自动降级</p>
-            <label class="sc-label">模型</label>
-            <input :value="settings.imageModel" class="sc-input" @change="field('imageModel', ($event.target as HTMLInputElement).value)" />
-            <label class="sc-label">API 地址</label>
-            <input :value="settings.imageEndpoint" class="sc-input" @change="field('imageEndpoint', ($event.target as HTMLInputElement).value)" />
-            <input v-model="imageKey" type="password" class="sc-input" placeholder="绘图 API Key（可留空）" style="margin-top:6px" />
+            <!-- 视觉模型由本地 Qwen2.5-VL fallback 自动处理；绘图走工具自身配置。 -->
 
             <h4 style="margin-top:14px">外观</h4>
             <p class="sc-desc">主题 / 界面不透明度 / 字号，保存后立即生效并自动持久化</p>

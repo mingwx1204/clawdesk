@@ -271,12 +271,10 @@ pub async fn agent_chat(
     //   模型名按端点适配：OpenCode Go 用 deepseek-v4-pro（支持 reasoning），DeepSeek 官方用 deepseek-reasoner
     let thinking = thinking.unwrap_or(true); // ★ 思考模式出厂默认开启
     let is_opencode_go = s.model_endpoint.contains("opencode.ai");
-    let engine_model = if thinking {
-        if is_opencode_go {
-            "deepseek-v4-pro".to_string()
-        } else {
-            "deepseek-reasoner".to_string()
-        }
+    // 只有 DeepSeek 模型才做 DeepSeek 专用思考模型映射；其他兼容模型原样发送。
+    let is_deepseek_model = s.model.to_ascii_lowercase().contains("deepseek");
+    let engine_model = if thinking && is_deepseek_model {
+        if is_opencode_go { "deepseek-v4-pro".to_string() } else { "deepseek-reasoner".to_string() }
     } else {
         s.model.clone()
     };
@@ -302,7 +300,7 @@ pub async fn agent_chat(
     }
     // 主模型经路由层提供（项目 4）：同步 key（仅内存态）并复用 router 主客户端，
     // 用户通过 router_set_main_model 切换的模型（V4-Pro ↔ V4-Flash）实时生效。
-    state.router.ensure_main_key(api_key.clone());
+    state.router.set_main(api_key.clone(), &s.model, Some(&s.model_endpoint));
     // 同步 harness 引擎配置（仅内存态，Key 不落盘）：
     // StepConfirm / Yolo 模式走 harness 引擎，必须保证引擎已配置，否则报"引擎未配置"。
     // model 用设置中的模型；端点从设置 modelEndpoint 提取（支持 DeepSeek 官方 / OpenCode Go 等 OpenAI 兼容端点）。
@@ -315,7 +313,11 @@ pub async fn agent_chat(
         model: engine_model.clone(),
         // Medium 思考力度：保留思考链（用户可折叠查看），同时避免 High 的过度思考
         // （High 时部分请求只输出 thinking 而 content 为空）。
-        effort: crate::harness::engine::param::ReasoningEffort::Medium,
+        effort: if is_deepseek_model {
+            crate::harness::engine::param::ReasoningEffort::Medium
+        } else {
+            crate::harness::engine::param::ReasoningEffort::Off
+        },
     });
     eprintln!("[CHAT] 发送任务: model={} thinking={} mode={:?} endpoint={}", engine_model, thinking, *state.agent_mode.read().unwrap(), s.model_endpoint);
     // 同步设置中配置的视觉 / 绘图 API Key（仅内存态）到路由层（项目 7）

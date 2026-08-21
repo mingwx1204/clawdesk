@@ -84,15 +84,11 @@ fn analyze_image(image_path: &str) -> Result<serde_json::Value, String> {
                 "note": "已通过视觉模型解析",
             }));
         }
-        // 视觉模型故障：降级，把故障原因回传（供 DeepSeek 如实告知 / 调整方案）
-        return Ok(json!({
-            "imagePath": image_path,
-            "width": w,
-            "height": h,
-            "mimeType": mime,
-            "description": null,
-            "note": out.note.unwrap_or_else(|| "视觉模型解析失败".to_string()),
-        }));
+        // 云端视觉未配置或失败时继续走本地 Qwen fallback，不提前返回。
+        crate::llm::logging::debug(
+            "vision",
+            &format!("云端视觉不可用，继续本地视觉 fallback: {}", out.note.unwrap_or_default()),
+        );
     }
 
     // 3) 云端视觉未配置/失败 → 尝试本地 llama-server 视觉（Qwen2.5-VL-7B）
@@ -121,7 +117,7 @@ fn analyze_image(image_path: &str) -> Result<serde_json::Value, String> {
         "height": h,
         "mimeType": mime,
         "description": null,
-        "note": "当前未配置视觉模型（可在设置中配置 GLM-5V 等视觉 API 后启用真实识图）。请如实告知用户：可请用户直接描述图片内容。",
+        "note": "云端与本地视觉均不可用；请检查 llama-server 或让用户直接描述图片内容。",
     }))
 }
 
