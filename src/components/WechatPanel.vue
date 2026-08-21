@@ -64,6 +64,8 @@ const moodState = ref<string>("");
 /** 灵魂全景快照（八层状态，供"灵魂面板"展示） */
 const soulSnap = ref<any>(null);
 const soulOpen = ref(false);
+/** refreshStatus 调用计数（控制灵魂快照的慢速刷新） */
+let refreshStatusCount = 0;
 
 // ── 人设编辑 ──
 const personaText = ref("");
@@ -432,6 +434,11 @@ async function refreshStatus() {
     const m = await wechatApi.moodState();
     if (m?.label) moodState.value = m.label;
   } catch { /* 静默 */ }
+  // ★ 灵魂速览：首次加载 + 每 5 次轮询（约 25s）刷新一次快照，
+  //   让顶部速览条（一生/特殊日子/话题/记忆数）保持新鲜，不展开面板也可见
+  try {
+    if (!soulSnap.value || (refreshStatusCount++ % 5 === 0)) await refreshSoul();
+  } catch { /* 静默 */ }
 }
 
 /** 灵魂全景按需拉取：面板展开时请求一次，避免 5 秒轮询重复读取八层状态。 */
@@ -671,6 +678,13 @@ async function testReply() {
             <div class="wc-row"><span>聊天记录</span><b>{{ cur?.historyCount ?? 0 }} 条（D 盘）</b></div>
             <div class="wc-row"><span>AI 生活状态</span><b class="wc-living">{{ livingState || "—" }}</b></div>
             <div class="wc-row"><span>AI 心情</span><b class="wc-living">{{ moodState || "平静" }}</b></div>
+            <!-- ★ 灵魂速览条：一眼看到她的"活人感"（不折叠） -->
+            <div v-if="soulSnap" class="wc-soul-strip">
+              <div v-if="soulSnap.specialDay" class="wc-soul-strip-item wc-soul-strip-day">🎂 {{ soulSnap.specialDay }}</div>
+              <div class="wc-soul-strip-item">🌱 {{ soulSnap.lifetime || "人生刚开始" }}</div>
+              <div v-if="soulSnap.topics" class="wc-soul-strip-item">🧵 {{ soulSnap.topics }}</div>
+              <div class="wc-soul-strip-item">📌 记得 {{ soulSnap.details?.total ?? 0 }} 件小事 · 💞 关系 {{ soulSnap.relationship ?? 0 }} 条</div>
+            </div>
             <hr class="wc-split" />
             <!-- ★ 灵魂面板（折叠展开） -->
             <div class="wc-soul" v-if="soulSnap">
@@ -1512,6 +1526,9 @@ async function testReply() {
   text-align: left;
 }
 .wc-soul-toggle:hover { color: #fab5d6; }
+.wc-soul-strip { display: flex; flex-direction: column; gap: 4px; padding: 9px 11px; border-radius: 10px; background: linear-gradient(135deg, rgba(139, 92, 246, 0.10), rgba(56, 189, 248, 0.08)); border: 1px solid rgba(139, 92, 246, 0.18); }
+.wc-soul-strip-item { font-size: 11px; color: var(--color-text-secondary); line-height: 1.5; word-break: break-word; }
+.wc-soul-strip-day { color: var(--color-accent); font-weight: 600; font-size: 12px; }
 .wc-soul-banner { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: var(--glass-card); border: 1px solid var(--glass-border); }
 .wc-soul-banner-day { font-size: 13px; font-weight: 600; color: var(--color-accent); margin-bottom: 4px; }
 .wc-soul-topics { color: var(--color-text-secondary); font-style: italic; margin-top: 2px; }
