@@ -34,7 +34,12 @@
 Windows NSIS 安装器使用 ClawDesk 专属深空蓝品牌视觉：原子轨道图标、深空渐变、
 “桌面上的 AI 生命体”标语，并支持简体中文/English、当前用户安装和桌面/开始菜单快捷方式。
 
-安装包输出：
+安装包下载：
+
+- [ClawDesk_0.8.0_x64-setup.exe](./release/ClawDesk_0.8.0_x64-setup.exe)（Windows x64）
+- SHA-256：`3ea7b726c8d41481d14546c5fd16f089daad78a0e8df63cc5b41f1784779a085`
+
+本地构建输出：
 
 ```text
 src-tauri/target/release/bundle/nsis/ClawDesk_0.8.0_x64-setup.exe
