@@ -23,6 +23,11 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 /// 一条生命叙事。
+
+fn default_kind() -> String {
+    "daily".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Narrative {
     /// 毫秒时间戳
@@ -33,6 +38,10 @@ pub struct Narrative {
     pub text: String,
     /// 情绪色彩（开心/低落/想念/平静…）
     pub emotion: String,
+    /// 叙事种类："daily" = 每日巩固，"topic_cluster" = 话题聚类结果。
+    /// 旧数据无此字段 → serde 用 default 补 "daily"（向前兼容）。
+    #[serde(default = "default_kind")]
+    pub kind: String,
 }
 
 static NARRATIVES: OnceLock<Mutex<Vec<Narrative>>> = OnceLock::new();
@@ -84,7 +93,9 @@ pub fn init() {
     }
     let last_day = list.last().map(|n| n.day.clone());
     *narratives().lock().unwrap_or_else(|e| e.into_inner()) = list.clone();
-    *last_consolidated().lock().unwrap_or_else(|e| e.into_inner()) = last_day;
+    *last_consolidated()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = last_day;
     eprintln!("[NARRATIVE] 📖 生命叙事恢复：{} 条", list.len());
 }
 
@@ -95,6 +106,7 @@ fn push_narrative(text: String, emotion: String) {
         day: today_str(),
         text,
         emotion,
+        kind: "daily".to_string(),
     };
     let mut g = narratives().lock().unwrap_or_else(|e| e.into_inner());
     g.push(n.clone());
@@ -109,7 +121,9 @@ fn push_narrative(text: String, emotion: String) {
             let _ = writeln!(f, "{json}");
         }
     }
-    *last_consolidated().lock().unwrap_or_else(|e| e.into_inner()) = Some(n.day);
+    *last_consolidated()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(n.day);
 }
 
 /// 每日巩固：跨天时把昨天沉淀成一条叙事（每天最多一次，幂等）。
@@ -117,7 +131,9 @@ fn push_narrative(text: String, emotion: String) {
 pub fn consolidate_if_new_day() {
     let today = today_str();
     {
-        let last = last_consolidated().lock().unwrap_or_else(|e| e.into_inner());
+        let last = last_consolidated()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if last.as_deref() == Some(today.as_str()) {
             return; // 今天已巩固过
         }
@@ -179,6 +195,88 @@ fn build_narrative_text(mood: &str, living: &str, emotion: &str) -> String {
     }
 }
 
+/// 情绪/活动关键词表（纯本地规则，不烧 LLM）：
+/// 从叙事文本中提取这些词的共现频率，聚合出"最近生活的主题"。
+const TOPIC_KEYWORDS: &[(&str, &str)] = &[
+    ("想你", "想你"), ("惦记", "惦记"), ("想念", "想念"),
+    ("低落", "低落"), ("孤单", "孤单"), ("孤独", "孤独"),
+    ("开心", "开心"), ("轻快", "开心"), ("开心地", "开心"),
+    ("工作", "工作"), ("忙", "忙碌"), ("加班", "忙碌"),
+    ("电影", "观影"), ("剧", "观影"), ("综艺", "娱乐"),
+    ("歌", "音乐"), ("音乐", "音乐"),
+    ("游戏", "游戏"), ("打游戏", "游戏"), ("排位", "游戏"),
+    ("吃", "吃"), ("饭", "吃"), ("火锅", "吃"), ("奶茶", "吃"), ("咖啡", "吃"),
+    ("睡", "睡眠"), ("失眠", "睡眠"), ("熬夜", "睡眠"), ("觉", "睡眠"),
+    ("书", "书"), ("读", "读书"), ("写作", "写作"),
+    ("散步", "散步"), ("跑步", "运动"), ("健身", "运动"), ("锻炼", "运动"),
+    ("旅行", "旅行"), ("出差", "旅行"), ("出门", "出门"),
+    ("家里", "家"), ("回家", "家"), ("猫", "猫"), ("狗", "宠物"),
+    ("雨", "天气"), ("晴", "天气"), ("冷", "天气"), ("热", "天气"),
+];
+
+/// 话题聚类（本地关键字共现，不烧 token）：
+/// 扫描最近 `window_days` 天的 "daily" 叙事，统计情绪/活动词的出现频率，
+/// 返回一个"最近生活的主题"摘要。这是 soul-protocol "dream cycle → topic
+/// clustering" 的纯本地子集——让梦境引用/突然想起有跨时间的连贯感。
+///
+/// 返回 None 表示叙事太少或没有高置信主题。
+pub fn topic_clusters(window_days: i64) -> Option<String> {
+    use std::collections::HashMap;
+    let today = Local::now().date_naive();
+    let g = narratives().lock().unwrap_or_else(|e| e.into_inner());
+    let recent: Vec<&Narrative> = g
+        .iter()
+        .filter(|n| {
+            n.kind == "daily"
+                && chrono::NaiveDate::parse_from_str(&n.day, "%Y-%m-%d")
+                    .map(|d| {
+                        let age = today.signed_duration_since(d).num_days();
+                        age >= 0 && age <= window_days
+                    })
+                    .unwrap_or(false)
+        })
+        .collect();
+    // 至少 3 条叙事才有聚类意义（样本太少只是噪声）
+    if recent.len() < 3 {
+        return None;
+    }
+    let mut freq: HashMap<&str, usize> = HashMap::new();
+    for n in recent.iter() {
+        for (kw, topic) in TOPIC_KEYWORDS {
+            if n.text.contains(kw) {
+                *freq.entry(topic).or_insert(0) += 1;
+            }
+        }
+    }
+    // 情绪也可能形成主题（连续几天低落/开心）
+    let mut emotion_freq: HashMap<&str, usize> = HashMap::new();
+    for n in recent.iter() {
+        if !n.emotion.is_empty() {
+            *emotion_freq.entry(n.emotion.as_str()).or_insert(0) += 1;
+        }
+    }
+    // 取出现 ≥2 次的主题，按频次排序
+    let mut topics: Vec<(&str, usize)> = freq
+        .iter()
+        .filter(|(_, c)| **c >= 2)
+        .map(|(t, c)| (*t, *c))
+        .collect();
+    if let Some((e, c)) = emotion_freq.iter().max_by_key(|(_, c)| *c) {
+        if *c >= 2 {
+            topics.push((*e, *c));
+        }
+    }
+    topics.sort_by(|a, b| b.1.cmp(&a.1));
+    if topics.is_empty() {
+        return None;
+    }
+    let top: Vec<&str> = topics.iter().take(3).map(|(t, _)| *t).collect();
+    Some(format!(
+        "最近 {window_days} 天里，你的生活反复出现这些主题：{}",
+        top.join("、")
+    ))
+}
+
 /// 梦境引用：低频随机返回一条旧叙事，作为"我梦见/我突然想起…"的由头。
 /// 参数 max_age_days：最多回忆多少天前的叙事（太久远的更像"梦"而非"最近"）。
 /// 返回 None 表示暂无可引用的旧叙事。
@@ -193,18 +291,25 @@ pub fn dream_recall(recall_prob: f64, max_age_days: i64) -> Option<String> {
     // 收集"最近 max_age_days 天内、且不是今天"的叙事
     let candidates: Vec<&Narrative> = g
         .iter()
-        .filter(|n| {
-            match chrono::NaiveDate::parse_from_str(&n.day, "%Y-%m-%d") {
+        .filter(
+            |n| match chrono::NaiveDate::parse_from_str(&n.day, "%Y-%m-%d") {
                 Ok(d) => {
                     let age = today.signed_duration_since(d).num_days();
                     age > 0 && age <= max_age_days
                 }
                 Err(_) => false,
-            }
-        })
+            },
+        )
         .collect();
     if candidates.is_empty() {
         return None;
+    }
+    // ★ 30% 概率返回"最近生活的主题"（话题聚类），70% 返回具体某天的事——
+    //   真人回忆有时是"最近总在牵挂什么"，有时是"突然想起那天"。
+    if rand_f64() < 0.30 {
+        if let Some(cluster) = topic_clusters(14) {
+            return Some(cluster);
+        }
     }
     // 随机挑一条
     let idx = (rand_f64() * candidates.len() as f64) as usize;
@@ -232,7 +337,10 @@ mod tests {
     static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
     #[allow(dead_code)]
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        SERIAL.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        SERIAL
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -245,7 +353,35 @@ mod tests {
 
     #[test]
     fn build_narrative_text_uses_living_fragment() {
-        let t = build_narrative_text("平静", "你今天的生活：08:00 🥛 在吃早饭；20:00 🎮 在放松", "平静");
+        let t = build_narrative_text(
+            "平静",
+            "你今天的生活：08:00 🥛 在吃早饭；20:00 🎮 在放松",
+            "平静",
+        );
         assert!(t.contains("在放松"), "应包含最后一段活动，got {}", t);
+    }
+
+    #[test]
+    fn topic_clusters_detects_recurring_theme() {
+        let _g = lock();
+        // 清空全局叙事，注入 3 条重复"游戏/吃"的叙事
+        {
+            let mut list = narratives().lock().unwrap_or_else(|e| e.into_inner());
+            list.clear();
+            let today = today_str();
+            for _ in 0..3 {
+                list.push(Narrative {
+                    ts_ms: now_ms(),
+                    day: today.clone(),
+                    text: "那天打游戏排位连跪，后来点了奶茶吃".to_string(),
+                    emotion: "平静".to_string(),
+                    kind: "daily".to_string(),
+                });
+            }
+        }
+        let cluster = topic_clusters(7);
+        assert!(cluster.is_some(), "应有聚类结果");
+        let s = cluster.unwrap();
+        assert!(s.contains("游戏") || s.contains("吃"), "应包含高频主题，got {}", s);
     }
 }

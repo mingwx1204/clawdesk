@@ -11,8 +11,8 @@
 //! - 错误类型从 crate::error::AppError 适配为 Result<T, String>（新版命令惯例）
 //! - 其余协议 / 加密 / 循环逻辑与旧版完全一致（旧版已实测打通）
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use aes::Aes128;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use cipher::generic_array::GenericArray;
 use cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use futures_util::FutureExt;
@@ -335,10 +335,14 @@ fn build_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    h.insert("AuthorizationType", HeaderValue::from_static("ilink_bot_token"));
+    h.insert(
+        "AuthorizationType",
+        HeaderValue::from_static("ilink_bot_token"),
+    );
     h.insert(
         "X-WECHAT-UIN",
-        HeaderValue::from_str(&random_wechat_uin()).unwrap_or_else(|_| HeaderValue::from_static("MA==")),
+        HeaderValue::from_str(&random_wechat_uin())
+            .unwrap_or_else(|_| HeaderValue::from_static("MA==")),
     );
     if let Some(t) = token {
         let t = t.trim();
@@ -596,19 +600,18 @@ async fn process_media_item(
         }
         _ => return None,
     };
-    let encrypt_query_param = media["encrypt_query_param"].as_str().unwrap_or("").to_string();
+    let encrypt_query_param = media["encrypt_query_param"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     let full_url = media["full_url"].as_str().map(|s| s.to_string());
     if encrypt_query_param.is_empty() && full_url.as_deref().unwrap_or("").is_empty() {
         return None;
     }
     let aes_key = aes_key_b64?;
-    let bytes = download_media_decrypted(
-        client,
-        &encrypt_query_param,
-        &aes_key,
-        full_url.as_deref(),
-    )
-    .await?;
+    let bytes =
+        download_media_decrypted(client, &encrypt_query_param, &aes_key, full_url.as_deref())
+            .await?;
     let ext = match kind {
         // ★ 图片按文件头识别真实格式（微信图片实际多为 JPEG，固定存 .png
         //   会导致 AI 端扩展名与内容不符 → 反复探测格式浪费轮次）
@@ -647,14 +650,16 @@ async fn process_media_item(
             // ZIP 解压为 CPU/IO 重活 → 移到阻塞线程池，避免卡住 getupdates 异步循环
             let zip_path = path.clone();
             let parent = dir.to_path_buf();
-            let extracted = tokio::task::spawn_blocking(move || {
-                extract_zip_archive(&zip_path, &parent)
-            })
-            .await
-            .ok()
-            .and_then(|r| r.ok());
+            let extracted =
+                tokio::task::spawn_blocking(move || extract_zip_archive(&zip_path, &parent))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok());
             if let Some(extract_dir) = extracted {
-                crate::llm::logging::debug("wechat", &format!("压缩包 {} 已解压到: {}", fname, extract_dir.display()));
+                crate::llm::logging::debug(
+                    "wechat",
+                    &format!("压缩包 {} 已解压到: {}", fname, extract_dir.display()),
+                );
                 return Some((
                     extract_dir.to_string_lossy().to_string(),
                     WechatMediaKind::File,
@@ -720,9 +725,7 @@ async fn parse_ref_msg(
     // 被引用媒体（图片/语音/视频/文件）：下载解密到附件目录供 AI 读取
     if let Some(t) = message_item["type"].as_i64() {
         if (2..=5).contains(&t) {
-            if let Some((path, kind, _)) =
-                process_media_item(client, message_item, inbound).await
-            {
+            if let Some((path, kind, _)) = process_media_item(client, message_item, inbound).await {
                 match kind {
                     WechatMediaKind::Image => images.push(path),
                     _ => attachments.push(path),
@@ -765,7 +768,9 @@ fn extract_zip_archive(
     let mut total: u64 = 0;
     const MAX_EXTRACT_BYTES: u64 = 20 * 1024 * 1024;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("读取压缩包条目失败: {e}"))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取压缩包条目失败: {e}"))?;
         let name = entry.name().to_string();
         let clean = name.replace('\\', "/");
         if clean.starts_with('/') || clean.split('/').any(|seg| seg == "..") {
@@ -878,7 +883,9 @@ fn last_history_peer(inner: &Arc<WechatInner>) -> Option<String> {
 
 /// 持久化主动聊天设置 + 白名单 + 音色（应用退出 / 重启后恢复上次配置，不丢用户设置）
 fn save_proactive(inner: &Arc<WechatInner>) {
-    let Some(path) = proactive_file(inner) else { return };
+    let Some(path) = proactive_file(inner) else {
+        return;
+    };
     let data = serde_json::json!({
         "enabled": inner.proactive_enabled.load(Ordering::SeqCst),
         "intervalMin": *inner.proactive_interval_min.lock(),
@@ -902,9 +909,15 @@ fn save_proactive(inner: &Arc<WechatInner>) {
 
 /// 从磁盘恢复主动聊天设置（应用启动 / Bot 启动时调用；文件不存在则保持默认）
 fn load_proactive(inner: &Arc<WechatInner>) {
-    let Some(path) = proactive_file(inner) else { return };
-    let Ok(text) = std::fs::read_to_string(&path) else { return };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(path) = proactive_file(inner) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
     if let Some(enabled) = v.get("enabled").and_then(|x| x.as_bool()) {
         inner.proactive_enabled.store(enabled, Ordering::SeqCst);
     }
@@ -975,9 +988,18 @@ fn load_proactive(inner: &Arc<WechatInner>) {
     }
     // ★ 磁盘目标为空（未手动指定过）→ 从聊天记录恢复最近聊过的人，
     //   否则「自动（最近聊过的人）」重启后 target 为 None，主动聊天永不触发
-    if inner.proactive_target.lock().as_deref().map(|t| t.is_empty()).unwrap_or(true) {
+    if inner
+        .proactive_target
+        .lock()
+        .as_deref()
+        .map(|t| t.is_empty())
+        .unwrap_or(true)
+    {
         if let Some(peer) = last_history_peer(inner) {
-            crate::llm::logging::debug("wechat", &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer));
+            crate::llm::logging::debug(
+                "wechat",
+                &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer),
+            );
             *inner.proactive_target.lock() = Some(peer);
         }
     }
@@ -1006,8 +1028,8 @@ fn slot_dir(inner: &Arc<WechatInner>) -> Option<PathBuf> {
 fn ensure_writable(path: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
-        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY,
-        FILE_FLAGS_AND_ATTRIBUTES, INVALID_FILE_ATTRIBUTES,
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES,
+        INVALID_FILE_ATTRIBUTES,
     };
     let wide: Vec<u16> = path
         .as_os_str()
@@ -1064,7 +1086,9 @@ pub(crate) fn append_history(
     from_bot: bool,
     proactive: bool,
 ) {
-    let Some(path) = history_path_of(inner) else { return };
+    let Some(path) = history_path_of(inner) else {
+        return;
+    };
     let rec = serde_json::json!({
         "dir": dir,
         "botSlot": inner.slot,
@@ -1078,7 +1102,11 @@ pub(crate) fn append_history(
     });
     let line = format!("{}\n", rec.to_string());
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -1090,12 +1118,13 @@ pub(crate) fn read_history(inner: &Arc<WechatInner>) -> Vec<serde_json::Value> {
 
 /// 读取该微信聊天记录（limit=0 表示全部；>0 时只解析最近 limit 条，
 /// 供 5 秒轮询 / 主动聊天每轮使用，避免 history.jsonl 无界增长拖慢热路径）
-pub(crate) fn read_history_limit(
-    inner: &Arc<WechatInner>,
-    limit: usize,
-) -> Vec<serde_json::Value> {
-    let Some(path) = history_path_of(inner) else { return vec![] };
-    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+pub(crate) fn read_history_limit(inner: &Arc<WechatInner>, limit: usize) -> Vec<serde_json::Value> {
+    let Some(path) = history_path_of(inner) else {
+        return vec![];
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
     let lines: Vec<&str> = text.lines().collect();
     if limit > 0 && lines.len() > limit {
         lines[lines.len() - limit..]
@@ -1111,7 +1140,9 @@ pub(crate) fn read_history_limit(
 }
 
 async fn save_account(inner: &Arc<WechatInner>) {
-    let Some(path) = account_file(inner) else { return };
+    let Some(path) = account_file(inner) else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -1156,7 +1187,9 @@ async fn save_account(inner: &Arc<WechatInner>) {
 }
 
 async fn load_account(inner: &Arc<WechatInner>) {
-    let Some(path) = account_file(inner) else { return };
+    let Some(path) = account_file(inner) else {
+        return;
+    };
     if let Ok(bytes) = tokio::fs::read(&path).await {
         let was_plain = !bytes.starts_with(ENC_MAGIC);
         let plain: Option<Vec<u8>> = if bytes.starts_with(ENC_MAGIC) {
@@ -1232,15 +1265,15 @@ async fn fetch_qr(client: &reqwest::Client) -> AppResult<QrSession> {
             trunc_chars(&text, 200)
         ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("解析二维码响应失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析二维码响应失败: {e}"))?;
     let qrcode = v["qrcode"].as_str().unwrap_or_default().to_string();
-    let qrcode_url = v["qrcode_img_content"].as_str().unwrap_or_default().to_string();
+    let qrcode_url = v["qrcode_img_content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     if qrcode.is_empty() || qrcode_url.is_empty() {
-        return Err(format!(
-            "二维码响应异常: {}",
-            trunc_chars(&text, 200)
-        ));
+        return Err(format!("二维码响应异常: {}", trunc_chars(&text, 200)));
     }
     Ok(QrSession {
         qrcode,
@@ -1289,8 +1322,12 @@ pub(crate) struct TypingTicketEntry {
 /// ★ 修复：ticket 按用户获取（带 context_token），status 用 1/2（对齐 AstrBot）：
 ///   旧实现用全局空 ticket + status=0，服务端不识别 → 对方看不到"正在输入"。
 async fn send_typing(inner: &Arc<WechatInner>, to: &str, active: bool) {
-    let Some(token) = inner.token.lock().clone() else { return };
-    let Some(ticket) = ensure_typing_ticket(inner, to).await else { return };
+    let Some(token) = inner.token.lock().clone() else {
+        return;
+    };
+    let Some(ticket) = ensure_typing_ticket(inner, to).await else {
+        return;
+    };
     let base_url = inner
         .base_url
         .lock()
@@ -1314,7 +1351,9 @@ async fn send_typing(inner: &Arc<WechatInner>, to: &str, active: bool) {
 /// 缓存有效（ctx 匹配 + 未过期）→ 复用；否则调 getconfig 现取。
 /// 没有该用户的 context_token 时返回 None（无法获取，跳过 typing）。
 async fn ensure_typing_ticket(inner: &Arc<WechatInner>, to: &str) -> Option<String> {
-    let Some(token) = inner.token.lock().clone() else { return None };
+    let Some(token) = inner.token.lock().clone() else {
+        return None;
+    };
     let base_url = inner
         .base_url
         .lock()
@@ -1369,7 +1408,9 @@ async fn refresh_typing_ticket(inner: &Arc<WechatInner>) {
 
 /// 通知腾讯服务"客户端已启动"（sendmessage 前置条件，缺省会返回 -14 session timeout）
 async fn notify_start(inner: &Arc<WechatInner>) -> bool {
-    let Some(token) = inner.token.lock().clone() else { return false };
+    let Some(token) = inner.token.lock().clone() else {
+        return false;
+    };
     let base_url = inner
         .base_url
         .lock()
@@ -1390,7 +1431,10 @@ async fn notify_start(inner: &Arc<WechatInner>) -> bool {
             let text = r.text().await.unwrap_or_default();
             crate::llm::logging::debug(
                 "wechat",
-                &format!("notifyStart status={status} body={}", trunc_chars(&text, 200))
+                &format!(
+                    "notifyStart status={status} body={}",
+                    trunc_chars(&text, 200)
+                ),
             );
             if !status.is_success() {
                 return false;
@@ -1401,7 +1445,10 @@ async fn notify_start(inner: &Arc<WechatInner>) -> bool {
                 if ret != 0 {
                     crate::llm::logging::debug(
                         "wechat",
-                        &format!("notifyStart ret={ret} errmsg={}", v["errmsg"].as_str().unwrap_or(""))
+                        &format!(
+                            "notifyStart ret={ret} errmsg={}",
+                            v["errmsg"].as_str().unwrap_or("")
+                        ),
                     );
                     return false;
                 }
@@ -1435,7 +1482,10 @@ async fn send_message_once(
             "context_token": context_token.unwrap_or(""),
         }
     });
-    crate::llm::logging::debug("wechat", &format!("发送文本消息 to={} len={}", to, text.len()));
+    crate::llm::logging::debug(
+        "wechat",
+        &format!("发送文本消息 to={} len={}", to, text.len()),
+    );
     let resp = client
         .post(format!("{base_url}/ilink/bot/sendmessage"))
         .headers(build_headers(Some(token)))
@@ -1457,7 +1507,10 @@ async fn send_message_once(
     }
     // 腾讯可能返回 HTTP 200 但业务错误码（-14 = session timeout）
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text_resp) {
-        let ret = v["ret"].as_i64().or_else(|| v["errcode"].as_i64()).unwrap_or(0);
+        let ret = v["ret"]
+            .as_i64()
+            .or_else(|| v["errcode"].as_i64())
+            .unwrap_or(0);
         if ret != 0 {
             let errmsg = v["errmsg"].as_str().unwrap_or("");
             eprintln!("[wechat] sendmessage business error ret={ret} errmsg={errmsg}");
@@ -1558,16 +1611,25 @@ async fn upload_image_to_cdn(
             trunc_chars(&text, 200)
         ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("解析 getuploadurl 响应失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 getuploadurl 响应失败: {e}"))?;
     if v["ret"].as_i64().unwrap_or(0) != 0 {
-        return Err(format!("getuploadurl ret={} errmsg={}", v["ret"], v["errmsg"].as_str().unwrap_or("")));
+        return Err(format!(
+            "getuploadurl ret={} errmsg={}",
+            v["ret"],
+            v["errmsg"].as_str().unwrap_or("")
+        ));
     }
     let upload_full_url = v["upload_full_url"].as_str().unwrap_or("").to_string();
     let upload_param = v["upload_param"].as_str().unwrap_or("").to_string();
     let cdn_url = if !upload_full_url.is_empty() {
         upload_full_url
     } else if !upload_param.is_empty() {
-        format!("{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={}", urlencode(&upload_param), urlencode(&filekey))
+        format!(
+            "{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={}",
+            urlencode(&upload_param),
+            urlencode(&filekey)
+        )
     } else {
         return Err(format!(
             "getuploadurl 未返回上传地址: {}",
@@ -1588,7 +1650,12 @@ async fn upload_image_to_cdn(
         .get("x-encrypted-param")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("CDN 上传响应缺少 x-encrypted-param（HTTP {}）", resp.status()))?;
+        .ok_or_else(|| {
+            format!(
+                "CDN 上传响应缺少 x-encrypted-param（HTTP {}）",
+                resp.status()
+            )
+        })?;
     Ok((dl, BASE64.encode(&aeskey), filekey))
 }
 
@@ -1692,10 +1759,17 @@ async fn send_image_once(
             "sendimage to={} filekey={} ctx={}",
             to,
             filekey,
-            if context_token.unwrap_or("").is_empty() { "NONE" } else { "YES" }
+            if context_token.unwrap_or("").is_empty() {
+                "NONE"
+            } else {
+                "YES"
+            }
         ),
     );
-    crate::llm::logging::debug("wechat", &format!("发送图片消息 to={} file={}", to, image_path));
+    crate::llm::logging::debug(
+        "wechat",
+        &format!("发送图片消息 to={} file={}", to, image_path),
+    );
     let resp = client
         .post(format!("{base_url}/ilink/bot/sendmessage"))
         .headers(build_headers(Some(token)))
@@ -1715,11 +1789,17 @@ async fn send_image_once(
         ));
     }
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text_resp) {
-        let ret = v["ret"].as_i64().or_else(|| v["errcode"].as_i64()).unwrap_or(0);
+        let ret = v["ret"]
+            .as_i64()
+            .or_else(|| v["errcode"].as_i64())
+            .unwrap_or(0);
         if ret != 0 {
             let errmsg = v["errmsg"].as_str().unwrap_or("");
             eprintln!("[wechat] sendimage business error ret={ret} errmsg={errmsg}");
-            return Err((format!("微信图片发送失败 ret={ret} errmsg={errmsg}"), Some(ret)));
+            return Err((
+                format!("微信图片发送失败 ret={ret} errmsg={errmsg}"),
+                Some(ret),
+            ));
         }
     }
     Ok(())
@@ -1778,16 +1858,25 @@ async fn upload_file_to_cdn(
             trunc_chars(&text, 200)
         ));
     }
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("解析 getuploadurl 响应失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("解析 getuploadurl 响应失败: {e}"))?;
     if v["ret"].as_i64().unwrap_or(0) != 0 {
-        return Err(format!("getuploadurl ret={} errmsg={}", v["ret"], v["errmsg"].as_str().unwrap_or("")));
+        return Err(format!(
+            "getuploadurl ret={} errmsg={}",
+            v["ret"],
+            v["errmsg"].as_str().unwrap_or("")
+        ));
     }
     let upload_full_url = v["upload_full_url"].as_str().unwrap_or("").to_string();
     let upload_param = v["upload_param"].as_str().unwrap_or("").to_string();
     let cdn_url = if !upload_full_url.is_empty() {
         upload_full_url
     } else if !upload_param.is_empty() {
-        format!("{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={}", urlencode(&upload_param), urlencode(&filekey))
+        format!(
+            "{CDN_BASE_URL}/upload?encrypted_query_param={}&filekey={}",
+            urlencode(&upload_param),
+            urlencode(&filekey)
+        )
     } else {
         return Err(format!(
             "getuploadurl 未返回上传地址: {}",
@@ -1808,7 +1897,12 @@ async fn upload_file_to_cdn(
         .get("x-encrypted-param")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("CDN 上传响应缺少 x-encrypted-param（HTTP {}）", resp.status()))?;
+        .ok_or_else(|| {
+            format!(
+                "CDN 上传响应缺少 x-encrypted-param（HTTP {}）",
+                resp.status()
+            )
+        })?;
     Ok((dl, BASE64.encode(&aeskey), filekey))
 }
 
@@ -1888,7 +1982,10 @@ async fn send_file_once(
             "context_token": context_token.unwrap_or(""),
         }
     });
-    crate::llm::logging::debug("wechat", &format!("发送文件消息 to={} file={}", to, file_path));
+    crate::llm::logging::debug(
+        "wechat",
+        &format!("发送文件消息 to={} file={}", to, file_path),
+    );
     let resp = client
         .post(format!("{base_url}/ilink/bot/sendmessage"))
         .headers(build_headers(Some(token)))
@@ -1900,16 +1997,25 @@ async fn send_file_once(
     let text_resp = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err((
-            format!("发送文件消息失败 HTTP {status}: {}", trunc_chars(&text_resp, 200)),
+            format!(
+                "发送文件消息失败 HTTP {status}: {}",
+                trunc_chars(&text_resp, 200)
+            ),
             None,
         ));
     }
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text_resp) {
-        let ret = v["ret"].as_i64().or_else(|| v["errcode"].as_i64()).unwrap_or(0);
+        let ret = v["ret"]
+            .as_i64()
+            .or_else(|| v["errcode"].as_i64())
+            .unwrap_or(0);
         if ret != 0 {
             let errmsg = v["errmsg"].as_str().unwrap_or("");
             eprintln!("[wechat] sendfile business error ret={ret} errmsg={errmsg}");
-            return Err((format!("微信文件发送失败 ret={ret} errmsg={errmsg}"), Some(ret)));
+            return Err((
+                format!("微信文件发送失败 ret={ret} errmsg={errmsg}"),
+                Some(ret),
+            ));
         }
     }
     Ok(())
@@ -1943,7 +2049,10 @@ pub async fn wechat_send_voice(
                 match crate::commands::tts::synthesize_audio_indextts(&text, &p, &url).await {
                     Ok(a) => a,
                     Err(e) => {
-                        crate::llm::logging::debug("wechat", &format!("IndexTTS2 合成失败（回退 Edge TTS）: {e}"));
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!("IndexTTS2 合成失败（回退 Edge TTS）: {e}"),
+                        );
                         crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                             .await
                             .map_err(|e2| format!("语音合成失败: {e2}"))?
@@ -1951,7 +2060,10 @@ pub async fn wechat_send_voice(
                 }
             }
             _ => {
-                crate::llm::logging::debug("wechat", &format!("未配置 IndexTTS2 参考音频，回退 Edge TTS"));
+                crate::llm::logging::debug(
+                    "wechat",
+                    &format!("未配置 IndexTTS2 参考音频，回退 Edge TTS"),
+                );
                 crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                     .await
                     .map_err(|e| format!("语音合成失败: {e}"))?
@@ -1965,7 +2077,10 @@ pub async fn wechat_send_voice(
                 match crate::commands::tts::synthesize_audio_cosyvoice(&text, &v, &k).await {
                     Ok(a) => a,
                     Err(e) => {
-                        crate::llm::logging::debug("wechat", &format!("CosyVoice 合成失败（回退 Edge TTS）: {e}"));
+                        crate::llm::logging::debug(
+                            "wechat",
+                            &format!("CosyVoice 合成失败（回退 Edge TTS）: {e}"),
+                        );
                         crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                             .await
                             .map_err(|e2| format!("语音合成失败: {e2}"))?
@@ -1973,7 +2088,10 @@ pub async fn wechat_send_voice(
                 }
             }
             _ => {
-                crate::llm::logging::debug("wechat", &format!("未配置 CosyVoice API Key，回退 Edge TTS"));
+                crate::llm::logging::debug(
+                    "wechat",
+                    &format!("未配置 CosyVoice API Key，回退 Edge TTS"),
+                );
                 crate::commands::tts::synthesize_audio(&text, &voice_id, 1.0, "")
                     .await
                     .map_err(|e| format!("语音合成失败: {e}"))?
@@ -1998,9 +2116,25 @@ pub async fn wechat_send_voice(
     crate::executors::builtin::attachment::cleanup_old_files(&out_dir, 7, 1);
     // 3) 发送文件（file_item），文件名带"语音"标记便于识别
     let ctx = inner.context_map.lock().get(&to_user).cloned();
-    send_file(&inner, &to_user, &path.to_string_lossy(), Some(&fname), ctx.as_deref()).await?;
+    send_file(
+        &inner,
+        &to_user,
+        &path.to_string_lossy(),
+        Some(&fname),
+        ctx.as_deref(),
+    )
+    .await?;
     append_history(&inner, &to_user, &to_user, &text, "voice", true, false);
-    crate::llm::logging::debug("wechat", &format!("slot{} 语音回复已发送 to={} voice={} bytes={}", inner.slot, to_user, voice_id, audio.len()));
+    crate::llm::logging::debug(
+        "wechat",
+        &format!(
+            "slot{} 语音回复已发送 to={} voice={} bytes={}",
+            inner.slot,
+            to_user,
+            voice_id,
+            audio.len()
+        ),
+    );
     Ok(())
 }
 
@@ -2055,24 +2189,19 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                 inner2.connected.store(true, Ordering::SeqCst);
                 // ★ 修复：每轮重读 token/base_url，登出/重新扫码后立即生效，
                 //   不再用启动时捕获的旧 token 无限空转
-                let Some(token) = inner2
-                    .token
-                    .lock()
-                    .clone()
-                    .filter(|t| !t.is_empty())
-                else {
+                let Some(token) = inner2.token.lock().clone().filter(|t| !t.is_empty()) else {
                     eprintln!(
                         "[wechat] slot{} token 已清空（登出），停止 getupdates 循环",
                         inner2.slot
                     );
                     break;
                 };
-                    let base_url = inner2
-                        .base_url
-                        .lock()
-                        .clone()
-                        .unwrap_or_else(|| ILINK_BASE_URL.to_string());
-                    let resp = match client
+                let base_url = inner2
+                    .base_url
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| ILINK_BASE_URL.to_string());
+                let resp = match client
                         .post(format!("{base_url}/ilink/bot/getupdates"))
                         .headers(build_headers(Some(&token)))
                         .timeout(GETUPDATES_TIMEOUT)
@@ -2105,321 +2234,331 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
                         }
                     };
 
-                    // 更新同步 buf（bytes 字段为 base64 字符串）
-                    let mut state_dirty = false;
-                    if let Some(b) = resp["get_updates_buf"].as_str() {
-                        let b = b.trim();
-                        // ★ 修复：只接受非空且不回退的游标回显。
-                        //   空回显或游标回退会导致历史消息重放 → 一律忽略
-                        let forward = !b.is_empty()
-                            && b != buf
-                            && (b.len() > buf.len()
-                                || (b.len() == buf.len() && b.as_bytes() >= buf.as_bytes()));
-                        if forward {
-                            buf = b.to_string();
-                            *inner2.get_updates_buf.lock() = buf.clone();
-                            state_dirty = true;
-                        }
+                // 更新同步 buf（bytes 字段为 base64 字符串）
+                let mut state_dirty = false;
+                if let Some(b) = resp["get_updates_buf"].as_str() {
+                    let b = b.trim();
+                    // ★ 修复：只接受非空且不回退的游标回显。
+                    //   空回显或游标回退会导致历史消息重放 → 一律忽略
+                    let forward = !b.is_empty()
+                        && b != buf
+                        && (b.len() > buf.len()
+                            || (b.len() == buf.len() && b.as_bytes() >= buf.as_bytes()));
+                    if forward {
+                        buf = b.to_string();
+                        *inner2.get_updates_buf.lock() = buf.clone();
+                        state_dirty = true;
                     }
-                    *inner2.last_poll.lock() = now_millis();
+                }
+                *inner2.last_poll.lock() = now_millis();
 
-                    // 业务错误
-                    let ret = resp["ret"].as_i64().unwrap_or(0);
-                    let errcode = resp["errcode"].as_i64().unwrap_or(0);
-                    if ret != 0 || errcode != 0 {
-                        // ret/errcode = -14 表示 session 超时（token 失效），需重新扫码
-                        if ret == -14 || errcode == -14 {
-                            err14_count += 1;
-                            inner2.connected.store(false, Ordering::SeqCst);
-                            if err14_count >= 5 {
-                                // 连续 5 次会话失效 → 停止循环，通知前端重新扫码（防重连风暴）
-                                eprintln!(
-                                    "[wechat] slot{} session 连续失效 {} 次，停止轮询，请重新扫码登录",
-                                    inner2.slot, err14_count
-                                );
-                                let _ = app2.emit(
-                                    "wechat-bot-status",
-                                    serde_json::json!({ "type": "session_expired" }),
-                                );
-                                break;
-                            }
-                            // 指数退避（1s→2s→4s…封顶 60s），避免重连风暴
-                            let backoff = (1u64 << err14_count.saturating_sub(1)).min(60);
+                // 业务错误
+                let ret = resp["ret"].as_i64().unwrap_or(0);
+                let errcode = resp["errcode"].as_i64().unwrap_or(0);
+                if ret != 0 || errcode != 0 {
+                    // ret/errcode = -14 表示 session 超时（token 失效），需重新扫码
+                    if ret == -14 || errcode == -14 {
+                        err14_count += 1;
+                        inner2.connected.store(false, Ordering::SeqCst);
+                        if err14_count >= 5 {
+                            // 连续 5 次会话失效 → 停止循环，通知前端重新扫码（防重连风暴）
                             eprintln!(
+                                "[wechat] slot{} session 连续失效 {} 次，停止轮询，请重新扫码登录",
+                                inner2.slot, err14_count
+                            );
+                            let _ = app2.emit(
+                                "wechat-bot-status",
+                                serde_json::json!({ "type": "session_expired" }),
+                            );
+                            break;
+                        }
+                        // 指数退避（1s→2s→4s…封顶 60s），避免重连风暴
+                        let backoff = (1u64 << err14_count.saturating_sub(1)).min(60);
+                        eprintln!(
                                 "[wechat] slot{} session 超时(ret={ret} errcode={errcode})，{backoff} 秒后重试（{}/5）",
                                 inner2.slot, err14_count
                             );
-                            tokio::time::sleep(Duration::from_secs(backoff)).await;
-                            continue;
-                        }
-                        err14_count = 0;
-                        eprintln!(
-                            "[wechat] slot{} getupdates 业务错误 ret={ret} errcode={errcode}，1 秒后重试",
-                            inner2.slot
-                        );
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(backoff)).await;
                         continue;
                     }
                     err14_count = 0;
-                    inner2.connected.store(true, Ordering::SeqCst);
+                    eprintln!(
+                            "[wechat] slot{} getupdates 业务错误 ret={ret} errcode={errcode}，1 秒后重试",
+                            inner2.slot
+                        );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                err14_count = 0;
+                inner2.connected.store(true, Ordering::SeqCst);
 
-            let msgs = resp["msgs"].as_array().cloned().unwrap_or_default();
-            if msgs.is_empty() {
-                continue;
-            }
-            for m in msgs {
-                // 仅处理用户消息（1=USER），机器人消息（2）跳过
-                if m["message_type"].as_i64() != Some(MSG_TYPE_USER) {
+                let msgs = resp["msgs"].as_array().cloned().unwrap_or_default();
+                if msgs.is_empty() {
                     continue;
                 }
-                let from = m["from_user_id"].as_str().unwrap_or_default().to_string();
-                if from.is_empty() {
-                    continue;
-                }
-                // ★ 聊天白名单（只和指定的人聊天）：白名单非空时，名单外的
-                //   用户消息直接忽略（不自动回复、不进入最近聊天、不主动找）
-                if !inner2.is_allowed(&from) {
-                    crate::llm::logging::debug(
-                        "wechat",
-                        &format!(
-                            "slot{} 白名单拦截: from={}（该微信只与 {} 位指定用户聊天）",
-                            inner2.slot,
-                            from,
-                            inner2.allowed_users.lock().len()
-                        )
-                    );
-                    continue;
-                }
-                let context_token = m["context_token"].as_str().unwrap_or_default().to_string();
-
-                // ★ 消息去重提前（对齐 AstrBot dedup 思路）：getupdates 偶尔会重复投递
-                //   同一消息，必须在媒体下载/写盘之前判定，避免重复投递反复下载解密写盘。
-                //   无 seq 的消息用内容哈希兜底（type+content 前 200 字符），保证也能去重。
-                let msg_id = m["seq"]
-                    .as_i64()
-                    .map(|s| s.to_string())
-                    .or_else(|| m["message_id"].as_i64().map(|s| s.to_string()))
-                    .unwrap_or_else(|| {
-                        let raw = serde_json::to_string(&m["item_list"]).unwrap_or_default();
-                        let key = trunc_chars(&raw, 200);
-                        format!("h:{}", md5_hex(key.as_bytes()))
-                    });
-                {
-                    let mut seen = inner2.last_msg_ids.lock();
-                    if seen.contains(&msg_id) {
+                for m in msgs {
+                    // 仅处理用户消息（1=USER），机器人消息（2）跳过
+                    if m["message_type"].as_i64() != Some(MSG_TYPE_USER) {
+                        continue;
+                    }
+                    let from = m["from_user_id"].as_str().unwrap_or_default().to_string();
+                    if from.is_empty() {
+                        continue;
+                    }
+                    // ★ 聊天白名单（只和指定的人聊天）：白名单非空时，名单外的
+                    //   用户消息直接忽略（不自动回复、不进入最近聊天、不主动找）
+                    if !inner2.is_allowed(&from) {
                         crate::llm::logging::debug(
                             "wechat",
-                            &format!("slot{} 跳过重复消息 msg_id={} from={}", inner2.slot, msg_id, from)
+                            &format!(
+                                "slot{} 白名单拦截: from={}（该微信只与 {} 位指定用户聊天）",
+                                inner2.slot,
+                                from,
+                                inner2.allowed_users.lock().len()
+                            ),
                         );
                         continue;
                     }
-                    seen.push_back(msg_id.clone());
-                    while seen.len() > 100 {
-                        seen.pop_front();
-                    }
-                }
+                    let context_token = m["context_token"].as_str().unwrap_or_default().to_string();
 
-                // 提取文本 + 媒体（图片/文件/语音/视频，下载解密到附件目录）
-                // ★ 语音消息带腾讯云端转写文本（voice_item.text）→ 直接拼入文本，AI 听懂语音；
-                // ★ 引用消息（ref_msg）→ 解析被引用内容，AI 能看到用户引用了什么。
-                let mut text = String::new();
-                let mut images: Vec<String> = Vec::new();
-                let mut attachments: Vec<String> = Vec::new();
-                let mut quote_note: Option<String> = None;
-                let mut voice_transcript: Option<String> = None;
-                if let Some(items) = m["item_list"].as_array() {
-                    for item in items {
-                        // 引用消息元数据：跳过普通 item 处理，单独解析
-                        if item.get("ref_msg").is_some_and(|v| v.is_object()) {
-                            if let Ok(dir) =
-                                crate::executors::builtin::attachment::attach_dir()
-                            {
-                                let inbound = dir.join("inbound");
-                                let _ = std::fs::create_dir_all(&inbound);
-                                if let Some(info) =
-                                    parse_ref_msg(&client, &item["ref_msg"], &inbound).await
-                                {
-                                    quote_note = Some(info.note);
-                                    images.extend(info.images);
-                                    attachments.extend(info.attachments);
-                                }
-                            }
+                    // ★ 消息去重提前（对齐 AstrBot dedup 思路）：getupdates 偶尔会重复投递
+                    //   同一消息，必须在媒体下载/写盘之前判定，避免重复投递反复下载解密写盘。
+                    //   无 seq 的消息用内容哈希兜底（type+content 前 200 字符），保证也能去重。
+                    let msg_id = m["seq"]
+                        .as_i64()
+                        .map(|s| s.to_string())
+                        .or_else(|| m["message_id"].as_i64().map(|s| s.to_string()))
+                        .unwrap_or_else(|| {
+                            let raw = serde_json::to_string(&m["item_list"]).unwrap_or_default();
+                            let key = trunc_chars(&raw, 200);
+                            format!("h:{}", md5_hex(key.as_bytes()))
+                        });
+                    {
+                        let mut seen = inner2.last_msg_ids.lock();
+                        if seen.contains(&msg_id) {
+                            crate::llm::logging::debug(
+                                "wechat",
+                                &format!(
+                                    "slot{} 跳过重复消息 msg_id={} from={}",
+                                    inner2.slot, msg_id, from
+                                ),
+                            );
                             continue;
                         }
-                        match item["type"].as_i64() {
-                            Some(1) => {
-                                if let Some(t) = item["text_item"]["text"].as_str() {
-                                    if text.is_empty() {
-                                        text = t.to_string();
-                                    } else {
-                                        text.push_str(t);
-                                    }
-                                }
-                            }
-                            Some(2) | Some(3) | Some(4) | Some(5) => {
-                                if let Ok(dir) =
-                                    crate::executors::builtin::attachment::attach_dir()
+                        seen.push_back(msg_id.clone());
+                        while seen.len() > 100 {
+                            seen.pop_front();
+                        }
+                    }
+
+                    // 提取文本 + 媒体（图片/文件/语音/视频，下载解密到附件目录）
+                    // ★ 语音消息带腾讯云端转写文本（voice_item.text）→ 直接拼入文本，AI 听懂语音；
+                    // ★ 引用消息（ref_msg）→ 解析被引用内容，AI 能看到用户引用了什么。
+                    let mut text = String::new();
+                    let mut images: Vec<String> = Vec::new();
+                    let mut attachments: Vec<String> = Vec::new();
+                    let mut quote_note: Option<String> = None;
+                    let mut voice_transcript: Option<String> = None;
+                    if let Some(items) = m["item_list"].as_array() {
+                        for item in items {
+                            // 引用消息元数据：跳过普通 item 处理，单独解析
+                            if item.get("ref_msg").is_some_and(|v| v.is_object()) {
+                                if let Ok(dir) = crate::executors::builtin::attachment::attach_dir()
                                 {
                                     let inbound = dir.join("inbound");
                                     let _ = std::fs::create_dir_all(&inbound);
-                                    if let Some((path, kind, voice_text)) =
-                                        process_media_item(&client, item, &inbound).await
+                                    if let Some(info) =
+                                        parse_ref_msg(&client, &item["ref_msg"], &inbound).await
                                     {
-                                        match kind {
-                                            WechatMediaKind::Image => images.push(path),
-                                            _ => attachments.push(path),
+                                        quote_note = Some(info.note);
+                                        images.extend(info.images);
+                                        attachments.extend(info.attachments);
+                                    }
+                                }
+                                continue;
+                            }
+                            match item["type"].as_i64() {
+                                Some(1) => {
+                                    if let Some(t) = item["text_item"]["text"].as_str() {
+                                        if text.is_empty() {
+                                            text = t.to_string();
+                                        } else {
+                                            text.push_str(t);
                                         }
-                                        // 语音云端转写 → 拼入文本，AI 无需 ASR 即可听懂
-                                        if let Some(vt) = voice_text {
-                                            let vt = vt.trim();
-                                            if !vt.is_empty() {
-                                                voice_transcript = Some(vt.to_string());
-                                                if text.is_empty() {
-                                                    text = format!("[语音] {}", vt);
-                                                } else {
-                                                    text.push_str(&format!("\n[语音] {}", vt));
+                                    }
+                                }
+                                Some(2) | Some(3) | Some(4) | Some(5) => {
+                                    if let Ok(dir) =
+                                        crate::executors::builtin::attachment::attach_dir()
+                                    {
+                                        let inbound = dir.join("inbound");
+                                        let _ = std::fs::create_dir_all(&inbound);
+                                        if let Some((path, kind, voice_text)) =
+                                            process_media_item(&client, item, &inbound).await
+                                        {
+                                            match kind {
+                                                WechatMediaKind::Image => images.push(path),
+                                                _ => attachments.push(path),
+                                            }
+                                            // 语音云端转写 → 拼入文本，AI 无需 ASR 即可听懂
+                                            if let Some(vt) = voice_text {
+                                                let vt = vt.trim();
+                                                if !vt.is_empty() {
+                                                    voice_transcript = Some(vt.to_string());
+                                                    if text.is_empty() {
+                                                        text = format!("[语音] {}", vt);
+                                                    } else {
+                                                        text.push_str(&format!("\n[语音] {}", vt));
+                                                    }
                                                 }
                                             }
-                                        }
-                                    } else {
-                                        // ★ 媒体下载/解密失败不再静默：打日志便于排查
-                                        eprintln!(
+                                        } else {
+                                            // ★ 媒体下载/解密失败不再静默：打日志便于排查
+                                            eprintln!(
                                             "[wechat] slot{} 媒体处理失败 type={}（下载/解密/存盘异常），消息将缺失该媒体",
                                             inner2.slot,
                                             item["type"].as_i64().unwrap_or(-1)
                                         );
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
-                // 引用消息注记拼到文本最前（AI 优先看到用户引用了什么）
-                if let Some(q) = quote_note {
-                    if !q.is_empty() {
-                        if text.is_empty() {
-                            text = q;
+                    // 引用消息注记拼到文本最前（AI 优先看到用户引用了什么）
+                    if let Some(q) = quote_note {
+                        if !q.is_empty() {
+                            if text.is_empty() {
+                                text = q;
+                            } else {
+                                text = format!("{}\n{}", q, text);
+                            }
+                        }
+                    }
+                    crate::llm::logging::debug(
+                        "wechat",
+                        &format!(
+                            "received msg from={} ctx={} text={} media={}",
+                            from,
+                            if context_token.is_empty() {
+                                "NONE"
+                            } else {
+                                "YES"
+                            },
+                            trunc_chars(&text, 50),
+                            images.len() + attachments.len()
+                        ),
+                    );
+                    if text.trim().is_empty() && images.is_empty() && attachments.is_empty() {
+                        continue;
+                    }
+
+                    // ★ 热聊检测：记录用户最近发言时间（毫秒）。
+                    //   用户 30 分钟内回过消息 → 主动聊天进入热聊模式（短间隔续话）；
+                    //   长时间没人回 → 自然冷却回普通模式。
+                    *inner2.last_user_msg_at.lock() = now_millis();
+
+                    // ★ 情绪引擎：主人来消息了 → 愉悦升、孤独降、想念重置（"见到你就好了"）
+                    crate::mood::on_user_message();
+                    // ★ 驱动力：收到消息 → 渴望联结回落、害怕被遗忘缓解、顽皮升
+                    crate::drives::on_user_message();
+                    // ★ 人格演化：你的温柔回应让她慢慢变得更安心（OCEAN 极慢演化）
+                    if crate::wechat::random_f64() < 0.3 {
+                        crate::persona_traits::evolve(true);
+                    }
+                    // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
+                    crate::relationship::on_user_reach();
+                    // ★ 好感度：你主动来找她 → 好奇升（想知道你说啥）、信任微升
+                    crate::affinity::on_user_message();
+                    // ★ 深聊：消息较长（>80 字）说明在认真聊 → 信任、亲密明显升；
+                    //   特别长（>200 字）是倾诉心事 → 强烈升
+                    let len_chars = text.chars().count();
+                    if len_chars > 200 {
+                        crate::affinity::on_deep_talk_heavy();
+                    } else if len_chars > 80 {
+                        crate::affinity::on_deep_talk();
+                    }
+                    // ★ 小别扭：偶尔（约 8%）带点玩闹式推拉 → 张力微升（关系更多层次）
+                    if crate::wechat::random_f64() < 0.08 {
+                        crate::affinity::on_tease();
+                    }
+                    // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
+                    if !text.trim().is_empty() {
+                        crate::detail_memory::extract_from_message(&text, "wechat");
+                    }
+
+                    // 缓存 context_token 用于回复
+                    if !context_token.is_empty() {
+                        let mut cm = inner2.context_map.lock();
+                        if cm.get(&from).map(|c| c != &context_token).unwrap_or(true) {
+                            cm.insert(from.clone(), context_token.clone());
+                            state_dirty = true;
+                        }
+                    }
+                    // ★ 记录最近聊天的用户（主动聊天目标），非凌晨消息都会更新
+                    {
+                        use chrono::Timelike;
+                        let h = chrono::Local::now().hour();
+                        if h >= 8 && h < 23 {
+                            let changed = inner2
+                                .proactive_target
+                                .lock()
+                                .as_deref()
+                                .map(|t| t != from)
+                                .unwrap_or(true);
+                            if changed {
+                                *inner2.proactive_target.lock() = Some(from.clone());
+                                // ★ 目标用户落盘：重启后主动聊天仍能找到目标（不再丢失）
+                                save_proactive(&inner2);
+                            }
+                        }
+                    }
+
+                    // ★ 消息类型细分：语音转写消息标记为 voice（前端可显示 🔊，AI 回复逻辑不变）
+                    let msg_type_str = if voice_transcript.is_some() {
+                        "voice".to_string()
+                    } else if !images.is_empty() {
+                        "image".to_string()
+                    } else if !attachments.is_empty() {
+                        "file".to_string()
+                    } else {
+                        "text".to_string()
+                    };
+                    let msg = WechatMessage {
+                        msg_id: msg_id.clone(),
+                        from_user: from.clone(),
+                        content: text.clone(),
+                        msg_type: msg_type_str.clone(),
+                        timestamp: now_millis(),
+                        bot_slot: inner2.slot,
+                        context_token: if context_token.is_empty() {
+                            None
                         } else {
-                            text = format!("{}\n{}", q, text);
-                        }
-                    }
+                            Some(context_token)
+                        },
+                        images: if images.is_empty() {
+                            None
+                        } else {
+                            Some(images)
+                        },
+                        attachments: if attachments.is_empty() {
+                            None
+                        } else {
+                            Some(attachments)
+                        },
+                        voice_transcript,
+                    };
+                    // ★ 聊天记录：收到的用户消息写入 D 盘 history.jsonl（dir=from_user 为对方）
+                    append_history(&inner2, &from, &from, &text, &msg_type_str, false, false);
+                    let _ = app2.emit("wechat-message", &msg);
+                    *inner2.msg_count.lock() += 1;
                 }
-                crate::llm::logging::debug(
-                    "wechat",
-                    &format!(
-                        "received msg from={} ctx={} text={} media={}",
-                        from,
-                        if context_token.is_empty() { "NONE" } else { "YES" },
-                        trunc_chars(&text, 50),
-                        images.len() + attachments.len()
-                    )
-                );
-                if text.trim().is_empty() && images.is_empty() && attachments.is_empty() {
-                    continue;
+                // ★ 游标/context_token 有变化 → 落盘（长轮询低频，DPAPI 加密开销可忽略）
+                if state_dirty {
+                    save_account(&inner2).await;
                 }
-
-                // ★ 热聊检测：记录用户最近发言时间（毫秒）。
-                //   用户 30 分钟内回过消息 → 主动聊天进入热聊模式（短间隔续话）；
-                //   长时间没人回 → 自然冷却回普通模式。
-                *inner2.last_user_msg_at.lock() = now_millis();
-
-                // ★ 情绪引擎：主人来消息了 → 愉悦升、孤独降、想念重置（"见到你就好了"）
-                crate::mood::on_user_message();
-                // ★ 驱动力：收到消息 → 渴望联结回落、害怕被遗忘缓解、顽皮升
-                crate::drives::on_user_message();
-                // ★ 人格演化：你的温柔回应让她慢慢变得更安心（OCEAN 极慢演化）
-                if crate::wechat::random_f64() < 0.3 {
-                    crate::persona_traits::evolve(true);
-                }
-                // ★ 关系叙事：记录"你来找我"的瞬间（久别重逢/日常开心）
-                crate::relationship::on_user_reach();
-                // ★ 好感度：你主动来找她 → 好奇升（想知道你说啥）、信任微升
-                crate::affinity::on_user_message();
-                // ★ 深聊：消息较长（>80 字）说明在认真聊 → 信任、亲密明显升；
-                //   特别长（>200 字）是倾诉心事 → 强烈升
-                let len_chars = text.chars().count();
-                if len_chars > 200 {
-                    crate::affinity::on_deep_talk_heavy();
-                } else if len_chars > 80 {
-                    crate::affinity::on_deep_talk();
-                }
-                // ★ 小别扭：偶尔（约 8%）带点玩闹式推拉 → 张力微升（关系更多层次）
-                if crate::wechat::random_f64() < 0.08 {
-                    crate::affinity::on_tease();
-                }
-                // ★ 细节记忆抽取：主人消息里值得记住的事（"我不吃香菜"→ 记下）
-                if !text.trim().is_empty() {
-                    crate::detail_memory::extract_from_message(&text, "wechat");
-                }
-
-                // 缓存 context_token 用于回复
-                if !context_token.is_empty() {
-                    let mut cm = inner2.context_map.lock();
-                    if cm.get(&from).map(|c| c != &context_token).unwrap_or(true) {
-                        cm.insert(from.clone(), context_token.clone());
-                        state_dirty = true;
-                    }
-                }
-                // ★ 记录最近聊天的用户（主动聊天目标），非凌晨消息都会更新
-                {
-                    use chrono::Timelike;
-                    let h = chrono::Local::now().hour();
-                    if h >= 8 && h < 23 {
-                        let changed = inner2
-                            .proactive_target
-                            .lock()
-                            .as_deref()
-                            .map(|t| t != from)
-                            .unwrap_or(true);
-                        if changed {
-                            *inner2.proactive_target.lock() = Some(from.clone());
-                            // ★ 目标用户落盘：重启后主动聊天仍能找到目标（不再丢失）
-                            save_proactive(&inner2);
-                        }
-                    }
-                }
-
-                // ★ 消息类型细分：语音转写消息标记为 voice（前端可显示 🔊，AI 回复逻辑不变）
-                let msg_type_str = if voice_transcript.is_some() {
-                    "voice".to_string()
-                } else if !images.is_empty() {
-                    "image".to_string()
-                } else if !attachments.is_empty() {
-                    "file".to_string()
-                } else {
-                    "text".to_string()
-                };
-                let msg = WechatMessage {
-                    msg_id: msg_id.clone(),
-                    from_user: from.clone(),
-                    content: text.clone(),
-                    msg_type: msg_type_str.clone(),
-                    timestamp: now_millis(),
-                    bot_slot: inner2.slot,
-                    context_token: if context_token.is_empty() {
-                        None
-                    } else {
-                        Some(context_token)
-                    },
-                    images: if images.is_empty() { None } else { Some(images) },
-                    attachments: if attachments.is_empty() {
-                        None
-                    } else {
-                        Some(attachments)
-                    },
-                    voice_transcript,
-                };
-                // ★ 聊天记录：收到的用户消息写入 D 盘 history.jsonl（dir=from_user 为对方）
-                append_history(&inner2, &from, &from, &text, &msg_type_str, false, false);
-                let _ = app2.emit("wechat-message", &msg);
-                *inner2.msg_count.lock() += 1;
             }
-            // ★ 游标/context_token 有变化 → 落盘（长轮询低频，DPAPI 加密开销可忽略）
-            if state_dirty {
-                save_account(&inner2).await;
-            }
-        }
         };
         // ★ panic 兜底：循环内部异常不再静默掉线（tokio 任务 panic 会静默终止），
         //   记录日志并通知前端，避免「UI 显示已连接实则停止收消息」。
@@ -2449,16 +2588,25 @@ async fn start_getupdates_loop(inner: &Arc<WechatInner>, app: AppHandle) {
 fn time_desc_now() -> String {
     use chrono::{Datelike, Local, Timelike};
     let now = Local::now();
-    let wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][now.weekday().num_days_from_sunday() as usize];
+    let wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        [now.weekday().num_days_from_sunday() as usize];
     let h = now.hour();
-    let part = if h < 5 { "凌晨" } else if h < 8 { "清晨" } else if h < 12 { "上午" } else if h < 14 { "中午" } else if h < 18 { "下午" } else if h < 23 { "晚上" } else { "深夜" };
-    format!(
-        "当前时间：{}，{} {}点{:02}分",
-        wd,
-        part,
-        h,
-        now.minute()
-    )
+    let part = if h < 5 {
+        "凌晨"
+    } else if h < 8 {
+        "清晨"
+    } else if h < 12 {
+        "上午"
+    } else if h < 14 {
+        "中午"
+    } else if h < 18 {
+        "下午"
+    } else if h < 23 {
+        "晚上"
+    } else {
+        "深夜"
+    };
+    format!("当前时间：{}，{} {}点{:02}分", wd, part, h, now.minute())
 }
 
 /// 伪随机：基于系统时间纳秒 + 原子计数混合（仅作为真随机失败时的兜底，不再是主动聊天的熵源）。
@@ -2553,7 +2701,13 @@ fn proactive_wait_secs(inner: &Arc<WechatInner>) -> u64 {
     };
     // OCEAN 外向性调制：外向的她更愿主动（间隔更短），内向的偏等待（间隔更长）
     let extro = crate::persona_traits::proactiveness();
-    let extro_factor = if extro >= 0.6 { 0.7 } else if extro <= 0.4 { 1.5 } else { 1.0 };
+    let extro_factor = if extro >= 0.6 {
+        0.7
+    } else if extro <= 0.4 {
+        1.5
+    } else {
+        1.0
+    };
     let eff_min = ((min as f64) * activity * extro_factor).max(1.0) as u64;
     let eff_max = ((max as f64) * activity * extro_factor).max((eff_min as f64) + 1.0) as u64;
     let lambda = ((eff_min + eff_max) as f64) / 2.0;
@@ -2635,7 +2789,12 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         }
         // 未开启 / 未登录 / 无目标 → 跳过（重置随机等待）
         if !inner.proactive_enabled.load(Ordering::SeqCst)
-            || inner.token.lock().as_ref().map(|t| t.is_empty()).unwrap_or(true)
+            || inner
+                .token
+                .lock()
+                .as_ref()
+                .map(|t| t.is_empty())
+                .unwrap_or(true)
         {
             crate::llm::logging::debug(
                 "wechat",
@@ -2661,7 +2820,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                 // ★ 修复：目标为空时从聊天记录恢复最近聊过的人，并真正写入
                 //   inner.proactive_target（旧实现只判断不写，导致"已恢复"却永远无目标空转）
                 if let Some(peer) = last_history_peer(&inner) {
-                    crate::llm::logging::debug("wechat", &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer));
+                    crate::llm::logging::debug(
+                        "wechat",
+                        &format!("slot{} 主动聊天目标从历史恢复: {}", inner.slot, peer),
+                    );
                     *inner.proactive_target.lock() = Some(peer.clone());
                     peer
                 } else {
@@ -2674,7 +2836,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         if !inner.is_allowed(&target) {
             crate::llm::logging::debug(
                 "wechat",
-                &format!("slot{} 主动聊天目标不在白名单，跳过: {}", inner.slot, target),
+                &format!(
+                    "slot{} 主动聊天目标不在白名单，跳过: {}",
+                    inner.slot, target
+                ),
             );
             wait_secs = proactive_wait_secs(&inner);
             continue;
@@ -2683,7 +2848,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         use chrono::Timelike;
         let hour = chrono::Local::now().hour();
         if hour < 8 || hour >= 23 {
-            crate::llm::logging::debug("wechat", &format!("slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour));
+            crate::llm::logging::debug(
+                "wechat",
+                &format!("slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour),
+            );
             crate::llm::logging::debug(
                 "wechat",
                 &format!("slot{} 当前 {} 点，深夜时段不主动聊天", inner.slot, hour),
@@ -2729,7 +2897,9 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                     // ★ 存在感统计只计"主动聊天发出的消息"（proactive=true），
                     //   手动发送/自动回复不参与惩罚
                     r.get("fromBot").and_then(|v| v.as_bool()).unwrap_or(false)
-                        && r.get("proactive").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && r.get("proactive")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                 })
                 .count();
             let user_count = recent.len().saturating_sub(bot_count);
@@ -2745,7 +2915,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                     "wechat",
                     &format!(
                         "slot{} 存在感惩罚：最近 {} 条全为 AI 发言，退避 {} 分钟（连续 {} 轮）",
-                        inner.slot, recent.len(), backoff, idle
+                        inner.slot,
+                        recent.len(),
+                        backoff,
+                        idle
                     ),
                 );
                 wait_secs = backoff * 60;
@@ -2868,14 +3041,20 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                     Some(c) => {
                         crate::llm::logging::debug(
                             "wechat",
-                            &format!("slot{} 引擎配置从设置兜底恢复: model={}", inner.slot, c.model)
+                            &format!(
+                                "slot{} 引擎配置从设置兜底恢复: model={}",
+                                inner.slot, c.model
+                            ),
                         );
                         c
                     }
                     None => {
                         crate::llm::logging::debug(
                             "wechat",
-                            &format!("slot{} 引擎未配置（设置中也无 Key），跳过主动聊天", inner.slot)
+                            &format!(
+                                "slot{} 引擎未配置（设置中也无 Key），跳过主动聊天",
+                                inner.slot
+                            ),
                         );
                         wait_secs = proactive_wait_secs(&inner);
                         continue;
@@ -2991,10 +3170,29 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         };
         // ★ 好感度注入（六维 affinity · 关系亲疏与语气）：决定说话的语气深浅与亲密程度
         let affinity_raw = crate::affinity::affinity_context_for_prompt();
-        let affinity_note = if affinity_raw.is_empty() { String::new() } else { format!("{}\n\n", affinity_raw) };
+        let affinity_note = if affinity_raw.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", affinity_raw)
+        };
         // traits_raw 可能为空（五维都不极端时），空则跳过不拼
-        let traits_note = if traits_raw.is_empty() { String::new() } else { format!("{}\n\n", traits_raw) };
-        let soul_note = format!("{}{}{}\n\n{}{}{}\n\n{}{}{}", affinity_note, traits_note, drives_raw, mood_note, details_note, jealousy_note, book_note, dream_note, relationship_note);
+        let traits_note = if traits_raw.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", traits_raw)
+        };
+        let soul_note = format!(
+            "{}{}{}\n\n{}{}{}\n\n{}{}{}",
+            affinity_note,
+            traits_note,
+            drives_raw,
+            mood_note,
+            details_note,
+            jealousy_note,
+            book_note,
+            dream_note,
+            relationship_note
+        );
         // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
         //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
         let vibe = {
@@ -3069,7 +3267,10 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                 if !should_send {
                     crate::llm::logging::debug(
                         "wechat",
-                        &format!("slot{} AI 自主决策：本轮不主动发（shouldSend=false）", inner.slot),
+                        &format!(
+                            "slot{} AI 自主决策：本轮不主动发（shouldSend=false）",
+                            inner.slot
+                        ),
                     );
                     wait_secs = proactive_wait_secs(&inner);
                     continue;
@@ -3133,7 +3334,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
                                 target,
                                 trunc_chars(&text, 60),
                                 wait_secs / 60
-                            )
+                            ),
                         );
                         let _ = app.emit(
                             "wechat-bot-status",
@@ -3235,7 +3436,12 @@ pub fn wechat_set_proactive(
         }
     } else if inner.proactive_target.lock().is_none() {
         // 未指定目标：取最近聊过的人（context_map 中时间最近的一个）
-        let last = inner.context_map.lock().iter().next().map(|(k, _)| k.clone());
+        let last = inner
+            .context_map
+            .lock()
+            .iter()
+            .next()
+            .map(|(k, _)| k.clone());
         *inner.proactive_target.lock() = last;
     }
     // ★ 持久化：写入 slot{N}/proactive.json，软件重启后自动恢复上次设置
@@ -3357,12 +3563,18 @@ pub async fn wechat_qr_status(
     match status.as_str() {
         "confirmed" => {
             let token = resp["bot_token"].as_str().unwrap_or_default().to_string();
-            let bot_id = resp["ilink_bot_id"].as_str().unwrap_or_default().to_string();
+            let bot_id = resp["ilink_bot_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let mut base_url = resp["baseurl"].as_str().unwrap_or_default().to_string();
             if base_url.is_empty() {
                 base_url = ILINK_BASE_URL.to_string();
             }
-            let user_id = resp["ilink_user_id"].as_str().unwrap_or_default().to_string();
+            let user_id = resp["ilink_user_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if token.is_empty() || bot_id.is_empty() {
                 return Err("登录确认但缺少 bot_token/ilink_bot_id".to_string());
             }
@@ -3438,9 +3650,7 @@ pub async fn wechat_refresh_qr(
 
 /// 登出微信（清除本地 token）
 #[tauri::command]
-pub async fn wechat_logout(
-    state: tauri::State<'_, WechatBotState>,
-) -> AppResult<()> {
+pub async fn wechat_logout(state: tauri::State<'_, WechatBotState>) -> AppResult<()> {
     let inner = state.bot();
     wechat_bot_stop_inner(&inner);
     *inner.token.lock() = None;
@@ -3501,9 +3711,7 @@ pub async fn wechat_bot_start(
 
 /// 停止微信 Bot
 #[tauri::command]
-pub fn wechat_bot_stop(
-    state: tauri::State<'_, WechatBotState>,
-) -> AppResult<()> {
+pub fn wechat_bot_stop(state: tauri::State<'_, WechatBotState>) -> AppResult<()> {
     let inner = state.bot();
     wechat_bot_stop_inner(&inner);
     Ok(())
@@ -3577,7 +3785,10 @@ pub async fn wechat_bot_reply(
     // ★ 去重检查：同一 msg_id 已处理过（已回复）→ 直接返回，防前端重复调用导致重复回复。
     //   发送成功后才把 msg_id 记入去重环（发送失败可重试，不占去重位）
     if !msg_id.is_empty() && inner.last_msg_ids.lock().contains(&msg_id) {
-        crate::llm::logging::debug("wechat", &format!("slot{} 跳过重复回复 msg_id={}", inner.slot, msg_id));
+        crate::llm::logging::debug(
+            "wechat",
+            &format!("slot{} 跳过重复回复 msg_id={}", inner.slot, msg_id),
+        );
         return Ok(());
     }
     // ★ 判断用户是否明确要求字数/长文：查该用户最近一条消息内容。
@@ -3594,9 +3805,16 @@ pub async fn wechat_bot_reply(
             .map(|c| {
                 // 用户消息里出现"写X字 / 多少字 / 长文 / 详细 / 完整 / 说明 / 分析 / 总结"等
                 // 长文意图词 → 视为要求详细回复
-                c.contains("字") || c.contains("长文") || c.contains("详细") || c.contains("完整")
-                    || c.contains("分析") || c.contains("总结") || c.contains("说明")
-                    || c.contains("介绍") || c.contains("怎么写") || c.contains("给我写")
+                c.contains("字")
+                    || c.contains("长文")
+                    || c.contains("详细")
+                    || c.contains("完整")
+                    || c.contains("分析")
+                    || c.contains("总结")
+                    || c.contains("说明")
+                    || c.contains("介绍")
+                    || c.contains("怎么写")
+                    || c.contains("给我写")
                     || c.contains("帮我写")
             })
             .unwrap_or(false)
@@ -3608,7 +3826,10 @@ pub async fn wechat_bot_reply(
         let chars: Vec<char> = content.trim().chars().collect();
         if !user_asked_long && chars.len() > 200 {
             let head: String = chars.iter().take(120).collect();
-            format!("{}……（内容较长，已精简，需要完整版跟我说一声）", head.trim_end_matches(|c: char| c == '，' || c == ',' || c == '。' || c == '.'))
+            format!(
+                "{}……（内容较长，已精简，需要完整版跟我说一声）",
+                head.trim_end_matches(|c: char| c == '，' || c == ',' || c == '。' || c == '.')
+            )
         } else {
             content.trim().to_string()
         }
@@ -3639,11 +3860,18 @@ pub async fn wechat_bot_reply(
         if let Some(ref iv) = inner_voice {
             rec["innerVoice"] = serde_json::Value::String(iv.clone());
         }
-        let line = format!("{}
-", rec.to_string());
+        let line = format!(
+            "{}
+",
+            rec.to_string()
+        );
         use std::io::Write;
         if let Some(path) = history_path_of(&inner) {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = f.write_all(line.as_bytes());
             }
         }
@@ -3685,7 +3913,15 @@ pub async fn wechat_send_image(
     let inner = state.bot();
     let ctx = context_token.or_else(|| inner.context_map.lock().get(&to_user).cloned());
     send_image(&inner, &to_user, &image_path, ctx.as_deref()).await?;
-    append_history(&inner, &to_user, &to_user, &image_path, "image", true, false);
+    append_history(
+        &inner,
+        &to_user,
+        &to_user,
+        &image_path,
+        "image",
+        true,
+        false,
+    );
     Ok(())
 }
 
@@ -3694,13 +3930,13 @@ pub async fn wechat_send_image(
 pub fn wechat_bot_status(state: tauri::State<'_, WechatBotState>) -> AppResult<serde_json::Value> {
     let inner = state.bot();
     let bot_id = inner.bot_id.lock().clone().unwrap_or_default();
-    let logged = inner.token.lock().as_ref().map(|t| !t.is_empty()).unwrap_or(false);
-    let persona_len = inner
-        .persona
+    let logged = inner
+        .token
         .lock()
         .as_ref()
-        .map(|p| p.len())
-        .unwrap_or(0);
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    let persona_len = inner.persona.lock().as_ref().map(|p| p.len()).unwrap_or(0);
     let persona_text = inner.persona.lock().clone().unwrap_or_default();
     // ★ 5 秒轮询接口：只解析最近 200 条，避免 history.jsonl 无界增长拖垮轮询
     let history_count = read_history_limit(&inner, 200).len();
@@ -3785,13 +4021,21 @@ pub fn wechat_soul_context() -> String {
         "【你的心情（这是你真实的心情状态，说话时让它自然地流露，不要刻意表演，也不要每一句都提到它）】\n{}",
         mood_raw
     );
-    if details_raw.is_empty() {
-        mood_note
-    } else {
-        format!("{}\n\n{}", mood_note, details_raw)
+    let mut out = mood_note;
+    if !details_raw.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&details_raw);
     }
+    // ★ 话题聚类：低频（10%）注入"最近生活的主题"，让她在回复里能自然带出
+    //   "我最近总在想 X"这样的跨时间连贯感（soul-protocol dream cycle 子集）。
+    if crate::wechat::random_f64() < 0.10 {
+        if let Some(c) = crate::life_narrative::topic_clusters(14) {
+            out.push_str("\n\n【你最近生活的主题（自然聊天时可以偶尔带出，不要每次都提）】\n");
+            out.push_str(&c);
+        }
+    }
+    out
 }
-
 /// 灵魂全景快照：一次性返回八层状态（供前端"灵魂面板"展示）。
 #[tauri::command]
 pub fn wechat_soul_snapshot() -> serde_json::Value {
@@ -3925,9 +4169,7 @@ pub fn wechat_set_persona(
 
 /// 读取微信聊天记录（D 盘 history.jsonl，供前端展示/导出）
 #[tauri::command]
-pub fn wechat_history(
-    state: tauri::State<'_, WechatBotState>,
-) -> AppResult<serde_json::Value> {
+pub fn wechat_history(state: tauri::State<'_, WechatBotState>) -> AppResult<serde_json::Value> {
     let inner = state.bot();
     let recs = read_history(&inner);
     Ok(serde_json::json!({ "count": recs.len(), "records": recs }))
@@ -3938,8 +4180,7 @@ pub fn wechat_history(
 /// 前端需用本命令把它渲染成二维码 SVG（与旧版 clawdesk 一致）。
 #[tauri::command]
 pub fn mobile_qr_svg(text: String) -> AppResult<String> {
-    let code = qrcode::QrCode::new(text.as_bytes())
-        .map_err(|e| format!("二维码生成失败: {e}"))?;
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(|e| format!("二维码生成失败: {e}"))?;
     let svg = code
         .render::<qrcode::render::svg::Color>()
         .min_dimensions(200, 200)
@@ -3948,7 +4189,6 @@ pub fn mobile_qr_svg(text: String) -> AppResult<String> {
         .build();
     Ok(svg)
 }
-
 
 #[cfg(test)]
 mod dpapi_tests {
