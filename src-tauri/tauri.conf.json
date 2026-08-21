@@ -29,7 +29,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/128x128.png",
@@ -42,8 +44,12 @@
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false,
-        "languages": ["SimpChinese", "English"],
-        "headerImage": "icons/icon.png"
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "headerImage": "icons/installer/installer-header.png",
+        "sidebarImage": "icons/installer/installer-sidebar.png"
       }
     },
     "category": "DeveloperTool",
