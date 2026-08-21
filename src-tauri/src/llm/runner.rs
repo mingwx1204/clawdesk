@@ -560,8 +560,9 @@ pub async fn run_agent_loop(
                                         progress(&AgentProgress::ToolCall(ToolCallProgress {
                                             round: 0,
                                             tool_id,
+                                            // 结束事件不重复携带参数，前端会保留 started 事件的入参。
                                             arguments: Value::Null,
-                                            status: "finished".into(),
+                                            status: if ok { "finished".into() } else { "error".into() },
                                             output: serde_json::json!({ "content": result }),
                                         }));
                                     }

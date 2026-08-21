@@ -466,7 +466,8 @@ function handleProgress(ev: any) {
         const tc: ToolCallInfo = {
           toolId: ev.toolId ?? "",
           arguments: ev.arguments ?? {},
-          status: ev.status === "success" ? "success" : ev.status === "error" ? "error" : "running",
+          // runner 的事件状态是 started/finished，旧 agent 路径使用 running/success/error；统一映射。
+          status: ev.status === "success" || ev.status === "finished" ? "success" : ev.status === "error" ? "error" : "running",
           output: ev.output,
           error: ev.error,
           open: true, // 运行中默认展开；更新时保留用户已收起的选择
@@ -474,7 +475,15 @@ function handleProgress(ev: any) {
         const idx = msg.toolCalls.findIndex((t) => t.toolId === tc.toolId && t.status === "running");
         if (idx >= 0) {
           const prev = msg.toolCalls[idx];
-          msg.toolCalls[idx] = { ...tc, open: prev.open ?? true };
+          // 结束事件可能没有重复携带参数；绝不能用 null/undefined 覆盖已有详情。
+          msg.toolCalls[idx] = {
+            ...prev,
+            ...tc,
+            arguments: ev.arguments ?? prev.arguments,
+            output: ev.output ?? prev.output,
+            error: ev.error ?? prev.error,
+            open: prev.open ?? true,
+          };
         } else {
           // ★ 同一工具多次调用：前一次已结束（success/error）则追加新实例，不覆盖
           msg.toolCalls.push(tc);
