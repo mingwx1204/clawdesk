@@ -921,8 +921,15 @@ async function testReply() {
           </div>
         </div>
 
-        <!-- 中：内置微信聊天界面（会话列表 + 聊天窗 + 输入框） -->
+        <!-- 中：对话工作台（会话列表 + 聊天窗 + 输入框） -->
         <div class="wc-mid">
+          <div class="wc-column-head">
+            <div>
+              <b>💬 对话</b>
+              <span>和她的微信世界保持连续</span>
+            </div>
+            <span class="wc-column-count">{{ chats.length }} 个会话</span>
+          </div>
           <!-- 未登录：先扫码登录该内置微信 -->
           <div v-if="!cur?.loggedIn" class="wc-mid-login">
             <div class="wc-log-title">📱 登录内置微信</div>
@@ -1009,30 +1016,50 @@ async function testReply() {
           </template>
         </div>
 
-        <!-- 右：最近消息 + 聊天记录 -->
+        <!-- 右：观察台（实时消息 + 持久历史） -->
         <div class="wc-right">
-          <div class="wc-log-title">最近消息（{{ messages.length }}）</div>
-          <div class="wc-msgs">
-            <div v-for="m in messages" :key="m.msgId + m.timestamp" class="wc-msg">
-              <div class="wc-msg-meta">
-                <span class="wc-msg-from">{{ m.fromUser.slice(0, 8) }}</span>
-                <span class="wc-msg-time">{{ fmtTs(m.timestamp) }} {{ typeIcon(m.msgType) }}</span>
-              </div>
-              <div class="wc-msg-content">{{ m.content }}</div>
+          <div class="wc-column-head wc-observe-head">
+            <div>
+              <b>👁 观察</b>
+              <span>她正在接收和记住什么</span>
             </div>
-            <p v-if="!messages.length" class="wc-log-empty">暂无消息</p>
+            <span class="wc-live-pill"><i></i> LIVE</span>
           </div>
-          <div class="wc-log-title" style="border-top: 1px solid var(--glass-border);">📜 D 盘聊天记录（{{ historyList.length }} 条）</div>
-          <div class="wc-msgs">
-            <div v-for="(h, i) in historyList.slice(-20).reverse()" :key="i" class="wc-msg">
-              <div class="wc-msg-meta">
-                <span class="wc-msg-from">{{ h.fromUser === h.toUser ? h.fromUser.slice(0, 8) : "我" }}</span>
-                <span class="wc-msg-time">{{ fmtTs(h.timestamp) }} · {{ typeIcon(h.msgType) }}</span>
-              </div>
-              <div class="wc-msg-content">{{ String(h.content || "").slice(0, 120) }}</div>
+
+          <section class="wc-observe-section wc-observe-live">
+            <div class="wc-section-title">
+              <span>⚡ 最近消息</span>
+              <em>{{ messages.length }}</em>
             </div>
-            <p v-if="!historyList.length" class="wc-log-empty">暂无聊天记录</p>
-          </div>
+            <div class="wc-msgs">
+              <div v-for="m in messages" :key="m.msgId + m.timestamp" class="wc-msg wc-msg-live">
+                <div class="wc-msg-meta">
+                  <span class="wc-msg-from">{{ m.fromUser.slice(0, 8) }}</span>
+                  <span class="wc-msg-time">{{ fmtTs(m.timestamp) }} {{ typeIcon(m.msgType) }}</span>
+                </div>
+                <div class="wc-msg-content">{{ m.content }}</div>
+              </div>
+              <p v-if="!messages.length" class="wc-log-empty">等待微信消息进入…</p>
+            </div>
+          </section>
+
+          <section class="wc-observe-section wc-observe-history">
+            <div class="wc-section-title">
+              <span>📜 长期记忆 · D 盘</span>
+              <em>{{ historyList.length }}</em>
+            </div>
+            <div class="wc-msgs">
+              <div v-for="(h, i) in historyList.slice(-20).reverse()" :key="i" class="wc-msg">
+                <div class="wc-msg-meta">
+                  <span class="wc-msg-from">{{ h.fromUser === h.toUser ? h.fromUser.slice(0, 8) : "我" }}</span>
+                  <span class="wc-msg-time">{{ fmtTs(h.timestamp) }} · {{ typeIcon(h.msgType) }}</span>
+                </div>
+                <div class="wc-msg-content">{{ String(h.content || "").slice(0, 120) }}</div>
+                <div v-if="h.innerVoice" class="wc-history-voice">💭 有一段心里话</div>
+              </div>
+              <p v-if="!historyList.length" class="wc-log-empty">暂无聊天记录</p>
+            </div>
+          </section>
         </div>
       </div>
     </div>
@@ -1129,8 +1156,14 @@ async function testReply() {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--color-surface);
+  background: linear-gradient(180deg, var(--color-surface), rgba(17, 28, 58, 0.72));
 }
+.wc-column-head { min-height: 54px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--glass-border); background: rgba(15, 23, 42, 0.22); }
+.wc-column-head > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wc-column-head b { color: var(--color-text); font-size: 13px; letter-spacing: .02em; }
+.wc-column-head span { color: var(--color-text-muted); font-size: 10px; }
+.wc-column-count { flex-shrink: 0; padding: 3px 7px; border: 1px solid var(--glass-border); border-radius: 999px; color: var(--color-text-secondary) !important; }
+
 .wc-chat-list {
   height: 34%;
   border-bottom: 1px solid var(--glass-border);
@@ -1280,13 +1313,19 @@ async function testReply() {
   margin: 0;
   line-height: 1.6;
 }
-.wc-right {
-  flex: 1;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
+.wc-right { flex: 1; padding: 0; display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: rgba(8, 15, 35, 0.28); }
+.wc-observe-head { flex-shrink: 0; }
+.wc-live-pill { display: inline-flex; align-items: center; gap: 5px; color: #86efac !important; font-size: 9px !important; letter-spacing: .08em; }
+.wc-live-pill i { width: 6px; height: 6px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px #34d399; }
+.wc-observe-section { min-height: 0; display: flex; flex-direction: column; padding: 10px 12px; }
+.wc-observe-live { flex: 0 0 42%; border-bottom: 1px solid var(--glass-border); }
+.wc-observe-history { flex: 1; }
+.wc-section-title { display: flex; align-items: center; justify-content: space-between; color: var(--color-text-secondary); font-size: 11px; margin-bottom: 6px; }
+.wc-section-title em { min-width: 18px; padding: 2px 5px; border-radius: 999px; background: var(--glass-border); color: var(--color-text); font-size: 10px; font-style: normal; text-align: center; }
+.wc-observe-section .wc-msgs { padding-top: 0; }
+.wc-msg-live { border-left: 2px solid var(--color-accent); }
+.wc-history-voice { margin-top: 5px; color: rgba(196, 180, 252, .78); font-size: 10px; font-style: italic; }
+
 .wc-info {
   background: var(--color-card);
   border: 1px solid var(--glass-border);
