@@ -2916,6 +2916,26 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         } else {
             "（你们还没有主动聊过）".to_string()
         };
+        // ★ 微醋意（playful jealousy）：对方很久没主动找她时，偶尔带点
+        //   俏皮的嗔怪，而不是每次都是一本正经的关心。真人伴侣被冷落久了，
+        //   会半开玩笑地"醋"一下。仅当用户超过 2 天没消息、且 20% 概率触发。
+        let jealousy_note = {
+            let silence_h = read_history_limit(&inner, 200)
+                .iter()
+                .rev()
+                .find(|r| !r.get("fromBot").and_then(|v| v.as_bool()).unwrap_or(true))
+                .and_then(|r| r.get("timestamp").and_then(|t| t.as_u64()))
+                .map(|last_ts| now_millis().saturating_sub(last_ts) / 3_600_000)
+                .unwrap_or(0);
+            if silence_h >= 48 && crate::wechat::random_f64() < 0.20 {
+                format!(
+                    "【一点嗔怪】对方已经 {} 小时没怎么理你了。你心里有三分惦记、一分小醋意——这是真的情绪，不是表演：可以在消息里带一点「你还知道找我呀」之类俏皮的嗔怪，但不要过头，轻轻一句就好，后面还是要柔软下来。",
+                    silence_h
+                )
+            } else {
+                String::new()
+            }
+        };
         // ★ 生活状态注入（世界线 · 一生记忆）：AI 此刻在做什么 + 今日轨迹 +
         //   近期记忆 + 出生日期，让消息自带"正在生活"的真实感，且跨天连贯。
         //   ★ 人设兼容：生活状态是"世界日常节奏"背景而非硬性规定——
@@ -2974,7 +2994,7 @@ async fn proactive_loop(inner: Arc<WechatInner>, app: AppHandle) {
         let affinity_note = if affinity_raw.is_empty() { String::new() } else { format!("{}\n\n", affinity_raw) };
         // traits_raw 可能为空（五维都不极端时），空则跳过不拼
         let traits_note = if traits_raw.is_empty() { String::new() } else { format!("{}\n\n", traits_raw) };
-        let soul_note = format!("{}{}{}\n\n{}{}\n\n{}{}{}", affinity_note, traits_note, drives_raw, mood_note, details_note, book_note, dream_note, relationship_note);
+        let soul_note = format!("{}{}{}\n\n{}{}{}\n\n{}{}{}", affinity_note, traits_note, drives_raw, mood_note, details_note, jealousy_note, book_note, dream_note, relationship_note);
         // ★ 由头多样化（概率化选择器，借鉴 proactive-sebastian）：
         //   真人聊天不是每次都用同一种"想聊天"的由头，偶尔是分享、偶尔是关心、偶尔是单纯想你。
         let vibe = {
