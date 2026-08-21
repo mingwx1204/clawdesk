@@ -4088,6 +4088,9 @@ pub fn wechat_soul_snapshot() -> serde_json::Value {
             "streak": crate::ghost::ghost_snapshot().ghost_streak,
             "last_ghost_ms": crate::ghost::ghost_snapshot().last_ghost_ms,
         },
+        "specialDay": crate::living_state::special_day_note(),
+        "topics": crate::life_narrative::topic_clusters(14),
+        "lifetime": crate::living_state::lifetime_desc(),
         "affinity": {
             "warmth": crate::affinity::affinity_snapshot().warmth,
             "trust": crate::affinity::affinity_snapshot().trust,

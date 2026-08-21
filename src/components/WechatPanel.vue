@@ -90,7 +90,7 @@ const chats = ref<{ dir: string; last: string; lastTime: number; lastType: strin
 /** 当前打开的会话联系人 */
 const activeChat = ref("");
 /** 当前会话消息（按时间正序） */
-const chatMsgs = ref<{ fromBot: boolean; content: string; msgType: string; timestamp: number; innerVoice?: string }[]>([]);
+const chatMsgs = ref<{ fromBot: boolean; content: string; msgType: string; timestamp: number; innerVoice?: string; _ivOpen?: boolean }[]>([]);
 const chatInput = ref("");
 const chatSending = ref(false);
 const chatTip = ref("");
@@ -139,6 +139,7 @@ function rebuildChatMsgs(): void {
       msgType: rec.msgType ?? "text",
       timestamp: Number(rec.timestamp ?? 0),
       innerVoice: typeof rec.innerVoice === "string" ? rec.innerVoice : undefined,
+      _ivOpen: false, // 内言▫气泡默认折叠
     }));
 }
 
@@ -675,6 +676,12 @@ async function testReply() {
             <div class="wc-soul" v-if="soulSnap">
               <button class="wc-soul-toggle" @click="toggleSoul">{{ soulOpen ? '▾' : '▸' }} 💗 灵魂面板</button>
               <div v-show="soulOpen" class="wc-soul-body">
+                <!-- 今日灵魂状态：仪式感 + 一生 + 生活主题 -->
+                <div v-if="soulSnap.specialDay || soulSnap.topics || soulSnap.lifetime" class="wc-soul-banner">
+                  <div v-if="soulSnap.specialDay" class="wc-soul-banner-day">🎂 {{ soulSnap.specialDay }}</div>
+                  <div v-if="soulSnap.lifetime" class="wc-soul-text">{{ soulSnap.lifetime }}</div>
+                  <div v-if="soulSnap.topics" class="wc-soul-text wc-soul-topics">🧵 {{ soulSnap.topics }}</div>
+                </div>
                 <!-- OCEAN 人格底色 -->
                 <div class="wc-soul-card">
                   <div class="wc-soul-title">🧬 人格底色（OCEAN）<span class="wc-anchor-tag" v-if="soulSnap.anchor">锚点 ±{{ Math.round(soulSnap.anchor.range*100) }}%</span></div>
@@ -961,7 +968,11 @@ async function testReply() {
               <div class="wc-bubbles">
                 <div v-for="(m, i) in chatMsgs" :key="i" class="wc-bubble-row" :class="m.fromBot ? 'me' : 'them'">
                   <div class="wc-bubble-col" :class="m.fromBot ? 'me' : 'them'">
-                    <div v-if="m.innerVoice" class="wc-inner-voice">💭 {{ m.innerVoice }}</div>
+                    <div v-if="m.innerVoice" class="wc-inner-voice" @click="m._ivOpen = !m._ivOpen">
+                      <span class="wc-iv-icon">💭</span>
+                      <span v-if="m._ivOpen" class="wc-iv-text">{{ m.innerVoice }}</span>
+                      <span v-else class="wc-iv-hint">心里话 · 点开看看</span>
+                    </div>
                     <div class="wc-bubble" :title="fmtTs(m.timestamp)">{{ m.content }}</div>
                   </div>
                 </div>
@@ -1187,7 +1198,11 @@ async function testReply() {
 .wc-bubble-col { display: flex; flex-direction: column; max-width: 82%; }
 .wc-bubble-col.me { align-items: flex-end; }
 .wc-bubble-col.them { align-items: flex-start; }
-.wc-inner-voice { font-size: 11px; color: var(--color-text-muted); font-style: italic; padding: 3px 11px 0; opacity: 0.75; word-break: break-word; }
+.wc-inner-voice { font-size: 11px; padding: 4px 11px; margin-bottom: 2px; border-radius: 8px; background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.15); cursor: pointer; user-select: none; transition: background 0.2s; display: flex; align-items: flex-start; gap: 5px; }
+.wc-inner-voice:hover { background: rgba(139, 92, 246, 0.14); }
+.wc-iv-icon { flex-shrink: 0; font-size: 13px; }
+.wc-iv-text { color: rgba(196, 180, 252, 0.9); font-style: italic; word-break: break-word; line-height: 1.5; }
+.wc-iv-hint { color: var(--color-text-muted); font-style: italic; opacity: 0.6; }
 .wc-bubble {
   max-width: 82%;
   padding: 7px 11px;
@@ -1497,6 +1512,9 @@ async function testReply() {
   text-align: left;
 }
 .wc-soul-toggle:hover { color: #fab5d6; }
+.wc-soul-banner { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: var(--glass-card); border: 1px solid var(--glass-border); }
+.wc-soul-banner-day { font-size: 13px; font-weight: 600; color: var(--color-accent); margin-bottom: 4px; }
+.wc-soul-topics { color: var(--color-text-secondary); font-style: italic; margin-top: 2px; }
 .wc-soul-body {
   margin-top: 6px;
   max-height: 480px;
